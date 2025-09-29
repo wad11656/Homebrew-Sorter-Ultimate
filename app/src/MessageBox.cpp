@@ -153,41 +153,50 @@ void MessageBox::render(intraFont* font) {
         }
     }
 
-    // ---- Progress UI (new) ----
+    // ---- Progress UI ----
     if (_progEnabled) {
-        // second line: per-file message centered (trim to ~35 like the homebrew)
         if (font) {
-            std::string trimmed = mbTrim35(_progMsg);
             intraFontSetStyle(font, _textScale, COLOR_TEXT, 0, 0.0f, INTRAFONT_ALIGN_CENTER);
             float cx = _x + _w * 0.5f;
-            float cy = (float)(y + 8); // a little gap after the title lines
-            intraFontPrint(font, cx, cy, trimmed.c_str());
-            y = (int)(cy + (int)(24.0f * _textScale + 0.5f)); // advance for bar
+
+            // Line 1: game title (headline), if any
+            if (!_progTitle.empty()) {
+                std::string t = mbTrim35(_progTitle);
+                float cy = (float)(y + 6);
+                intraFontPrint(font, cx, cy, t.c_str());
+                y = (int)(cy + (int)(22.0f * _textScale + 0.5f));
+            }
+
+            // Line 2: filename (detail), if any
+            if (!_progDetail.empty()) {
+                std::string d = mbTrim35(_progDetail);
+                float cy = (float)(y + 2);
+                intraFontPrint(font, cx, cy, d.c_str());
+                y = (int)(cy + (int)(22.0f * _textScale + 0.5f));
+            } else {
+                // keep some breathing room even if no detail
+                y += (int)(16.0f * _textScale + 0.5f);
+            }
         }
 
-        // progress bar (fixed 4px tall; ~318px wide like the homebrew)
-        const int barH = 4;
-        const int barW = (innerW > 30) ? (innerW - 30) : innerW; // gives ~318px with your defaults
-        const int barX = innerX + (innerW - barW) / 2;
-        const int barY = y + 6;
+        // progress bar
+        const int barH = 12;
+        int barW = innerW;
+        int barX = innerX;
+        int barY = y + 6;
 
-        // background
         mbDrawRect(barX, barY, barW, barH, PROG_BAR_BG);
 
-        // filled portion
-        float frac = 0.0f;
-        if (_progSize > 0) {
-            frac = (float)(_progOffset <= _progSize ? _progOffset : _progSize) / (float)_progSize;
-            if (frac < 0.0f) frac = 0.0f;
-            if (frac > 1.0f) frac = 1.0f;
-        }
-        int fillW = (int)(barW * frac + 0.5f);
+        // Fill
+        uint64_t sz = (_progSize == 0) ? 1 : _progSize;
+        uint64_t off = _progOffset;
+        if (off > sz) off = sz;
+        int fillW = (int)((barW * (double)off) / (double)sz + 0.5);
         if (fillW > 0) mbDrawRect(barX, barY, fillW, barH, PROG_BAR_FILL);
 
-        // When progress is shown, we intentionally DO NOT draw the bottom icon/"OK"
-        // to keep the dialog minimal and avoid implying that CROSS cancels the copy.
-        return;
+        y = barY + barH + 6;
     }
+
 
     // ---- Original bottom icon + "OK" (only when not in progress mode) ----
     const float iconH = (float)_iconTargetH;
@@ -258,18 +267,27 @@ void MessageBox::render(intraFont* font) {
 // ---- New: progress API impl ----
 void MessageBox::showProgress(const char* fileMessage, uint64_t offset, uint64_t size) {
     _progEnabled = true;
-    _progMsg     = fileMessage ? fileMessage : "";
+    _progDetail  = (fileMessage ? fileMessage : "");
     _progOffset  = offset;
     _progSize    = (size == 0) ? 1 : size;
 }
+
 void MessageBox::updateProgress(uint64_t offset, uint64_t size, const char* fileMessage) {
     _progOffset = offset;
     _progSize   = (size == 0) ? 1 : size;
-    if (fileMessage) _progMsg = fileMessage;
+    if (fileMessage) _progDetail = fileMessage;
 }
+
+void MessageBox::setProgressTitle(const char* title) {
+    _progTitle = title ? title : "";
+    _progEnabled = true; // ensure progress UI shows when we set a title first
+}
+
 void MessageBox::hideProgress() {
     _progEnabled = false;
-    _progMsg.clear();
+    _progTitle.clear();
+    _progDetail.clear();
     _progOffset = 0;
     _progSize   = 1;
 }
+

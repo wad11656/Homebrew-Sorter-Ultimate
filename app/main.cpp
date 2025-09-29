@@ -1067,6 +1067,66 @@ static Texture* loadIsoIconPNG(const std::string& isoPath) {
     return texLoadPNGFromMemory(png.data(), (int)png.size());
 }
 
+// Returns how many "games" are inside the CAT_ across ISO and GAME roots on the given device.
+// Games = ISO-like files (.iso/.cso/.zso/.dax/.jso) in ISO roots,
+//      or folders under PSP/GAME.../CAT_* that contain an EBOOT.PBP (case-insensitive).
+static int countGamesInCategory(const std::string& device, const std::string& cat) {
+    if (!startsWithCAT(cat.c_str())) return 0;
+
+    const char* isoRoots[]  = {"ISO/","ISO/PSP/"};
+    const char* gameRoots[] = {"PSP/GAME/","PSP/GAME/PSX/","PSP/GAME/Utility/","PSP/GAME150/"};
+
+    int count = 0;
+
+    // ISO-like files
+    for (auto r : isoRoots) {
+        std::string base = device + std::string(r) + cat + "/";
+        if (!dirExists(base)) continue;
+        forEachEntry(base, [&](const SceIoDirent& e){
+            if (!FIO_S_ISDIR(e.d_stat.st_mode)) {
+                std::string n = e.d_name;
+                if (isIsoLike(n)) count++;
+            }
+        });
+    }
+
+    // EBOOT folders (only immediate children of the CAT_ directory)
+    for (auto r : gameRoots) {
+        std::string base = device + std::string(r) + cat + "/";
+        if (!dirExists(base)) continue;
+        forEachEntry(base, [&](const SceIoDirent& e){
+            if (FIO_S_ISDIR(e.d_stat.st_mode)) {
+                std::string child = base + e.d_name;
+                std::string eboot = findEbootCaseInsensitive(child);
+                if (!eboot.empty()) count++;
+            }
+        });
+    }
+    return count;
+}
+
+// Create the CAT_ folder across standard ISO/GAME roots (silently skips parents that don't exist)
+static void createCategoryDirs(const std::string& device, const std::string& cat) {
+    const char* isoRoots[]  = {"ISO/","ISO/PSP/"};
+    const char* gameRoots[] = {"PSP/GAME/","PSP/GAME/PSX/","PSP/GAME/Utility/","PSP/GAME150/"};
+    for (auto r : isoRoots) {
+        std::string p = device + std::string(r) + cat;
+        if (dirExists(parentOf(p))) sceIoMkdir(p.c_str(), 0777);
+    }
+    for (auto r : gameRoots) {
+        std::string p = device + std::string(r) + cat;
+        if (dirExists(parentOf(p))) sceIoMkdir(p.c_str(), 0777);
+    }
+}
+
+// Remove the CAT_ folder tree across ISO/GAME roots (recursive)
+static void deleteCategoryDirs(const std::string& device, const std::string& cat) {
+    const char* isoRoots[]  = {"ISO/","ISO/PSP/"};
+    const char* gameRoots[] = {"PSP/GAME/","PSP/GAME/PSX/","PSP/GAME/Utility/","PSP/GAME150/"};
+    for (auto r : isoRoots)  { std::string p = device + std::string(r) + cat; if (dirExists(p)) removeDirRecursive(p); }
+    for (auto r : gameRoots) { std::string p = device + std::string(r) + cat; if (dirExists(p)) removeDirRecursive(p); }
+}
+
 
 // ---------------------------------------------------------------
 // Model types + label mode
@@ -1343,6 +1403,11 @@ private:
     Texture* selectionIconTex = nullptr;
     std::string selectionIconKey;
 
+    // During rename we temporarily hold the current icon so refresh doesn't drop it.
+    Texture* iconCarryTex = nullptr;
+    std::string iconCarryForPath;
+
+
     // Per-row flags (roots view)
     std::vector<uint8_t> rowFlags;
     static constexpr uint8_t ROW_DISABLED = 1 << 0;
@@ -1367,10 +1432,15 @@ private:
     FileOpsMenu* fileMenu = nullptr;
     bool inputWaitRelease = false;
 
+    // Track which kind of menu is open (content vs categories)
+    enum MenuContext { MC_ContentOps, MC_CategoryOps };
+    MenuContext menuContext = MC_ContentOps;
+
     // Debug overlay
     bool showDebugTimes = false; // toggle with Square
     // Label mode
     bool showTitles = false;     // toggle with Triangle
+
     // Edge detection for analog-stick up → debug toggle
     bool analogUpHeld = false;
 
@@ -1412,6 +1482,7 @@ private:
     int         preOpScroll = 0;
 
     // --- scan snapshot so we can instantly reuse current device contents ---
+    // --- scan snapshot so we can instantly reuse current device contents ---
     struct ScanSnapshot {
         std::map<std::string, std::vector<GameItem>> categories;
         std::vector<GameItem> uncategorized;
@@ -1419,9 +1490,109 @@ private:
         std::vector<std::string> categoryNames;
         bool hasCategories = false;
     };
+
+    // Used during a single Move/Copy UI flow
     ScanSnapshot preOpScan{};
     bool hasPreOpScan = false;
 
+    // --- New: cache per device so switching devices is instant ---
+    struct DeviceCacheEntry {
+        ScanSnapshot snap;
+        bool dirty = true;            // true ⇒ must rescan before reuse
+        uint32_t lastTick = 0;        // optional (age, if you want to expire)
+    };
+    std::map<std::string, DeviceCacheEntry> deviceCache;  // key: "ms0:/" or "ef0:/"
+   
+    // Marks a device cache line as dirty so the next entry triggers one fresh scan.
+    void markDeviceDirty(const std::string& devOrPath) {
+        std::string key = rootPrefix(devOrPath);  // accepts "ms0:/", "ef0:/", or any full path
+        if (!key.empty()) deviceCache[key].dirty = true;
+    }
+
+
+    void exitOpMode() {
+        actionMode = AM_None;
+        opPhase    = OP_None;
+        opSrcPaths.clear();
+        opSrcKinds.clear();
+        opDestDevice.clear();
+        opDestCategory.clear();
+        moving = false;
+    }
+
+    // Restore pre-op UI and state after cancel/fail.
+    // NOTE: MUST be called *after* exitOpMode().
+    void cancelMoveRestore() {
+        // Go back to where the user started
+        currentDevice = preOpDevice;
+
+        if (hasPreOpScan) {
+            restoreScan(preOpScan);    // instant lists from the snapshot
+        } else {
+            // Fallback if no snapshot was taken (shouldn't happen in your flow)
+            scanDevicePreferCache(currentDevice);
+        }
+
+        moving = false;
+
+        // Return to the exact pre-op view
+        if (preOpView == View_Categories) {
+            openCategory(preOpCategory);
+        } else if (preOpView == View_CategoryContents) {
+            currentCategory = preOpCategory;
+            openCategory(preOpCategory);
+        } else { // View_AllFlat (or anything else)
+            rebuildFlatFromCache();
+        }
+
+        // Restore cursor/scroll
+        selectedIndex = preOpSel;
+        scrollOffset  = preOpScroll;
+
+        // Clear transient UI
+        freeSelectionIcon();
+        fileMenu = nullptr;
+        msgBox   = nullptr;
+    }
+
+    // Show the destination device/category immediately from cache (no re-scan)
+    void showDestinationCategoryNow(const std::string& dstDev, const std::string& dstCat /* "" => Uncategorized */) {
+        currentDevice = dstDev;
+
+        // Use cached snapshot if present, otherwise scan once to seed it
+        auto &dstEntry = deviceCache[rootPrefix(dstDev)];
+        bool haveSnap = !dstEntry.snap.flatAll.empty() ||
+                        !dstEntry.snap.uncategorized.empty() ||
+                        !dstEntry.snap.categories.empty() ||
+                        !dstEntry.snap.categoryNames.empty() ||
+                        dstEntry.snap.hasCategories;
+
+        if (!haveSnap || dstEntry.dirty) {
+            scanDevice(dstDev);
+            snapshotCurrentScan(dstEntry.snap);
+            dstEntry.dirty = false;
+        } else {
+            restoreScan(dstEntry.snap);
+        }
+
+        // Normalize cat name ("Uncategorized" vs "")
+        std::string cat = dstCat.empty() ? std::string("Uncategorized") : dstCat;
+
+        if (hasCategories) {
+            // Open the real destination category with ALL entries (not just the moved ones)
+            openCategory(cat);
+        } else {
+            // No categories on this device → show flat list that now includes the moved/copied items
+            rebuildFlatFromCache();
+        }
+
+        // We are back to normal browsing now
+        showRoots   = false;
+        actionMode  = AM_None;
+        opPhase     = OP_None;
+        moving      = false;
+        freeSelectionIcon();
+    }
 
     void snapshotCurrentScan(ScanSnapshot& out) const {
         out.categories     = categories;
@@ -1437,6 +1608,305 @@ private:
         categoryNames  = in.categoryNames;
         hasCategories  = in.hasCategories;
     }
+
+    // Fetch prefix like "ms0:/" from any path or device string you use elsewhere
+    // Fetch prefix like "ms0:/" or "ef0:/" from any path or device string you use elsewhere
+    static std::string rootPrefix(const std::string& p) {
+        // We expect "ms0:/..." or "ef0:/..." (colon at index 3, slash at index 4)
+        // Also accept "ms0:" / "ef0:" (without trailing slash).
+        if (p.size() >= 5 && p[3] == ':' && p[4] == '/')
+            return p.substr(0, 5);
+        if (p.size() >= 4 && p[3] == ':')
+            return p.substr(0, 4) + "/";  // normalize to have a trailing slash
+        // Fallback: try to locate a colon at pos 3 even for longer/odd inputs
+        size_t colon = p.find(':');
+        if (colon == 3) {
+            if (colon + 1 < p.size() && p[colon + 1] == '/')
+                return p.substr(0, colon + 2);
+            return p.substr(0, colon + 1) + "/";
+        }
+        return "";
+    }
+
+
+    // Replace raw scan calls during navigation with this:
+    void scanDevicePreferCache(const std::string& dev) {
+        std::string key = rootPrefix(dev);
+        auto &entry = deviceCache[key];  // creates if missing
+        if (!entry.dirty) {
+            // Reuse cached lists instantly
+            restoreScan(entry.snap);
+        } else {
+            // Do the real scan and then cache it
+            scanDevice(dev);
+            snapshotCurrentScan(entry.snap);
+            entry.dirty = false;
+        }
+    }
+
+    // Remove a GameItem by exact path from all vectors in a snapshot.
+    static void snapErasePath(ScanSnapshot& s, const std::string& path) {
+        auto rmPath = [&](std::vector<GameItem>& v){
+            v.erase(std::remove_if(v.begin(), v.end(),
+                [&](const GameItem& gi){ return gi.path == path; }), v.end());
+        };
+        rmPath(s.flatAll);
+        rmPath(s.uncategorized);
+        for (auto &kv : s.categories) rmPath(kv.second);
+    }
+
+    static void snapInsertSorted(std::vector<GameItem>& v, const GameItem& gi) {
+        // Replace in place if present; otherwise insert at the first position
+        // where gi.sortKey <= existing.sortKey to keep DESC order.
+        for (auto &x : v) {
+            if (x.path == gi.path) { x = gi; return; }
+        }
+        auto it = std::lower_bound(
+            v.begin(), v.end(), gi,
+            [](const GameItem& a, const GameItem& b){ return a.sortKey > b.sortKey; } // DESC
+        );
+        v.insert(it, gi);
+    }
+
+    static void snapUpsertItem(ScanSnapshot& s, const GameItem& gi, const std::string& category /*may be ""*/) {
+        snapInsertSorted(s.flatAll, gi);
+        if (category.empty()) {
+            snapInsertSorted(s.uncategorized, gi);
+        } else {
+            snapInsertSorted(s.categories[category], gi);
+            if (std::find(s.categoryNames.begin(), s.categoryNames.end(), category) == s.categoryNames.end())
+                s.categoryNames.push_back(category);
+            s.hasCategories = true;
+        }
+    }
+
+    // ---- Cache patch helpers (categories & items) ----
+    void cachePatchAddCategory(const std::string& cat) {
+        // Patch live members directly
+        (void)categories[cat];
+        if (std::find(categoryNames.begin(), categoryNames.end(), cat) == categoryNames.end())
+            categoryNames.push_back(cat);
+        hasCategories = true;
+
+        // Patch device snapshot
+        std::string key = rootPrefix(currentDevice);
+        auto &dc = deviceCache[key];  // creates entry if missing
+        (void)dc.snap.categories[cat];
+        if (std::find(dc.snap.categoryNames.begin(), dc.snap.categoryNames.end(), cat) == dc.snap.categoryNames.end())
+            dc.snap.categoryNames.push_back(cat);
+        dc.snap.hasCategories = true;
+    }
+
+
+    void cachePatchDeleteCategory(const std::string& cat) {
+        // Live members
+        {
+            auto it = categories.find(cat);
+            if (it != categories.end()) {
+                for (const auto& gi : it->second) {
+                    // remove any of those paths from flat/uncat too
+                    // build a small pseudo-snapshot over live refs
+                    ScanSnapshot tmp;
+                    tmp.categories    = categories;
+                    tmp.uncategorized = uncategorized;
+                    tmp.flatAll       = flatAll;
+                    tmp.categoryNames = categoryNames;
+                    tmp.hasCategories = hasCategories;
+
+                    snapErasePath(tmp, gi.path);
+
+                    // write back the erased sets
+                    uncategorized = std::move(tmp.uncategorized);
+                    flatAll       = std::move(tmp.flatAll);
+                }
+                categories.erase(it);
+            }
+            categoryNames.erase(std::remove(categoryNames.begin(), categoryNames.end(), cat), categoryNames.end());
+            hasCategories = !categoryNames.empty();
+        }
+
+        // Device snapshot
+        {
+            std::string key = rootPrefix(currentDevice);
+            auto &s = deviceCache[key].snap;
+            auto it = s.categories.find(cat);
+            if (it != s.categories.end()) {
+                for (const auto& gi : it->second) snapErasePath(s, gi.path);
+                s.categories.erase(it);
+            }
+            s.categoryNames.erase(std::remove(s.categoryNames.begin(), s.categoryNames.end(), cat), s.categoryNames.end());
+            s.hasCategories = !s.categoryNames.empty();
+        }
+    }
+
+
+    static void replaceCatSegmentInPath(const std::string& oldCat, const std::string& newCat,
+                                        std::string& pathInOut) {
+        size_t pos = pathInOut.find(oldCat);
+        if (pos != std::string::npos) pathInOut.replace(pos, oldCat.size(), newCat);
+    }
+
+    void cachePatchRenameCategory(const std::string& oldCat, const std::string& newCat) {
+        auto doOne = [&](std::map<std::string, std::vector<GameItem>>& cats,
+                        std::vector<std::string>& names,
+                        bool& hasCats) {
+            auto it = cats.find(oldCat);
+            if (it == cats.end()) return;
+
+            std::vector<GameItem> moved = std::move(it->second);
+            cats.erase(it);
+            for (auto &gi : moved) replaceCatSegmentInPath(oldCat, newCat, gi.path);
+            auto& dst = cats[newCat];
+            dst.clear();
+            for (auto &gi : moved) snapInsertSorted(dst, gi);
+
+            for (auto &n : names) if (n == oldCat) { n = newCat; break; }
+            std::sort(names.begin(), names.end(),
+                    [](const std::string& a, const std::string& b){ return strcasecmp(a.c_str(), b.c_str()) < 0; });
+            hasCats = !names.empty();
+        };
+
+        // Live
+        doOne(categories, categoryNames, hasCategories);
+
+        // Snapshot
+        std::string key = rootPrefix(currentDevice);
+        auto &snap = deviceCache[key].snap;
+        doOne(snap.categories, snap.categoryNames, snap.hasCategories);
+    }
+
+
+    void cachePatchRenameItem(const std::string& oldPath, const std::string& newPath, GameItem::Kind k) {
+        auto apply = [&](ScanSnapshot& s){
+            snapErasePath(s, oldPath);
+            const std::string dstCat = deriveCategoryFromPath(newPath);
+            GameItem gi = makeItemFor(newPath, k);
+            snapUpsertItem(s, gi, dstCat);
+        };
+
+        // Live members
+        {
+            ScanSnapshot tmp;
+            tmp.categories    = categories;
+            tmp.uncategorized = uncategorized;
+            tmp.flatAll       = flatAll;
+            tmp.categoryNames = categoryNames;
+            tmp.hasCategories = hasCategories;
+
+            apply(tmp);
+
+            categories    = std::move(tmp.categories);
+            uncategorized = std::move(tmp.uncategorized);
+            flatAll       = std::move(tmp.flatAll);
+            categoryNames = std::move(tmp.categoryNames);
+            hasCategories = tmp.hasCategories;
+        }
+
+        // Device snapshot
+        {
+            std::string key = rootPrefix(currentDevice);
+            apply(deviceCache[key].snap);
+        }
+    }
+
+
+
+    // Derive CAT_* (or "") for a PSP path you already normalize elsewhere.
+    static std::string deriveCategoryFromPath(const std::string& p) {
+        // Examples:
+        //   ms0:/ISO/CAT_ARPG/Title.iso          -> CAT_ARPG
+        //   ms0:/PSP/GAME/CAT_RPG/MyGame/        -> CAT_RPG
+        //   ms0:/ISO/Title.iso                    -> ""
+        //   ms0:/PSP/GAME/MyGame/                 -> ""
+        auto pos = p.find("CAT_");
+        if (pos == std::string::npos) return "";
+        // Read token until next slash
+        size_t end = p.find('/', pos);
+        return (end == std::string::npos) ? p.substr(pos) : p.substr(pos, end - pos);
+    }
+
+    // Minimal “make” from known info (kind + new path). Metadata like mtime/icon are resolved lazily in your UI.
+    // Fully-populated item factory used by cache patching after Move/Copy.
+    // Reads filename/label, extracted title, mtime, size, and sortKey so
+    // the destination gets correctly ordered immediately.
+    static GameItem makeItemFor(const std::string& newPath, GameItem::Kind k) {
+        GameItem gi{};
+        gi.path = newPath;
+        gi.kind = k;
+
+        // Label from filename or folder name
+        gi.label = basenameOf(newPath);
+
+        // Stat for mtime / size, respecting file-or-folder semantics
+        SceIoStat st{};
+        if (k == GameItem::ISO_FILE) {
+            if (sceIoGetstat(newPath.c_str(), &st) >= 0) {
+                gi.time     = st.sce_st_mtime;
+                gi.sizeBytes= (uint64_t)st.st_size;
+            }
+        } else {
+            // EBOOT folder: stat the directory (no trailing slash)
+            if (getStatDirNoSlash(newPath, st)) {
+                gi.time     = st.sce_st_mtime;
+                uint64_t folderBytes = 0;
+                sumDirBytes(newPath, folderBytes);
+                gi.sizeBytes = folderBytes;
+            }
+        }
+        gi.sortKey = buildLegacySortKey(gi.time);
+
+        // Title extraction (ISO/CSO/ZSO/DAX/JSO vs EBOOT folder)
+        if (k == GameItem::ISO_FILE) {
+            if      (endsWithNoCase(newPath, ".iso")) { std::string t; if (readIsoTitle(newPath, t))         gi.title = t; }
+            else if (endsWithNoCase(newPath, ".cso") || endsWithNoCase(newPath, ".zso")) {
+                std::string t; if (readCompressedIsoTitle(newPath, t)) gi.title = t;
+            }
+            else if (endsWithNoCase(newPath, ".dax")) { std::string t; if (readDaxTitle(newPath, t))         gi.title = t; }
+            else if (endsWithNoCase(newPath, ".jso")) { std::string t; if (readJsoTitle(newPath, t))         gi.title = t; }
+        } else {
+            std::string t; if (getFolderTitle(newPath, t)) gi.title = t;
+        }
+        sanitizeTitleInPlace(gi.title);
+        return gi;
+    }
+
+
+    // Patches both snapshots to reflect Move/Copy outcome.
+    // When isMove==true: it erases from srcSnap and inserts into dstSnap.
+    // When isMove==false: it leaves src as-is and inserts into dst.
+    static void cacheApplyMoveOrCopy(ScanSnapshot& srcSnap, ScanSnapshot& dstSnap,
+                                    const std::string& src, const std::string& dst,
+                                    GameItem::Kind k, bool isMove) {
+        // Remove from source lists first when moving
+        if (isMove) snapErasePath(srcSnap, src);
+
+        // Build fully refreshed metadata for the destination
+        GameItem gi = makeItemFor(dst, k);
+
+        // Insert into destination lists in correct category and sorted order
+        const std::string dstCat = deriveCategoryFromPath(dst);
+        snapUpsertItem(dstSnap, gi, dstCat);
+    }
+
+
+    void rebuildFlatFromCache() {
+        // Same as openDevice(...) else-branch when hasCategories == false
+        // workingList ← flatAll, sort, set view, clear UI, populate rows, hide roots.
+        workingList = flatAll;
+        sortLikeLegacy(workingList);
+        view = View_AllFlat;
+        clearUI();
+        for (const auto& gi : workingList){
+            SceIoDirent e; memset(&e,0,sizeof(e));
+            const char* name = (showTitles && !gi.title.empty()) ? gi.title.c_str() : gi.label.c_str();
+            strncpy(e.d_name, name, sizeof(e.d_name)-1);
+            entries.push_back(e);
+            entryPaths.push_back(gi.path);
+            entryKinds.push_back(gi.kind);
+        }
+        showRoots = false;
+    }
+
 
     // -----------------------------
     // Drawing helpers (unchanged)
@@ -1541,6 +2011,16 @@ private:
 
         const GameItem& gi = workingList[selectedIndex];
         const std::string key = gi.path;
+
+        // If we just renamed this item, restore the previously displayed ICON0 immediately.
+        if (iconCarryTex && key == iconCarryForPath) {
+            selectionIconTex = iconCarryTex;
+            selectionIconKey = iconCarryForPath;
+            iconCarryTex = nullptr;
+            iconCarryForPath.clear();
+            return;
+        }
+
         if (key == selectionIconKey && selectionIconTex) return;
 
         freeSelectionIcon();
@@ -1550,11 +2030,13 @@ private:
             selectionIconKey = key;
             return;
         }
+
         Texture* t = loadIconForGameItem(gi);
         if (t) selectionIconTex = t;
         else { selectionIconTex = placeholderIconTexture; noIconPaths.insert(key); }
         selectionIconKey = key;
     }
+
 
     void drawSelectedIconLowerRight() {
         if (!selectionIconTex || !selectionIconTex->data) return;
@@ -1788,10 +2270,10 @@ private:
 
     void drawBackdropOnlyForOSK() {
         sceGuStart(GU_DIRECT, list);
-#if OSK_MINIMAL_BACKDROP
+        #if OSK_MINIMAL_BACKDROP
         sceGuClearColor(gOskBgColorABGR);
         sceGuClear(GU_COLOR_BUFFER_BIT);
-#else
+        #else
         if (backgroundTexture && backgroundTexture->data) {
             sceGuTexMode(GU_PSM_8888, 0, 0, GU_FALSE);
             sceGuTexFunc(GU_TFX_REPLACE, GU_TCC_RGB);
@@ -1808,7 +2290,7 @@ private:
             sceGuClearColor(COLOR_BG);
             sceGuClear(GU_COLOR_BUFFER_BIT | GU_DEPTH_BUFFER_BIT);
         }
-#endif
+        #endif
         sceGuFinish();
         sceGuSync(0,0);
     }
@@ -1857,9 +2339,9 @@ private:
     bool promptTextOSK(const char* titleUtf8, const char* initialUtf8, int maxChars, std::string& out) {
         ClockGuard     cg;  cg.boost333();
         ThreadPrioGuard tpg(0x10);
-#ifdef HAVE_SCEPOWERLOCK
+        #ifdef HAVE_SCEPOWERLOCK
         PowerLockGuard  plg;
-#endif
+        #endif
 
         SceUtilityOskData data{};
         std::vector<SceWChar16> title16, init16;
@@ -1913,9 +2395,9 @@ private:
             if (st == PSP_UTILITY_DIALOG_INIT || st == PSP_UTILITY_DIALOG_VISIBLE) {
                 drawBackdropOnlyForOSK();
                 sceUtilityOskUpdate(1);
-#if OSK_USE_VBLANK_CB
+            #if OSK_USE_VBLANK_CB
                 sceDisplayWaitVblankStartCB();
-#endif
+            #endif
                 sceGuSwapBuffers();
             } else if (st == PSP_UTILITY_DIALOG_QUIT) {
                 sceUtilityOskShutdownStart();
@@ -1931,9 +2413,9 @@ private:
         while (sceUtilityOskGetStatus() != PSP_UTILITY_DIALOG_NONE && safety++ < 600) {
             drawBackdropOnlyForOSK();
             sceUtilityOskUpdate(1);
-#if OSK_USE_VBLANK_CB
+        #if OSK_USE_VBLANK_CB
             sceDisplayWaitVblankStartCB();
-#endif
+        #endif
             sceGuSwapBuffers();
         }
 
@@ -1988,10 +2470,16 @@ private:
                 }
             }
 
-            scanDevice(currentDevice);
-            delete msgBox; msgBox = nullptr;
-
+            // Patch cache & UI while modal is still up
+            cachePatchRenameCategory(oldName, typed);
             buildCategoryRows();
+            // reselect as needed, possibly show a short "Renamed" toast
+            drawMessage("Renamed", COLOR_GREEN);
+            sceKernelDelayThread(600*1000);
+
+            // NOW dismiss the modal
+            delete msgBox; msgBox = nullptr;
+            renderOneFrame();
             for (int i=0;i<(int)entries.size();++i)
                 if (!strcmp(entries[i].d_name, typed.c_str())) { selectedIndex=i; break; }
 
@@ -2011,10 +2499,32 @@ private:
             if (!promptTextOSK("Rename", base.c_str(), 64, typed)) return;
             if (typed == base) return;
 
+            // after OSK
             if (gi.kind == GameItem::ISO_FILE) {
-                std::string ext = fileExtOf(base);
-                if (!ext.empty() && typed.find('.') == std::string::npos) typed += ext;
+                // Cache the original 4-char extension (includes the dot), e.g. ".iso"
+                std::string origExt = fileExtOf(base);  // from the CURRENT filename
+                // If user’s new text doesn’t end with a valid ISO-like suffix, tack the original back on.
+                auto hasIsoLikeTail = [&](const std::string& s)->bool {
+                    return endsWithNoCase(s, ".iso") ||
+                        endsWithNoCase(s, ".cso") ||
+                        endsWithNoCase(s, ".zso") ||
+                        endsWithNoCase(s, ".jso") ||
+                        endsWithNoCase(s, ".dax");
+                };
+
+                // Only enforce if we actually had an ISO-like original extension
+                bool origIsIsoLike = hasIsoLikeTail(base);
+                if (origIsIsoLike && !hasIsoLikeTail(typed)) {
+                    // Requirement: check the **last 4** and append the original 4 if they’re not ISO-like
+                    // All supported extensions are 4 chars (dot + 3 letters), so this matches the spec.
+                    if (typed.size() < 4 || !hasIsoLikeTail(typed)) {
+                        if (origExt.size() == 4) {
+                            typed += origExt;  // preserve the original casing
+                        }
+                    }
+                }
             }
+
 
             std::string newPath = joinDirFile(dir, typed.c_str());
 
@@ -2030,34 +2540,55 @@ private:
             msgBox = new MessageBox("Renaming...", nullptr, SCREEN_WIDTH, SCREEN_HEIGHT, 1.0f, 0, "", 16, 18, 8, 14);
             renderOneFrame();
 
-            int rc = sceIoRename(gi.path.c_str(), newPath.c_str());
-            if (rc < 0) {
+                int rc = sceIoRename(gi.path.c_str(), newPath.c_str());
+                if (rc < 0) {
+                    delete msgBox; msgBox = nullptr;
+                    drawMessage("Rename failed", COLOR_RED);
+                    sceKernelDelayThread(700*1000);
+                    return;
+                }
+
+                // If we were showing an ICON0 for this exact item, carry it across the path change.
+                // (Don't carry the placeholder; only a real texture.)
+                if (selectionIconTex && selectionIconTex != placeholderIconTexture && selectionIconKey == gi.path) {
+                    iconCarryTex = selectionIconTex;      // do NOT free; we'll reattach after refresh
+                    iconCarryForPath = newPath;
+                    selectionIconTex = nullptr;
+                    selectionIconKey.clear();
+                }
+                // Make sure we don't accidentally block future loads for the new path.
+                noIconPaths.erase(newPath);
+
+                // Keep modal visible while we finish all follow-up work
+                if (wasChecked) {
+                    checked.erase(gi.path);
+                    checked.insert(newPath);
+                }
+
+                // after successful sceIoRename(...)
+                std::string keepPath = newPath;
+
+                // Patch cache instead of rescanning
+                cachePatchRenameItem(gi.path, newPath, gi.kind);
+
+                // Refresh just the current view
+                if (view == View_CategoryContents) {
+                    openCategory(currentCategory);
+                } else if (view == View_AllFlat) {
+                    rebuildFlatFromCache();
+                } else {
+                    buildCategoryRows();
+                }
+
+                // Re-select the renamed item; ensureSelectionIcon() will snap the carried ICON0 into place.
+                selectByPath(keepPath);
+                drawMessage("Renamed", COLOR_GREEN);
+                sceKernelDelayThread(600*1000);
+
+                // NOW dismiss the "Renaming..." modal
                 delete msgBox; msgBox = nullptr;
-                drawMessage("Rename failed", COLOR_RED);
-                sceKernelDelayThread(700*1000);
-                return;
-            }
+                renderOneFrame();
 
-            if (wasChecked) {
-                checked.erase(gi.path);
-                checked.insert(newPath);
-            }
-
-            std::string keepPath = newPath;
-            scanDevice(currentDevice);
-
-            if (hasCategories) {
-                if (view == View_CategoryContents) openCategory(currentCategory);
-                else buildCategoryRows();
-            } else {
-                openDevice(currentDevice);
-            }
-
-            delete msgBox; msgBox = nullptr;
-
-            selectByPath(keepPath);
-            drawMessage("Renamed", COLOR_GREEN);
-            sceKernelDelayThread(600*1000);
         }
     }
 
@@ -2186,6 +2717,10 @@ private:
             if (FIO_S_ISDIR(e.d_stat.st_mode)) {
                 if (startsWithCAT(name.c_str())){
                     hasCategories = true;
+
+                    // NEW: ensure the category is created/listed even if empty or contains no ISO-like files
+                    categories[name];  // creates empty vector if not present
+
                     std::string catDir = base + name;
                     forEachEntry(catDir, [&](const SceIoDirent &ee){
                         if (!FIO_S_ISDIR(ee.d_stat.st_mode)){
@@ -2200,7 +2735,6 @@ private:
                                     gi.sortKey  = buildLegacySortKey(gi.time);
                                     gi.sizeBytes= (uint64_t)st.st_size;   // <--- NEW
                                 }
-
 
                                 if (endsWithNoCase(fn, ".iso")) {
                                     std::string t; if (readIsoTitle(gi.path, t)) gi.title = t;
@@ -2252,6 +2786,10 @@ private:
             std::string name = e.d_name;
             if (startsWithCAT(name.c_str())){
                 hasCategories = true;
+
+                // NEW: ensure the category is created/listed even if no EBOOT children are found
+                categories[name];  // creates empty vector if not present
+
                 std::string catDir = base + name;
                 forEachEntry(catDir, [&](const SceIoDirent &sub){
                     if (FIO_S_ISDIR(sub.d_stat.st_mode)){
@@ -2522,11 +3060,35 @@ private:
     void openDevice(const std::string& dev){
         currentDevice = dev;
 
-        msgBox = new MessageBox("Populating...", nullptr, SCREEN_WIDTH, SCREEN_HEIGHT, 1.0f, 0, "", 16, 18, 8, 14);
-        renderOneFrame();
-        scanDevice(currentDevice);
-        moving = false;
-        delete msgBox; msgBox = nullptr;
+        // Decide based on cache dirtiness AND presence of a real snapshot
+        std::string key = rootPrefix(currentDevice);
+        auto &dc = deviceCache[key];                    // creates entry if missing
+
+        // A snapshot is "present" only if it actually holds content/metadata we can render.
+        const bool hasSnap =
+            (!dc.snap.flatAll.empty()) ||
+            (!dc.snap.uncategorized.empty()) ||
+            (!dc.snap.categories.empty()) ||
+            (!dc.snap.categoryNames.empty()) ||
+            (dc.snap.hasCategories); // flag alone isn’t enough, but counts as a hint
+
+        const bool needsScan = dc.dirty || !hasSnap;   // first time OR explicitly dirtied
+
+        if (needsScan) {
+            msgBox = new MessageBox("Populating...", nullptr, SCREEN_WIDTH, SCREEN_HEIGHT, 1.0f, 0, "", 16, 18, 8, 14);
+            renderOneFrame();
+
+            scanDevice(currentDevice);                  // real, slow scan
+            snapshotCurrentScan(dc.snap);               // cache the fresh results
+            dc.dirty = false;
+
+            moving = false;
+            delete msgBox; msgBox = nullptr;
+        } else {
+            // Instant reuse of cached snapshot (no message box)
+            restoreScan(dc.snap);
+            moving = false;
+        }
 
         // Background-probe only the *opposite* device so UI stays snappy
         const bool canCrossDevices = dualDeviceAvailableFromMs0(); // PSP Go, running from ms0, both devices
@@ -2539,11 +3101,9 @@ private:
             const bool probeEf =  onMs && hasEf;  // only probe ef0 if we're on ms0
 
             FreeSpaceInit();
-            FreeSpaceSetPresence(probeMs, probeEf);  // <--- probe opposite only
+            FreeSpaceSetPresence(probeMs, probeEf);     // <--- probe opposite only
             FreeSpaceRequestRefresh();
         }
-
-        // -----------------------------------------------------------------------
 
         if (hasCategories) {
             buildCategoryRows();
@@ -2563,7 +3123,6 @@ private:
             showRoots = false;
         }
     }
-
 
     void openCategory(const std::string& catName){
         currentCategory = catName;
@@ -2601,50 +3160,120 @@ private:
         SceIoStat st; fillStatTimes(st, dt);
         sceIoChstat(target.c_str(), &st, 0x08 | 0x10 | 0x20);
     }
-    void commitOrderTimestamps(){
-        if (workingList.empty()) return;
-        moving = false;
+    // Build a canonical, in-order set of targets from what the user *sees*.
+    // Ensures every row has a real path; if a row isn’t in workingList yet,
+    // we materialize a GameItem on the fly (so new copies/moves are included).
+    void syncWorkingListFromScreen() {
+        if (!(view == View_AllFlat || view == View_CategoryContents)) return;
+        std::vector<GameItem> synced;
+        synced.reserve(entries.size());
 
-        std::string keepPath;
-        if (selectedIndex >= 0 && selectedIndex < (int)workingList.size())
-            keepPath = workingList[selectedIndex].path;
+        // Fast look-up of existing items by path
+        std::map<std::string, GameItem> byPath;
+        for (const auto& gi : workingList) byPath[gi.path] = gi;
+
+        for (size_t i = 0; i < entries.size(); ++i) {
+            if (i >= entryPaths.size()) continue;
+            const std::string& p = entryPaths[i];
+            if (p.empty()) continue;             // skip headers/categories/devices
+
+            auto it = byPath.find(p);
+            if (it != byPath.end()) {
+                synced.push_back(it->second);
+            } else {
+                // New row that isn’t in the model yet → construct it now
+                GameItem::Kind k = (i < entryKinds.size()) ? entryKinds[i] : GameItem::ISO_FILE;
+                synced.push_back(makeItemFor(p, k));
+            }
+        }
+        workingList.swap(synced);
+    }
+    // Patch a vector in-place from workingList times/sortKeys and keep DESC order
+    void patchTimesAndResort(std::vector<GameItem>& v,
+                            const std::vector<GameItem>& from /*workingList*/) {
+        if (v.empty()) return;
+        for (auto &x : v) {
+            auto it = std::find_if(from.begin(), from.end(),
+                [&](const GameItem& gi){ return gi.path == x.path; });
+            if (it != from.end()) {
+                x.time    = it->time;
+                x.sortKey = it->sortKey;
+            }
+        }
+        sortLikeLegacy(v); // uses sortKey DESC
+    }
+    void commitOrderTimestamps(){
+        if (!(view == View_AllFlat || view == View_CategoryContents)) return;
+
+        // Make sure model matches the screen order (critical for new copies/moves)
+        syncWorkingListFromScreen();
+
+        if (workingList.empty()) return;
+        std::string keepPath = (selectedIndex >= 0 && selectedIndex < (int)workingList.size())
+                            ? workingList[selectedIndex].path : std::string();
 
         msgBox = new MessageBox("Saving...", nullptr, SCREEN_WIDTH, SCREEN_HEIGHT, 1.0f, 0, "", 16, 18, 8, 14);
         renderOneFrame();
 
-        ScePspDateTime startDT{};
-        sceRtcGetCurrentClockLocalTime(&startDT);
-
-        unsigned long long startTick = 0;
-        sceRtcGetTick(&startDT, &startTick);
+        ScePspDateTime startDT{}; sceRtcGetCurrentClockLocalTime(&startDT);
+        unsigned long long baseTick=0; sceRtcGetTick(&startDT, &baseTick);
         const unsigned long long STEP = 10ULL * 1000000ULL;
 
+        // Bottom row gets baseTick, then +10s per step up
         int n = (int)workingList.size();
-        for (int i = n - 1; i >= 0; --i){
-            unsigned long long tick = startTick + (unsigned long long)((n-1) - i) * STEP;
+        for (int i = n - 1; i >= 0; --i) {
+            unsigned long long tick = baseTick + (unsigned long long)((n-1) - i) * STEP;
             ScePspDateTime dt{}; sceRtcSetTick(&dt, &tick);
-            const GameItem &gi = workingList[i];
-            applyTimesLikeLegacy(gi.path, dt);
+
+            SceIoStat st;
+            fillStatTimes(st, dt); // sets mtime/ctime/atime -> dt and zeroes the rest
+            int rc = sceIoChstat(workingList[i].path.c_str(), &st, 0x08 | 0x10 | 0x20);
+
+            if (rc < 0) {
+                logInit();
+                logf("START/mtime FAIL: %s rc=%d", workingList[i].path.c_str(), rc);
+                logClose();
+            } else {
+                // also update in-memory time/sortKey so resorting is instant
+                workingList[i].time    = dt;
+                workingList[i].sortKey = buildLegacySortKey(dt);
+            }
         }
 
         delete msgBox; msgBox = nullptr;
 
-        scanDevice(currentDevice);
-        if (hasCategories) {
-            if (view == View_CategoryContents) {
-                openCategory(currentCategory);
-                selectByPath(keepPath);
-            } else {
-                buildCategoryRows();
+        sortLikeLegacy(workingList);
+        refillRowsFromWorkingPreserveSel();
+        selectByPath(keepPath);
+
+        // --- NEW: also patch the live in-memory lists used by immediate navigation ---
+        if (view == View_AllFlat) {
+            // The on-screen list IS the canonical new flat order.
+            flatAll = workingList;
+
+            // Keep category lists consistent with the new times.
+            patchTimesAndResort(uncategorized, workingList);
+            for (auto &kv : categories) {
+                patchTimesAndResort(kv.second, workingList);
             }
-        } else {
-            openDevice(currentDevice);
-            selectByPath(keepPath);
+        } else if (view == View_CategoryContents) {
+            // We saved from *within* a single category.
+            if (!strcasecmp(currentCategory.c_str(), "Uncategorized")) {
+                uncategorized = workingList;
+            } else {
+                categories[currentCategory] = workingList;
+            }
+
+            // And reflect the bumped times in the flat list too.
+            patchTimesAndResort(flatAll, workingList);
         }
+
 
         drawMessage("Order saved", COLOR_GREEN);
         sceKernelDelayThread(700 * 1000);
     }
+
+
 
     // ====== Key repeat helpers ======
     static unsigned long long nowUS() {
@@ -2669,14 +3298,46 @@ private:
         }
         return false;
     }
+    // Returns the extracted/cached game title for a given source path,
+    // preferring the pre-op snapshot so titles stay stable across the op.
+    // Returns "" if no title is known.
+    std::string getCachedTitleForPath(const std::string& path) const {
+        auto findIn = [&](const std::vector<GameItem>& vec) -> std::string {
+            for (const auto& gi : vec) {
+                if (gi.path == path) {
+                    if (!gi.title.empty()) return gi.title;
+                    break;
+                }
+            }
+            return std::string();
+        };
+
+        // 1) Pre-op snapshot: check flatAll, then uncategorized, then every category
+        if (hasPreOpScan) {
+            if (!preOpScan.flatAll.empty()) {
+                std::string t = findIn(preOpScan.flatAll);
+                if (!t.empty()) return t;
+            }
+            {
+                std::string t = findIn(preOpScan.uncategorized);
+                if (!t.empty()) return t;
+            }
+            for (const auto& kv : preOpScan.categories) {
+                const auto& vec = kv.second;
+                std::string t = findIn(vec);
+                if (!t.empty()) return t;
+            }
+        }
+
+        // 2) Last resort: whatever is in the current workingList (may be destination)
+        return findIn(workingList);
+    }
+
 
     // -----------------------------------------------------------
     // New: Move operation helpers
     // -----------------------------------------------------------
-    static std::string rootPrefix(const std::string& p) {
-        if (p.size() >= 5 && p[2]==':' && p[3]=='/' ) return p.substr(0,5); // e.g. "ms0:/"
-        return "";
-    }
+    // (rootPrefix removed — we already have this earlier in the class)
     static bool sameDevice(const std::string& a, const std::string& b) {
         return strncasecmp(a.c_str(), b.c_str(), 5) == 0;
     }
@@ -3099,7 +3760,7 @@ private:
     void performDelete() {
         ClockGuard cg; cg.boost333();
 
-        // Open progress box (no icon, centered bar + filename line)
+        // Open progress box (no icon, centered bar + two text lines)
         msgBox = new MessageBox("Deleting...", nullptr, SCREEN_WIDTH, SCREEN_HEIGHT, 1.0f, 0, "", 16, 18, 8, 14);
         renderOneFrame();
 
@@ -3108,6 +3769,16 @@ private:
             const std::string& p = opSrcPaths[i];
             const GameItem::Kind k = opSrcKinds[i];
 
+            // NEW: show the cached game title (headline above the progress bar).
+            // Falls back to basename when no title is cached.
+            if (msgBox) {
+                std::string title = getCachedTitleForPath(p);
+                if (title.empty()) title = basenameOf(p);
+                msgBox->setProgressTitle(title.c_str());
+                renderOneFrame();
+            }
+
+            // Filename detail is already handled inside deleteOne(...) via showProgress/updateProgress.
             bool okOne = deleteOne(p, k, this);
             if (okOne) {
                 ok++;
@@ -3120,15 +3791,29 @@ private:
 
         delete msgBox; msgBox = nullptr;
 
-        // Refresh the original context (same behavior you had previously)
-        std::string keepDevice = currentDevice;
-        scanDevice(keepDevice);
+        // Mutate the cache and stay right where we are — instantly.
+        // 1) Ensure cache entry exists (scan once if truly missing)
+        auto &dc = deviceCache[rootPrefix(currentDevice)];
+        if (dc.snap.flatAll.empty() && dc.snap.uncategorized.empty()
+            && dc.snap.categories.empty() && dc.snap.categoryNames.empty()) {
+            scanDevice(currentDevice);              // one-time build
+            snapshotCurrentScan(dc.snap);
+        }
+        // 2) Remove each source path from the snapshot
+        for (const auto& p : opSrcPaths) {
+            snapErasePath(dc.snap, p);
+        }
+        dc.dirty = false;                           // snapshot is authoritative
+
+        // 3) Repaint from snapshot without any scan
+        restoreScan(dc.snap);
         if (hasCategories) {
             if (view == View_CategoryContents) openCategory(currentCategory);
             else buildCategoryRows();
         } else {
-            openDevice(keepDevice);
+            rebuildFlatFromCache();
         }
+
 
         // Feedback toast, like Move/Copy
         char res[64];
@@ -3149,6 +3834,7 @@ private:
         opSrcPaths.clear(); opSrcKinds.clear();
         opPhase = OP_None;
     }
+
 
 
     static bool copyOne(const std::string& src, const std::string& dst, GameItem::Kind kind, KernelFileExplorer* self) {
@@ -3204,11 +3890,20 @@ private:
             const GameItem::Kind k = opSrcKinds[i];
             std::string dst = buildDestPath(src, k, opDestDevice.empty() ? currentDevice : opDestDevice, opDestCategory);
 
-            // (no need for didCross here)
+            // Show the game title as the progress headline
+            if (msgBox) {
+                std::string title = getCachedTitleForPath(src);
+                if (title.empty()) title = basenameOf(src);
+                msgBox->setProgressTitle(title.c_str());
+                renderOneFrame();
+            }
+
+            // Filename detail is already shown by copyFile() via showProgress/updateProgress
             bool ok = copyOne(src, dst, k, this);
             if (ok) okCount++; else failCount++;
             sceKernelDelayThread(0);
         }
+
 
         delete msgBox; msgBox = nullptr;
         logf("=== performCopy: done ok=%d fail=%d ===", okCount, failCount);
@@ -3235,8 +3930,43 @@ private:
         }
         // --------------------------------------------------------------------
 
-        // Restore original context
-        cancelActionRestore();
+        auto &dstEntry = deviceCache[rootPrefix(dstDev)];
+        if (dstEntry.snap.flatAll.empty() && dstEntry.snap.uncategorized.empty()
+            && dstEntry.snap.categories.empty() && dstEntry.snap.categoryNames.empty()) {
+            scanDevice(dstDev);
+            snapshotCurrentScan(dstEntry.snap);
+            dstEntry.dirty = false;
+        }
+
+        // Insert each copied item into destination snapshot
+        for (size_t i = 0; i < opSrcPaths.size(); ++i) {
+            const std::string& s = opSrcPaths[i];
+            const GameItem::Kind k = opSrcKinds[i];
+            const std::string d = buildDestPath(s, k, opDestDevice.empty() ? currentDevice : opDestDevice, opDestCategory);
+            cacheApplyMoveOrCopy(dstEntry.snap, dstEntry.snap, s, d, k, /*isMove*/false);
+        }
+        dstEntry.dirty = false;
+
+        // Jump to destination view immediately
+        currentDevice = dstDev;
+        restoreScan(dstEntry.snap);
+        if (!opDestCategory.empty()) {
+            currentCategory = opDestCategory;
+            openCategory(currentCategory);
+        } else {
+            rebuildFlatFromCache();
+        }
+        // optional: focus the last copied item
+        if (!opSrcPaths.empty()) {
+            const std::string lastDst = buildDestPath(opSrcPaths.back(), opSrcKinds.back(),
+                opDestDevice.empty() ? currentDevice : opDestDevice, opDestCategory);
+            selectByPath(lastDst);
+        }
+        // clear op state
+        actionMode = AM_None;
+        opPhase    = OP_None;
+        opSrcPaths.clear(); opSrcKinds.clear();
+        opDestDevice.clear(); opDestCategory.clear();
 
         char res[64];
         if (failCount == 0) { snprintf(res, sizeof(res), "Copied %d item(s)", okCount); drawMessage(res, COLOR_GREEN); }
@@ -3365,7 +4095,7 @@ private:
         opDestCategory.clear();
 
         // Restore UI state
-        scanDevice(preOpDevice);
+        scanDevicePreferCache(preOpDevice);
         if (hasCategories) {
             if (preOpView == View_CategoryContents) {
                 openCategory(preOpCategory.empty() ? "Uncategorized" : preOpCategory);
@@ -3446,14 +4176,23 @@ private:
             const GameItem::Kind k = opSrcKinds[i];
             std::string dst = buildDestPath(src, k, opDestDevice.empty() ? currentDevice : opDestDevice, opDestCategory);
 
-            // Track if this particular move crosses devices
+            // Game title as headline
+            if (msgBox) {
+                std::string title = getCachedTitleForPath(src);
+                if (title.empty()) title = basenameOf(src);
+                msgBox->setProgressTitle(title.c_str());
+                renderOneFrame();
+            }
+
             if (!sameDevice(src, dst)) didCross = true;
 
+            // Filename detail appears from the underlying copy/move implementation
             bool ok = moveOne(src, dst, k, this);
             if (ok) { okCount++; checked.erase(src); }
             else    { failCount++; }
             sceKernelDelayThread(0);
         }
+
 
         delete msgBox; msgBox = nullptr;
         logf("=== performMove: done ok=%d fail=%d ===", okCount, failCount);
@@ -3461,36 +4200,54 @@ private:
 
         // didCross already computed inside the loop
 
-        // Refresh original context
-        cancelActionRestore(); // also resets actionMode/opPhase and rebuilds UI
+        // --- Patch caches and jump instantly to destination ---
 
-        // Only refresh free-space cache if a cross-device operation occurred,
-        // and only when we're in PSP Go ms0 mode with both devices.
-        // Re-probe after Move only when we actually changed opposite device (your original rule)
-        {
-            bool hasMs=false, hasEf=false;
-            for (auto &r : roots) { if (r=="ms0:/") hasMs=true; if (r=="ef0:/") hasEf=true; }
-            if (didCross && (hasMs || hasEf)) {
-                FreeSpaceInit();
-                FreeSpaceSetPresence(hasMs, hasEf);
-                FreeSpaceRequestRefresh();
+        const std::string srcDev = preOpDevice;                                  // e.g., "ms0:/"
+        const std::string dstDev = opDestDevice.empty() ? srcDev : opDestDevice; // same-device if empty
+
+        // 1) Ensure we have cache entries (created if missing)
+        auto &srcEntry = deviceCache[rootPrefix(srcDev)];
+        auto &dstEntry = deviceCache[rootPrefix(dstDev)];
+
+        // 2) If we have no snapshots yet (first time ever), build them once and store.
+        //    Otherwise we will patch them below.
+        if (srcEntry.snap.flatAll.empty() && srcEntry.snap.uncategorized.empty()
+            && srcEntry.snap.categories.empty() && srcEntry.snap.categoryNames.empty()) {
+            scanDevice(srcDev);                 // one-time build
+            snapshotCurrentScan(srcEntry.snap);
+            srcEntry.dirty = false;
+        }
+        if (strncasecmp(srcDev.c_str(), dstDev.c_str(), 4) != 0) {
+            if (dstEntry.snap.flatAll.empty() && dstEntry.snap.uncategorized.empty()
+                && dstEntry.snap.categories.empty() && dstEntry.snap.categoryNames.empty()) {
+                scanDevice(dstDev);             // one-time build for the other device
+                snapshotCurrentScan(dstEntry.snap);
+                dstEntry.dirty = false;
             }
         }
 
-
-        // Feedback
-        char res[64];
-        if (failCount == 0) {
-            snprintf(res, sizeof(res), "Moved %d item(s)", okCount);
-            drawMessage(res, COLOR_GREEN);
-        } else if (okCount == 0) {
-            snprintf(res, sizeof(res), "Move failed (%d)", failCount);
-            drawMessage(res, COLOR_RED);
-        } else {
-            snprintf(res, sizeof(res), "Moved %d, failed %d", okCount, failCount);
-            drawMessage(res, COLOR_YELLOW);
+        // 3) Patch both snapshots with the results (remove from src; add/rename into dst)
+        for (size_t i = 0; i < opSrcPaths.size(); ++i) {
+            const std::string& src = opSrcPaths[i];
+            const GameItem::Kind k = opSrcKinds[i];
+            const std::string   dst = buildDestPath(src, k,
+                                    opDestDevice.empty() ? currentDevice : opDestDevice, opDestCategory);
+            cacheApplyMoveOrCopy(srcEntry.snap, dstEntry.snap, src, dst, k, /*isMove*/true);
         }
-        sceKernelDelayThread(800*1000);
+        // Keep them valid for instant reuse
+        srcEntry.dirty = false;
+        dstEntry.dirty = false;
+
+        // Select the destination category and repaint full contents
+        showDestinationCategoryNow(dstDev, opDestCategory);
+
+        // Toast
+        char res[64];
+        if (failCount == 0)      snprintf(res, sizeof(res), "Moved %d item(s)", okCount);
+        else if (okCount == 0)   snprintf(res, sizeof(res), "Move failed (%d)", failCount);
+        else                     snprintf(res, sizeof(res), "Moved %d, failed %d", okCount, failCount);
+        drawMessage(res, (failCount ? (okCount ? COLOR_YELLOW : COLOR_RED) : COLOR_GREEN));
+        sceKernelDelayThread(800 * 1000);
     }
 
     // -----------------------------------------------------------
@@ -3708,11 +4465,15 @@ public:
                             showConfirmAndRun();
                         }
                     } else {
-                        // Different device → do a real scan (keep your existing behavior)
-                        msgBox = new MessageBox("Scanning destination...", nullptr, SCREEN_WIDTH, SCREEN_HEIGHT, 1.0f, 0, "", 16, 18, 8, 14);
-                        renderOneFrame();
-                        scanDevice(opDestDevice);
-                        delete msgBox; msgBox = nullptr;
+                        // Prefer cache; only show spinner if we actually need to scan
+                        bool needScan = deviceCache[rootPrefix(opDestDevice)].dirty;
+                        if (needScan) {
+                            msgBox = new MessageBox("Scanning destination...", nullptr, SCREEN_WIDTH, SCREEN_HEIGHT, 1.0f, 0, "", 16, 18, 8, 14);
+                            renderOneFrame();
+                        }
+                        scanDevicePreferCache(opDestDevice);
+                        if (needScan) { delete msgBox; msgBox = nullptr; }
+
 
                         if (hasCategories) {
                             buildCategoryRowsForOp();
@@ -3813,26 +4574,33 @@ public:
             return;
         }
 
-        // △: open File ops menu (Move/Copy/Delete)
+        // △: open modal menu (content views → Move/Copy/Delete; categories → New/Delete)
         if (pressed & PSP_CTRL_TRIANGLE) {
-            if (!showRoots && (view == View_AllFlat || view == View_CategoryContents) && !fileMenu) {
+            if (!showRoots && !fileMenu) {
+                if (view == View_AllFlat || view == View_CategoryContents) {
+                    const bool canCrossDevices = dualDeviceAvailableFromMs0();
+                    const bool canWithinDevice = hasCategories;
+                    const bool canMoveCopy     = canCrossDevices || canWithinDevice;
 
-                // New rule:
-                // - If PSP Go running from ms0 (dualDeviceAvailableFromMs0): Move/Copy enabled regardless of categories.
-                // - Else (single-device access): require categories on the *current* device.
-                const bool canCrossDevices = dualDeviceAvailableFromMs0();
-                const bool canWithinDevice = hasCategories;
-                const bool canMoveCopy     = canCrossDevices || canWithinDevice;
-
-                std::vector<FileOpsItem> items = {
-                    { "Move",   !canMoveCopy },
-                    { "Copy",   !canMoveCopy },
-                    { "Delete", false }
-                };
-                fileMenu = new FileOpsMenu(items, SCREEN_WIDTH, SCREEN_HEIGHT);
+                    std::vector<FileOpsItem> items = {
+                        { "Move",   !canMoveCopy },
+                        { "Copy",   !canMoveCopy },
+                        { "Delete", false }
+                    };
+                    menuContext = MC_ContentOps;
+                    fileMenu = new FileOpsMenu(items, SCREEN_WIDTH, SCREEN_HEIGHT);
+                } else if (view == View_Categories) {
+                    std::vector<FileOpsItem> items = {
+                        { "New",    false },
+                        { "Delete", false }
+                    };
+                    menuContext = MC_CategoryOps;
+                    fileMenu = new FileOpsMenu(items, SCREEN_WIDTH, SCREEN_HEIGHT);
+                }
             }
             return;
         }
+
 
 
         // UP navigation
@@ -3953,13 +4721,35 @@ public:
                     // If we just closed a confirmation, perform the chosen op now.
                     if (opPhase == OP_Confirm) {
                         if (opDestDevice == "__DELETE__") {
-                            // perform delete now
                             ClockGuard cg; cg.boost333();
                             msgBox = new MessageBox("Deleting...", nullptr, SCREEN_WIDTH, SCREEN_HEIGHT, 1.0f, 0, "", 16, 18, 8, 14);
                             renderOneFrame();
-
-                            // Run progress-driven Delete just like Move/Copy
                             performDelete();
+                            continue;
+                        }
+                        if (opDestDevice == "__DEL_CAT__") {
+                            // Delete the CAT_ folder across ISO/GAME roots (all contents),
+                            // per spec: non-game files don't affect the confirmation count and will just be removed.
+                            ClockGuard cg; cg.boost333();
+                            msgBox = new MessageBox("Deleting category...", nullptr, SCREEN_WIDTH, SCREEN_HEIGHT, 1.0f, 0, "", 16, 18, 8, 14);
+                            renderOneFrame();
+
+                            std::string delCat = opDestCategory;
+                            deleteCategoryDirs(currentDevice, delCat);
+
+                            // Patch cache & refresh UI without a rescan
+                            cachePatchDeleteCategory(delCat);
+                            buildCategoryRows();
+
+
+                            delete msgBox; msgBox = nullptr;
+                            drawMessage("Category deleted", COLOR_GREEN);
+                            sceKernelDelayThread(700*1000);
+
+                            // Clear sentinel state
+                            opDestDevice.clear();
+                            opDestCategory.clear();
+                            opPhase = OP_None;
                             continue;
                         }
 
@@ -3974,50 +4764,95 @@ public:
             // File ops menu (modal)
             if (fileMenu) {
                 if (!fileMenu->update()) {
-                    int choice = fileMenu->choice();  // 0=Move,1=Copy,2=Delete, -1=cancel
+                    int choice = fileMenu->choice();
                     delete fileMenu; fileMenu = nullptr; inputWaitRelease = true;
 
-                    if (choice == 0) { // Move
-                        startAction(AM_Move);
-                    } else if (choice == 1) { // Copy
-                        startAction(AM_Copy);
-                    } else if (choice == 2) { // Delete
-                        // Build delete set (checked or current)
-                        std::vector<std::string> delPaths;
-                        std::vector<GameItem::Kind> delKinds;
-                        if (!checked.empty()) {
-                            for (auto &p : checked) {
-                                delPaths.push_back(p);
-                                GameItem::Kind k = GameItem::ISO_FILE;
-                                for (auto &gi : workingList) if (gi.path == p) { k = gi.kind; break; }
-                                delKinds.push_back(k);
+                    if (menuContext == MC_ContentOps) {
+                        // 0=Move,1=Copy,2=Delete
+                        if (choice == 0)      startAction(AM_Move);
+                        else if (choice == 1) startAction(AM_Copy);
+                        else if (choice == 2) {
+                            // (existing content delete flow)
+                            std::vector<std::string> delPaths;
+                            std::vector<GameItem::Kind> delKinds;
+                            if (!checked.empty()) {
+                                for (auto &p : checked) {
+                                    delPaths.push_back(p);
+                                    GameItem::Kind k = GameItem::ISO_FILE;
+                                    for (auto &gi : workingList) if (gi.path == p) { k = gi.kind; break; }
+                                    delKinds.push_back(k);
+                                }
+                            } else if (selectedIndex >= 0 && selectedIndex < (int)workingList.size()) {
+                                delPaths.push_back(workingList[selectedIndex].path);
+                                delKinds.push_back(workingList[selectedIndex].kind);
                             }
-                        } else if (selectedIndex >= 0 && selectedIndex < (int)workingList.size()) {
-                            delPaths.push_back(workingList[selectedIndex].path);
-                            delKinds.push_back(workingList[selectedIndex].kind);
+
+                            if (delPaths.empty()) {
+                                msgBox = new MessageBox("Nothing to delete.", okIconTexture, SCREEN_WIDTH, SCREEN_HEIGHT, 1.0f, 20, "OK", 16, 18, 8, 14);
+                            } else {
+                                char buf[96];
+                                snprintf(buf, sizeof(buf), "Delete %d item(s)?\nPress X to confirm.", (int)delPaths.size());
+                                msgBox = new MessageBox(buf, okIconTexture, SCREEN_WIDTH, SCREEN_HEIGHT, 1.0f, 20, "OK", 16, 18, 8, 14);
+                                opSrcPaths = delPaths; opSrcKinds = delKinds;
+                                actionMode = AM_None;
+                                opPhase    = OP_Confirm;
+                                opDestDevice = "__DELETE__";
+                            }
                         }
+                    } else {
+                        // MC_CategoryOps: 0=New, 1=Delete
+                        if (choice == 0) {
+                            // New category: OSK → create across roots
+                            std::string typed;
+                            if (!promptTextOSK("New Category", "CAT_", 64, typed)) {
+                                // cancelled → nothing
+                            } else {
+                                if (!startsWithCAT(typed.c_str())) typed = std::string("CAT_") + typed;
+                                typed = sanitizeFilename(typed);
+                                createCategoryDirs(currentDevice, typed);
 
-                        if (delPaths.empty()) {
-                            msgBox = new MessageBox("Nothing to delete.", okIconTexture, SCREEN_WIDTH, SCREEN_HEIGHT, 1.0f, 20, "OK", 16, 18, 8, 14);
-                        } else {
-                            char buf[96];
-                            snprintf(buf, sizeof(buf), "Delete %d item(s)?\nPress X to confirm.", (int)delPaths.size());
-                            msgBox = new MessageBox(buf, okIconTexture, SCREEN_WIDTH, SCREEN_HEIGHT, 1.0f, 20, "OK", 16, 18, 8, 14);
+                                // Patch cache instead of full rescan
+                                cachePatchAddCategory(typed);
+                                buildCategoryRows();
+                                for (int i=0;i<(int)entries.size();++i)
+                                    if (!strcasecmp(entries[i].d_name, typed.c_str())) { selectedIndex = i; break; }
+                                drawMessage("Category created", COLOR_GREEN);
+                                sceKernelDelayThread(600*1000);
+                            }
+                        } else if (choice == 1) {
+                            // Delete category: count games first and confirm
+                            if (selectedIndex < 0 || selectedIndex >= (int)entries.size()) {
+                                msgBox = new MessageBox("No category selected.", okIconTexture, SCREEN_WIDTH, SCREEN_HEIGHT, 1.0f, 20, "OK", 16, 18, 8, 14);
+                            } else {
+                                std::string cat = entries[selectedIndex].d_name;
+                                if (!startsWithCAT(cat.c_str())) {
+                                    msgBox = new MessageBox("Pick a CAT_ folder.", okIconTexture, SCREEN_WIDTH, SCREEN_HEIGHT, 1.0f, 20, "OK", 16, 18, 8, 14);
+                                } else {
+                                    int games = countGamesInCategory(currentDevice, cat);
+                                    char buf[128];
+                                    if (games > 0) {
+                                        snprintf(buf, sizeof(buf),
+                                                "%d game(s) are in this folder and will be deleted.\nPress X to confirm.", games);
+                                    } else {
+                                        snprintf(buf, sizeof(buf),
+                                                "Delete empty category?\nPress X to confirm.");
+                                    }
+                                    msgBox = new MessageBox(buf, okIconTexture, SCREEN_WIDTH, SCREEN_HEIGHT, 1.0f, 20, "OK", 16, 18, 8, 14);
 
-                            // piggyback the msgBox close just like Move/Copy:
-                            // stash into opSrcPaths/opSrcKinds and use a trivial executor
-                            opSrcPaths = delPaths;
-                            opSrcKinds = delKinds;
-                            actionMode = AM_None;    // not a picker-driven op
-                            opPhase    = OP_Confirm; // reuse confirm close hook
-                            // mark a small sentinel so we know it's delete:
-                            opDestDevice = "__DELETE__";
+                                    // Reuse the confirm-close hook, sentinel device + stash cat in opDestCategory
+                                    actionMode = AM_None;
+                                    opPhase    = OP_Confirm;
+                                    opDestDevice   = "__DEL_CAT__";
+                                    opDestCategory = cat;
+                                }
+                            }
                         }
                     }
                 } else {
                     continue; // keep menu modal
                 }
             }
+
 
             handleInput();
         }

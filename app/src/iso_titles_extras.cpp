@@ -676,6 +676,84 @@ static bool endsWithNoCase(const std::string& s, const char* ext){
     return true;
 }
 
+// --- PNG signature fallback extractor ---------------------------------------
+// Scan the file for a PNG signature and copy bytes chunk-by-chunk until IEND.
+// This is used only if ISO9660 lookup fails (handles weird padding layouts).
+static bool ExtractPNGBySignature(const std::string& path, std::vector<uint8_t>& out) {
+    // PNG signature
+    static const uint8_t sig[8] = {0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A};
+
+    SceUID fd = sceIoOpen(path.c_str(), PSP_O_RDONLY, 0);
+    if (fd < 0) return false;
+
+    // Stream state
+    const int READ_SZ = 256 * 1024;
+    std::vector<uint8_t> buf(READ_SZ + 8);
+    int64_t filePos = 0;
+    int carry = 0;
+    bool found = false;
+
+    // Rolling scan for signature
+    while (true) {
+        int got = sceIoRead(fd, buf.data() + carry, READ_SZ);
+        if (got < 0) { sceIoClose(fd); return false; }
+        if (got == 0 && carry == 0) { break; }
+        int total = carry + got;
+
+        for (int i = 0; i + 8 <= total; ++i) {
+            if (memcmp(buf.data() + i, sig, 8) == 0) {
+                // Found a PNG. Seek to absolute position of signature.
+                int64_t sigAbs = filePos + i;
+                sceIoLseek32(fd, (SceOff)sigAbs, PSP_SEEK_SET);
+
+                // Copy the PNG out by parsing length+type+data+CRC until IEND.
+                out.clear();
+                out.reserve(256 * 1024); // typical ICON0 size
+                // Write signature
+                out.insert(out.end(), sig, sig + 8);
+
+                // Read chunks
+                while (true) {
+                    uint8_t lenType[8];
+                    int r = sceIoRead(fd, lenType, 8);
+                    if (r != 8) { out.clear(); sceIoClose(fd); return false; }
+
+                    uint32_t len = (lenType[0] << 24) | (lenType[1] << 16) | (lenType[2] << 8) | lenType[3];
+                    // Guard: ICON0.PNG is small; cap at ~5MB to avoid bogus scans.
+                    if (len > 5 * 1024 * 1024) { out.clear(); sceIoClose(fd); return false; }
+
+                    // Append length+type
+                    out.insert(out.end(), lenType, lenType + 8);
+
+                    // Read data + CRC
+                    size_t chunkTotal = (size_t)len + 4; // CRC
+                    size_t already = out.size();
+                    out.resize(already + chunkTotal);
+                    if (sceIoRead(fd, out.data() + already, chunkTotal) != (int)chunkTotal) {
+                        out.clear(); sceIoClose(fd); return false;
+                    }
+
+                    // Check for IEND
+                    if (lenType[4] == 'I' && lenType[5] == 'E' && lenType[6] == 'N' && lenType[7] == 'D') {
+                        sceIoClose(fd);
+                        return true;
+                    }
+                }
+            }
+        }
+
+        // Keep last 7 bytes to detect signature across chunk boundary
+        carry = std::min(total, 7);
+        if (carry) memmove(buf.data(), buf.data() + total - carry, carry);
+        filePos += got;
+        if (got == 0) break;
+    }
+
+    sceIoClose(fd);
+    return false;
+}
+
+
 bool ExtractIcon0PNG(const std::string& path, std::vector<uint8_t>& outVec) {
     outVec.clear();
 
@@ -706,5 +784,15 @@ bool ExtractIcon0PNG(const std::string& path, std::vector<uint8_t>& outVec) {
         return readJsoIconPNG(path, outVec);
     }
 
+    {
+        std::vector<uint8_t> fallback;
+        if (ExtractPNGBySignature(path, fallback)) {
+            outVec.swap(fallback);
+            // Optional log: printf("[icon] Fallback PNG signature scan succeeded on %s\n", path.c_str());
+            return true;
+        }
+    }
+
+    // Still no icon
     return false;
 }

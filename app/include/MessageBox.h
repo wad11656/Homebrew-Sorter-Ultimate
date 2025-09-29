@@ -35,6 +35,8 @@ public:
     void showProgress(const char* fileMessage, uint64_t offset, uint64_t size);
     void updateProgress(uint64_t offset, uint64_t size, const char* fileMessage = nullptr);
     void hideProgress();
+    // NEW: set the headline (game title) without touching the detail/offset
+    void setProgressTitle(const char* title);
 
 private:
     // config/state
@@ -51,11 +53,16 @@ private:
     int   _iconTargetH;
     bool  _visible;
 
-    // ---- New: progress state ----
+    // ---- Progress state ----
+    // Two lines shown above the bar:
+    //   1) _progTitle  (game title, e.g., extracted from EBOOT/ISO)
+    //   2) _progDetail (filename currently being processed)
     bool        _progEnabled = false;
-    std::string _progMsg;       // per-file message (usually filename)
+    std::string _progTitle;    // headline (game title)
+    std::string _progDetail;   // detail (filename)
     uint64_t    _progOffset = 0;
     uint64_t    _progSize   = 1; // never 0 to avoid div-by-zero
+
 };
 
 #endif // MESSAGEBOX_H
