@@ -8,35 +8,30 @@
 #include "Texture.h"
 
 class MessageBox {
-public:
-    // Full-parameter ctor (11 args) to match main.cpp
-    MessageBox(const char* message,
-               Texture* okIcon,
-               int screenW = 480, int screenH = 272,
-               float textScale = 0.9f,
-               int iconTargetH = 22,
-               const char* okLabel = "OK",
-               int padX = 16, int padY = 26,
-               int wrapTweakPx = 40,
-               int forcedPxPerChar = -1);
+    public:
+        // New closeButton param (defaults to CROSS to preserve existing behavior)
+        MessageBox(const char* message,
+                Texture* okIcon,
+                int screenW = 480, int screenH = 272,
+                float textScale = 0.9f,
+                int iconTargetH = 22,
+                const char* okLabel = "OK",
+                int padX = 16, int padY = 26,
+                int wrapTweakPx = 40,
+                int forcedPxPerChar = -1,
+                unsigned closeButton = PSP_CTRL_CROSS);
 
-    // Draw the modal (dim bg + panel + text + icon/label/progress) when visible
-    void render(intraFont* font);
+        void render(intraFont* font);
+        bool update();
 
-    // Returns true while still visible (closes on CROSS)
-    bool update();
+        bool isVisible() const { return _visible; }
+        void forceClose() { _visible = false; }
 
-    // Optional convenience
-    bool isVisible() const { return _visible; }
-
-    // ---- New: progress API ----
-    // Use _msg (passed in ctor) as the title, and show a 2nd line that you can update (e.g., current filename).
-    // Call showProgress once when starting a file, then updateProgress() inside your copy loop.
-    void showProgress(const char* fileMessage, uint64_t offset, uint64_t size);
-    void updateProgress(uint64_t offset, uint64_t size, const char* fileMessage = nullptr);
-    void hideProgress();
-    // NEW: set the headline (game title) without touching the detail/offset
-    void setProgressTitle(const char* title);
+        // ---- Progress API (unchanged) ----
+        void showProgress(const char* fileMessage, uint64_t offset, uint64_t size);
+        void updateProgress(uint64_t offset, uint64_t size, const char* fileMessage = nullptr);
+        void hideProgress();
+        void setProgressTitle(const char* title);
 
 private:
     // config/state
@@ -62,6 +57,8 @@ private:
     std::string _progDetail;   // detail (filename)
     uint64_t    _progOffset = 0;
     uint64_t    _progSize   = 1; // never 0 to avoid div-by-zero
+    unsigned _closeButton;      // NEW: which button dismisses the box
+
 
 };
 

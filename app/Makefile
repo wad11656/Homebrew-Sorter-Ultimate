@@ -25,7 +25,8 @@ LIBDIR = ../libs/lib
 LIBS = -lintrafont \
        -lpsputility \
        -lpspgu -lpspgum -lpsprtc -lpspctrl -lpsppower \
-       -lpspdisplay -lpspkubridge -lpspdebug -lstdc++ -lm -lz
+       -lpspdisplay -lpspkubridge -lpspusb -lpspusbstor \
+       -lpspdebug -lstdc++ -lm -lz
 
 # PSP EBOOT metadata
 EXTRA_TARGETS   = EBOOT.PBP

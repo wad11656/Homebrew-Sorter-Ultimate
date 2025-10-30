@@ -54,6 +54,8 @@
 #include <pspthreadman.h>   // thread priority tweaks
 #include <kubridge.h>
 #include <intraFont.h>
+#include <pspusb.h>
+#include <pspusbstor.h>
 
 #include <errno.h>
 #include <malloc.h>
@@ -72,6 +74,43 @@
 #include "Texture.h"
 #include "MessageBox.h"
 #include "iso_titles_extras.h"
+// Load the mass-storage stack in safe order. Always ms0; add ef0 on PSP Go.
+static int LoadStartKMod(const char* path);
+static bool DeviceExists(const char* root);
+
+static void EnsureUsbKernelModules() {
+    // Core sync + mass-storage core
+    LoadStartKMod("flash0:/kd/semawm.prx");
+    LoadStartKMod("flash0:/kd/usbstor.prx");
+    LoadStartKMod("flash0:/kd/usbstormgr.prx");
+
+    // PSP Go internal storage backend (ef0) only if present
+    if (DeviceExists("ef0:/")) {
+        LoadStartKMod("flash0:/kd/usbstoreflash.prx");
+    }
+
+    // Memory Stick backend
+    LoadStartKMod("flash0:/kd/usbstorms.prx");
+}
+
+
+static int LoadStartKMod(const char* path) {
+    SceUID mod = kuKernelLoadModule(path, 0, NULL);
+    if (mod >= 0) {
+        int status;
+        sceKernelStartModule(mod, 0, NULL, &status, NULL);
+    }
+    return mod;
+}
+static bool DeviceExists(const char* root) {
+    SceUID fd = sceIoDopen(root);
+    if (fd >= 0) { sceIoDclose(fd); return true; }
+    return false;
+}
+
+static int LoadStartKMod(const char* path);
+static bool DeviceExists(const char* root);
+
 
 
 PSP_MODULE_INFO("KernelFileExplorer", 0x800, 1, 0);
@@ -217,6 +256,27 @@ static uint32_t gOskBgColorABGR = 0xFF685020;
 #define REPEAT_INTERVAL_US        50000ULL
 #define REPEAT_ACCEL_AFTER_US    800000ULL
 #define REPEAT_INTERVAL_FAST_US   16000ULL
+
+// USB state
+static bool gUsbActive = false;
+static MessageBox* gUsbBox = nullptr;
+
+
+static bool gUsbShownConnected = false;
+// USB helpers
+static int UsbStartStacked() {
+    EnsureUsbKernelModules();
+    (void)sceUsbStart(PSP_USBBUS_DRIVERNAME, 0, 0);
+    (void)sceUsbStart(PSP_USBSTOR_DRIVERNAME, 0, 0);
+    return 0;}
+static void UsbStopStacked() {
+    sceUsbDeactivate(0x1c8);
+    sceUsbStop(PSP_USBSTOR_DRIVERNAME, 0, 0);
+    sceUsbStop(PSP_USBBUS_DRIVERNAME, 0, 0);
+}
+static void UsbActivate()   { sceUsbActivate(0x1c8); }
+static void UsbDeactivate() { sceUsbDeactivate(0x1c8); }
+
 
 // ISO constants
 #define ISO_SECTOR 2048
@@ -645,10 +705,12 @@ bool readDaxIconPNG(const std::string& path, std::vector<uint8_t>& outPng);
 // ---------------------------------------------------------------
 static const char* rootDisplayName(const char* r) {
     if (!r) return "";
+    if (!strcmp(r, "__USB_MODE__")) return "USB Mode";
     if (!strcmp(r, "ms0:/")) return "ms0:/ (Memory Stick)";
     if (!strcmp(r, "ef0:/")) return "ef0:/ (Internal)";
     return r;
 }
+
 static bool startsWithCAT(const char* name) {
     return name && name[0]=='C' && name[1]=='A' && name[2]=='T' && name[3]=='_';
 }
@@ -2629,8 +2691,22 @@ private:
         ensureSelectionIcon();
         drawSelectedIconLowerRight();
 
-        if (msgBox) msgBox->render(font);
+        if (msgBox)  msgBox->render(font);
+        if (gUsbBox) gUsbBox->render(font);
         if (fileMenu) fileMenu->render(font);
+
+        // (MessageBox input is handled exclusively in run().)
+        if (gUsbBox) {
+            if (!gUsbBox->update()) {
+                // User pressed Circle → disconnect and close
+                UsbDeactivate();
+                gUsbActive = false;
+                delete gUsbBox; gUsbBox = nullptr;
+                inputWaitRelease = true;
+            }
+        }
+
+
 
         sceGuFinish();
         sceGuSync(0,0);
@@ -2904,6 +2980,19 @@ private:
         clearUI();
         int preselect = -1;
         const uint64_t HEADROOM = (4ull << 20); // keep ~4 MiB headroom
+
+        // Add a synthetic "USB Mode" row only when NOT picking a device (Move/Copy)
+        if (opPhase != OP_SelectDevice) {
+            SceIoDirent ue{}; strncpy(ue.d_name, "__USB_MODE__", sizeof(ue.d_name) - 1);
+            ue.d_stat.st_mode = FIO_S_IFDIR;
+            entries.push_back(ue);
+            entryPaths.emplace_back("");
+            entryKinds.push_back(GameItem::ISO_FILE);
+            rowFlags.push_back(0);
+            rowFreeBytes.push_back(0);
+            rowReason.push_back(RD_NONE);
+            rowNeedBytes.push_back(0);
+        }
 
         for (auto &r : roots){
             SceIoDirent e{}; strncpy(e.d_name, r.c_str(), sizeof(e.d_name)-1);
@@ -3947,21 +4036,16 @@ private:
         }
         dstEntry.dirty = false;
 
-        // Jump to destination view immediately
-        currentDevice = dstDev;
-        restoreScan(dstEntry.snap);
-        if (!opDestCategory.empty()) {
-            currentCategory = opDestCategory;
-            openCategory(currentCategory);
-        } else {
-            rebuildFlatFromCache();
-        }
+        // Jump to destination view immediately (match Move behavior)
+        showDestinationCategoryNow(dstDev, opDestCategory);
+
         // optional: focus the last copied item
         if (!opSrcPaths.empty()) {
             const std::string lastDst = buildDestPath(opSrcPaths.back(), opSrcKinds.back(),
                 opDestDevice.empty() ? currentDevice : opDestDevice, opDestCategory);
             selectByPath(lastDst);
         }
+
         // clear op state
         actionMode = AM_None;
         opPhase    = OP_None;
@@ -4241,6 +4325,17 @@ private:
         // Select the destination category and repaint full contents
         showDestinationCategoryNow(dstDev, opDestCategory);
 
+        // Focus the last moved item so it’s highlighted
+        if (!opSrcPaths.empty() && okCount > 0) {
+            const std::string lastDst = buildDestPath(
+                opSrcPaths.back(),
+                opSrcKinds.back(),
+                opDestDevice.empty() ? currentDevice : opDestDevice,
+                opDestCategory
+            );
+            selectByPath(lastDst);
+        }
+
         // Toast
         char res[64];
         if (failCount == 0)      snprintf(res, sizeof(res), "Moved %d item(s)", okCount);
@@ -4248,6 +4343,7 @@ private:
         else                     snprintf(res, sizeof(res), "Moved %d, failed %d", okCount, failCount);
         drawMessage(res, (failCount ? (okCount ? COLOR_YELLOW : COLOR_RED) : COLOR_GREEN));
         sceKernelDelayThread(800 * 1000);
+
     }
 
     // -----------------------------------------------------------
@@ -4293,6 +4389,15 @@ public:
 
         sceCtrlSetSamplingCycle(0);
         sceCtrlSetSamplingMode(PSP_CTRL_MODE_ANALOG);
+
+        // Prepare USB bus + mass-storage once at boot
+        sceUsbStart(PSP_USBBUS_DRIVERNAME, 0, 0);
+        sceUsbStart(PSP_USBSTOR_DRIVERNAME, 0, 0);
+
+
+        // Prepare USB drivers (faster activate later)
+        UsbStartStacked();
+
     }
 
 
@@ -4304,10 +4409,47 @@ public:
         }
 
         SceCtrlData pad; sceCtrlReadBufferPositive(&pad, 1);
-
         unsigned pressed = pad.Buttons & ~lastButtons;
 
-        bool analogUpNow = (pad.Ly <= 30);
+        // Drive USB connection + UI while active
+        if (gUsbActive) {
+            int s = sceUsbGetState();  // OR’d PSP_USB_* flags
+            // If the cable is in but not activated yet, activate now
+            if ((s & PSP_USB_CABLE_CONNECTED) && !(s & PSP_USB_ACTIVATED)) {
+                sceUsbActivate(0x1c8); // default mass storage PID
+            }
+            const bool connected = (s & PSP_USB_CONNECTION_ESTABLISHED);
+            if (connected != gUsbShownConnected) {
+                // Rebuild the message to reflect state
+                if (gUsbBox) { delete gUsbBox; gUsbBox = nullptr; }
+                gUsbBox = new MessageBox(
+                    connected ? "Connected to PC...\nPress \xE2\x97\xAF to disconnect."
+                            : "Connect to PC...\nPress \xE2\x97\xAF to disconnect.",
+                    nullptr, SCREEN_WIDTH, SCREEN_HEIGHT, 1.0f, 0, "", 16, 18, 8, 14,
+                    PSP_CTRL_CIRCLE);
+                gUsbShownConnected = connected;
+            }
+        }
+
+
+        
+// While USB Mode is active, drive the connection and UI
+if (gUsbActive) {
+    int s = sceUsbGetState();
+    if ((s & PSP_USB_CABLE_CONNECTED) && !(s & PSP_USB_ACTIVATED)) {
+        sceUsbActivate(0x1c8);
+    }
+    const bool connected = (s & PSP_USB_CONNECTION_ESTABLISHED);
+    if (connected != gUsbShownConnected) {
+        if (gUsbBox) { delete gUsbBox; gUsbBox = nullptr; }
+        gUsbBox = new MessageBox(
+            connected ? "Connected to PC...\nPress \xE2\x97\xAF to disconnect."
+                      : "Connect to PC...\nPress \xE2\x97\xAF to disconnect.",
+            nullptr, SCREEN_WIDTH, SCREEN_HEIGHT, 1.0f, 0, "", 16, 18, 8, 14);
+        gUsbShownConnected = connected;
+    }
+}
+bool analogUpNow = (pad.Ly <= 30);
         if (analogUpNow && !analogUpHeld) {
             showDebugTimes = !showDebugTimes;
         }
@@ -4670,13 +4812,26 @@ public:
             if (selectedIndex < 0 || selectedIndex >= (int)entries.size()) return;
 
             if (showRoots) {
-                if (selectedIndex < (int)rowFlags.size() && (rowFlags[selectedIndex] & ROW_DISABLED)) {
-                    return;
+                if (selectedIndex < (int)rowFlags.size() && (rowFlags[selectedIndex] & ROW_DISABLED)) return;
+
+                std::string dev = entries[selectedIndex].d_name;
+                if (dev == "__USB_MODE__") {
+                    if (!gUsbActive) {
+                        UsbActivate();
+                        gUsbActive = true;
+                        gUsbShownConnected = false;
+                        gUsbBox = new MessageBox(
+                            "Connect to PC...\nPress \xE2\x97\xAF to disconnect.",
+                            nullptr, SCREEN_WIDTH, SCREEN_HEIGHT, 1.0f, 0, "", 16, 18, 8, 14,
+                            PSP_CTRL_CIRCLE);  // CLOSE ON CIRCLE
+                    }
+                    return; // don’t fall through to openDevice()
                 }
-                std::string dev = entries[selectedIndex].d_name; // ms0:/ or ef0:/
+
                 openDevice(dev);
                 return;
             }
+
 
             if (view == View_Categories) {
                 if (FIO_S_ISDIR(entries[selectedIndex].d_stat.st_mode)) openCategory(entries[selectedIndex].d_name);

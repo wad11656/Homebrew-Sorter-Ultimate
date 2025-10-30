@@ -1,9 +1,17 @@
 #include "MessageBox.h"
 #include <pspgu.h>
 #include <pspdisplay.h>
+#include <pspctrl.h>
+#include <pspkernel.h>
 #include <string>
 #include <vector>
 #include <cstring>
+
+// ---- time helper ----
+static inline unsigned long long now_us() {
+    // sceKernelGetSystemTimeWide returns microseconds since boot
+    return sceKernelGetSystemTimeWide();
+}
 
 // Filled-rect helper (2-vertex sprite)
 static void mbDrawRect(int x, int y, int w, int h, unsigned color) {
@@ -35,7 +43,8 @@ MessageBox::MessageBox(const char* message,
                        const char* okLabel,
                        int padX,   int padY,
                        int wrapTweakPx,
-                       int forcedPxPerChar)
+                       int forcedPxPerChar,
+                       unsigned closeButton)
 : _msg(message),
   _okLabel(okLabel),
   _icon(okIcon),
@@ -46,8 +55,8 @@ MessageBox::MessageBox(const char* message,
   _forcedPxPerChar(forcedPxPerChar),
   _textScale(textScale),
   _iconTargetH(iconTargetH),
-  _visible(true) {
-    // center the panel
+  _visible(true),
+  _closeButton(closeButton) {
     _x = (_screenW - _w) / 2;
     _y = (_screenH - _h) / 2;
 }
@@ -55,19 +64,69 @@ MessageBox::MessageBox(const char* message,
 bool MessageBox::update() {
     if (!_visible) return false;
 
-    SceCtrlData pad{};
-    sceCtrlReadBufferPositive(&pad, 1);
+    // --- Robust, non-blocking input sampling with debounce/hold fallback ---
+    // Using "peek" avoids blocking frames and missing edges when heavy work happens elsewhere.
+    SceCtrlData pad{}; 
+    sceCtrlPeekBufferPositive(&pad, 1);
+    unsigned now = pad.Buttons;
 
-    // Edge-detect locally; ONLY CROSS closes
-    static unsigned last = 0;
-    unsigned pressed = pad.Buttons & ~last;
-    last = pad.Buttons;
+    // These statics intentionally persist across calls to preserve edge/hold state.
+    static unsigned lastButtons = 0;
+    static unsigned long long holdStartUs = 0;
+    static MessageBox* activeBox = nullptr;
+    static bool armedForInput = true;   // becomes true once close button is seen released after showing
 
-    if (pressed & PSP_CTRL_CROSS) {
+    // If a different MessageBox has become active, require a release before accepting input.
+    if (activeBox != this) {
+        activeBox = this;
+        armedForInput = false;  // wait for release so we don't instantly close from a previous press
+        holdStartUs = 0;
+        lastButtons = now;
+    }
+
+    // Arm when the close button is fully released
+    if (!armedForInput) {
+        if ((now & _closeButton) == 0) {
+            armedForInput = true;
+            holdStartUs = 0;
+        }
+        lastButtons = now;
+        return _visible;
+    }
+
+    // Edge detection + hold fallback (helps when edges are missed due to long frames)
+    unsigned newlyPressed = now & ~lastButtons;
+    bool close = (newlyPressed & _closeButton) != 0;
+
+    if (!close) {
+        if (now & _closeButton) {
+            // Start or continue measuring hold
+            if ((lastButtons & _closeButton) == 0) {
+                holdStartUs = now_us();
+            } else {
+                if (holdStartUs == 0) holdStartUs = now_us();
+                unsigned long long elapsed = now_us() - holdStartUs;
+                // 220ms hold fallback: feels snappy but forgiving
+                if (elapsed >= 220000ULL) {
+                    close = true;
+                }
+            }
+        } else {
+            holdStartUs = 0;
+        }
+    }
+
+    lastButtons = now;
+
+    if (close) {
         _visible = false;
+        // After closing, require release before any other UI consumes this press.
+        armedForInput = false;
     }
     return _visible;
 }
+
+
 
 // very simple char-based wrapper with a better px/char estimate
 static void wrapTextByChars(const char* text, int maxCharsPerLine, std::vector<std::string>& outLines) {
@@ -290,4 +349,3 @@ void MessageBox::hideProgress() {
     _progOffset = 0;
     _progSize   = 1;
 }
-
