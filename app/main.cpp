@@ -70,6 +70,7 @@
 #include <map>
 #include <unordered_set>
 #include <stdarg.h>
+#include <set>
 
 #include "Texture.h"
 #include "MessageBox.h"
@@ -303,6 +304,18 @@ static const int CHECKBOX_Y_NUDGE = -6;
 // Start filename a bit after the checkbox
 static const int NAME_TEXT_X      = CHECKBOX_X + 14;     // ~154px     <--- new
 
+// --- one-shot guard to avoid re-enforcing category naming more than once per root
+static std::unordered_set<std::string> s_catNamingEnforced;
+
+// NEW: run-once guard so we don't re-enforce on every return to the category list
+static std::unordered_set<std::string> gclSchemeApplied; // keys like "ms0:/" or "ef0:/"
+
+static std::string oppositeRootOf(const std::string& dev){
+    if (strncasecmp(dev.c_str(), "ms0:/", 5) == 0) return "ef0:/";
+    if (strncasecmp(dev.c_str(), "ef0:/", 5) == 0) return "ms0:/";
+    return "";
+}
+
 // ===== Exit callback (HOME menu) =====
 static int ExitCallback(int, int, void*) { sceKernelExitGame(); return 0; }
 static int CallbackThread(SceSize, void*) {
@@ -491,6 +504,8 @@ static void __attribute__((unused)) hexdump(const void* p, size_t n) {
         logWrite("\r\n");
     }
 }
+
+
 
 static const char* canonicalDev(const char* devPath) {
     static char dev[5] = {0};
@@ -705,11 +720,13 @@ bool readDaxIconPNG(const std::string& path, std::vector<uint8_t>& outPng);
 // ---------------------------------------------------------------
 static const char* rootDisplayName(const char* r) {
     if (!r) return "";
-    if (!strcmp(r, "__USB_MODE__")) return "USB Mode";
-    if (!strcmp(r, "ms0:/")) return "ms0:/ (Memory Stick)";
-    if (!strcmp(r, "ef0:/")) return "ef0:/ (Internal)";
+    if (!strcmp(r, "__USB_MODE__"))     return "USB Mode";
+    if (!strcmp(r, "__GCL_SETTINGS__")) return "Category Settings";
+    if (!strcmp(r, "ms0:/"))            return "ms0:/ (Memory Stick)";
+    if (!strcmp(r, "ef0:/"))            return "ef0:/ (Internal)";
     return r;
 }
+
 
 static bool startsWithCAT(const char* name) {
     return name && name[0]=='C' && name[1]=='A' && name[2]=='T' && name[3]=='_';
@@ -1129,14 +1146,14 @@ static Texture* loadIsoIconPNG(const std::string& isoPath) {
     return texLoadPNGFromMemory(png.data(), (int)png.size());
 }
 
-// Returns how many "games" are inside the CAT_ across ISO and GAME roots on the given device.
+// Returns how many "games" are inside a category folder (across ISO and GAME roots)
+// on the given device. Category names may or may not have a CAT_ prefix.
 // Games = ISO-like files (.iso/.cso/.zso/.dax/.jso) in ISO roots,
-//      or folders under PSP/GAME.../CAT_* that contain an EBOOT.PBP (case-insensitive).
+//      or folders under PSP/GAME.../<category> that contain an EBOOT.PBP (case-insensitive).
+// Count games in a named <category> across both ISO and EBOOT schemes (case-insensitive).
 static int countGamesInCategory(const std::string& device, const std::string& cat) {
-    if (!startsWithCAT(cat.c_str())) return 0;
-
-    const char* isoRoots[]  = {"ISO/","ISO/PSP/"};
-    const char* gameRoots[] = {"PSP/GAME/","PSP/GAME/PSX/","PSP/GAME/Utility/","PSP/GAME150/"};
+    const char* isoRoots[]  = {"ISO/"};                // drop ISO/PSP/ as a root
+    const char* gameRoots[] = {"PSP/GAME/","PSP/GAME150/"}; // drop PSX/ and Utility/ as roots
 
     int count = 0;
 
@@ -1146,13 +1163,14 @@ static int countGamesInCategory(const std::string& device, const std::string& ca
         if (!dirExists(base)) continue;
         forEachEntry(base, [&](const SceIoDirent& e){
             if (!FIO_S_ISDIR(e.d_stat.st_mode)) {
+
                 std::string n = e.d_name;
                 if (isIsoLike(n)) count++;
             }
         });
     }
 
-    // EBOOT folders (only immediate children of the CAT_ directory)
+    // EBOOT folders (only immediate children of the category directory)
     for (auto r : gameRoots) {
         std::string base = device + std::string(r) + cat + "/";
         if (!dirExists(base)) continue;
@@ -1167,10 +1185,12 @@ static int countGamesInCategory(const std::string& device, const std::string& ca
     return count;
 }
 
+
 // Create the CAT_ folder across standard ISO/GAME roots (silently skips parents that don't exist)
+// Create the CAT_ folder tree across ISO/GAME roots (skips parents that don't exist)
 static void createCategoryDirs(const std::string& device, const std::string& cat) {
-    const char* isoRoots[]  = {"ISO/","ISO/PSP/"};
-    const char* gameRoots[] = {"PSP/GAME/","PSP/GAME/PSX/","PSP/GAME/Utility/","PSP/GAME150/"};
+    const char* isoRoots[]  = {"ISO/"};                // drop ISO/PSP/ as a root
+    const char* gameRoots[] = {"PSP/GAME/","PSP/GAME150/"}; // drop PSX/ and Utility/ as roots
     for (auto r : isoRoots) {
         std::string p = device + std::string(r) + cat;
         if (dirExists(parentOf(p))) sceIoMkdir(p.c_str(), 0777);
@@ -1183,11 +1203,13 @@ static void createCategoryDirs(const std::string& device, const std::string& cat
 
 // Remove the CAT_ folder tree across ISO/GAME roots (recursive)
 static void deleteCategoryDirs(const std::string& device, const std::string& cat) {
-    const char* isoRoots[]  = {"ISO/","ISO/PSP/"};
-    const char* gameRoots[] = {"PSP/GAME/","PSP/GAME/PSX/","PSP/GAME/Utility/","PSP/GAME150/"};
+    const char* isoRoots[]  = {"ISO/"};                // drop ISO/PSP/ as a root
+    const char* gameRoots[] = {"PSP/GAME/","PSP/GAME150/"}; // drop PSX/ and Utility/ as roots
     for (auto r : isoRoots)  { std::string p = device + std::string(r) + cat; if (dirExists(p)) removeDirRecursive(p); }
     for (auto r : gameRoots) { std::string p = device + std::string(r) + cat; if (dirExists(p)) removeDirRecursive(p); }
 }
+
+
 
 
 // ---------------------------------------------------------------
@@ -1354,7 +1376,8 @@ public:
     : _items(items), _screenW(screenW), _screenH(screenH) {
         _w = 280; _h = 120; _x = (_screenW - _w)/2; _y = (_screenH - _h)/2;
     }
-
+    void primeButtons(unsigned buttons) { _lastButtons = buttons; }
+    
     bool update() {
         if (!_visible) return false;
         SceCtrlData pad{}; sceCtrlReadBufferPositive(&pad, 1);
@@ -1435,6 +1458,121 @@ private:
 };
 // -----------------------------------------------
 
+// -------- Generic Option List Menu (modal with title + description) --------
+struct OptionItem { const char* label; bool disabled; };
+
+class OptionListMenu {
+public:
+    OptionListMenu(const char* title,
+                   const char* description,
+                   const std::vector<OptionItem>& items,
+                   int screenW, int screenH)
+    : _title(title), _desc(description), _items(items),
+      _screenW(screenW), _screenH(screenH) {
+        // A bit taller to fit the description
+        _w = 340; _h = 160; _x = (_screenW - _w)/2; _y = (_screenH - _h)/2;
+    }
+
+    void primeButtons(unsigned buttons) { _lastButtons = buttons; }
+
+    // NEW: pre-position the highlight on the currently-selected option
+    void setSelected(int idx) {
+        if (idx >= 0 && idx < (int)_items.size() && !_items[idx].disabled) {
+            _sel = idx;
+        }
+    }
+
+    bool update() {
+        if (!_visible) return false;
+        SceCtrlData pad{}; sceCtrlReadBufferPositive(&pad, 1);
+        unsigned pressed = pad.Buttons & ~_lastButtons;
+        _lastButtons = pad.Buttons;
+
+
+        if (pressed & PSP_CTRL_UP) {
+            do { _sel = (_sel + (int)_items.size() - 1) % (int)_items.size(); } while (_items[_sel].disabled && _hasEnabled());
+        } else if (pressed & PSP_CTRL_DOWN) {
+            do { _sel = (_sel + 1) % (int)_items.size(); } while (_items[_sel].disabled && _hasEnabled());
+        } else if (pressed & PSP_CTRL_CIRCLE) {
+            _choice = -1; _visible = false;
+        } else if (pressed & PSP_CTRL_CROSS) {
+            if (!_items[_sel].disabled) { _choice = _sel; _visible = false; }
+        }
+        return _visible;
+    }
+
+    void render(intraFont* font) {
+        if (!_visible) return;
+
+        sceGuDisable(GU_DEPTH_TEST);
+        sceGuEnable(GU_BLEND);
+        sceGuBlendFunc(GU_ADD, GU_SRC_ALPHA, GU_ONE_MINUS_SRC_ALPHA, 0, 0);
+        _rect(0, 0, _screenW, _screenH, 0x88000000);
+
+        const unsigned COLOR_PANEL  = 0xD0303030;
+        const unsigned COLOR_BORDER = 0xFFFFFFFF;
+        const unsigned COLOR_DESC   = 0xFFBBBBBB;
+
+        _rect(_x-1, _y-1, _w+2, _h+2, COLOR_BORDER);
+        _rect(_x,   _y,   _w,   _h,   COLOR_PANEL);
+
+        if (font) {
+            // Title
+            intraFontSetStyle(font, 0.9f, COLOR_WHITE, 0, 0.f, INTRAFONT_ALIGN_LEFT);
+            intraFontPrint(font, (float)(_x + 10), (float)(_y + 12), _title ? _title : "");
+
+            // Description
+            intraFontSetStyle(font, 0.7f, COLOR_DESC, 0, 0.f, INTRAFONT_ALIGN_LEFT);
+            int descY = _y + 30;
+            if (_desc && *_desc) intraFontPrint(font, (float)(_x + 10), (float)descY, _desc);
+            const int startY = descY + 18;
+            const int lineH  = 18;
+
+            // Items
+            for (int i = 0; i < (int)_items.size(); ++i) {
+                bool sel = (i == _sel);
+                unsigned col = _items[i].disabled ? COLOR_GRAY : COLOR_WHITE;
+                if (sel) _rect(_x + 8, startY + i*lineH - 2, _w - 16, lineH + 4, 0x40FFFFFF);
+                intraFontSetStyle(font, 0.8f, col, 0, 0.f, INTRAFONT_ALIGN_LEFT);
+                intraFontPrint(font, (float)(_x + 16), (float)(startY + i*lineH), _items[i].label);
+            }
+
+            intraFontSetStyle(font, 0.7f, COLOR_GRAY, 0, 0.f, INTRAFONT_ALIGN_LEFT);
+            intraFontPrint(font, (float)(_x + 10), (float)(_y + _h - 16), "X: Select   O: Close");
+        }
+    }
+
+    bool visible() const { return _visible; }
+    int  choice()  const { return _choice; }
+
+private:
+    static void _rect(int x, int y, int w, int h, unsigned color) {
+        struct V { unsigned color; short x,y,z; };
+        V* v = (V*)sceGuGetMemory(2*sizeof(V));
+        v[0] = { color, (short)x, (short)y, 0 };
+        v[1] = { color, (short)(x+w), (short)(y+h), 0 };
+        sceGuDisable(GU_TEXTURE_2D);
+        sceGuShadeModel(GU_FLAT);
+        sceGuAmbientColor(0xFFFFFFFF);
+        sceGuDrawArray(GU_SPRITES, GU_COLOR_8888 | GU_VERTEX_16BIT | GU_TRANSFORM_2D, 2, 0, v);
+    }
+    bool _hasEnabled() const {
+        for (auto& it : _items) if (!it.disabled) return true;
+        return false;
+    }
+
+    const char* _title{};
+    const char* _desc{};
+    std::vector<OptionItem> _items;
+
+    int _screenW{}, _screenH{};
+    int _x{}, _y{}, _w{}, _h{};
+    int _sel = 0;
+    bool _visible = true;
+    int  _choice  = -1;
+    unsigned _lastButtons = 0;
+};
+// --------------------------------------------------------------------------
 
 class KernelFileExplorer {
 private:
@@ -1450,8 +1588,11 @@ private:
     std::vector<std::string> categoryNames;
     bool hasCategories = false;
 
-    enum View { View_Categories, View_CategoryContents, View_AllFlat } view = View_AllFlat;
-    std::string currentCategory;
+    enum View { View_Categories, View_CategoryContents, View_AllFlat, View_GclSettings } view = View_AllFlat;
+        std::string currentCategory;
+        // Category sort-mode helpers
+        bool        catPickActive = false;   // is a category "picked" for reordering?
+        int         catPickIndex  = -1;      // picked row index (in entries)
 
     // Active list for content view (this is what we reorder & save)
     std::vector<GameItem> workingList;
@@ -1486,22 +1627,505 @@ private:
     // Paths currently checked
     std::unordered_set<std::string> checked;
 
+    // --- Game Categories Lite toggle state ---
+    bool        gclArkOn = false;
+    bool        gclProOn = false;
+    std::string gclDevice;   // "ef0:/" on PSP Go if present; else "ms0:/"
+    std::string gclPrxPath;  // full path to found category_lite.prx (if any)
+
+    // --- NEW: in-memory gclite config (matches plugin) ---
+    struct GclConfig {
+        uint32_t mode;
+        uint32_t prefix;
+        uint32_t uncategorized;
+        uint32_t selection;
+        uint32_t catsort;
+    };
+    static GclConfig gclCfg;        // initialized out-of-class
+    static bool      gclCfgLoaded;  // initialized out-of-class
+
+    // ---- Lightweight cache patch: update in-memory categories without rescanning disk ----
+    void patchCategoryCacheFromSettings(){
+        // 1) Collect bases and existing numbers from current cache keys (skip "Uncategorized")
+        std::set<std::string, bool(*)(const std::string&, const std::string&)> baseSet(
+            [](const std::string& a, const std::string& b){ return strcasecmp(a.c_str(), b.c_str()) < 0; }
+        );
+        std::map<std::string, std::vector<int>> baseExistingNums;
+
+        const bool hasUncat = (categories.find("Uncategorized") != categories.end());
+        (void)hasUncat; // silence unused warning if compiled out elsewhere
+
+        for (const auto& kv : categories){
+            const std::string& key = kv.first;
+            if (!strcasecmp(key.c_str(), "Uncategorized")) continue; // never renumber/rename this pseudo-folder
+
+            std::string base = stripCategoryPrefixes(key);
+            baseSet.insert(base);
+            int n = extractLeadingXXAfterOptionalCAT(key.c_str());
+            if (n > 0) baseExistingNums[base].push_back(n);
+        }
+
+        if (baseSet.empty()){
+            categoryNames.clear();
+            return;
+        }
+
+        // 2) Build sorted base list and determine desired numbering range 1..N
+        std::vector<std::string> baseList(baseSet.begin(), baseSet.end());
+        std::sort(baseList.begin(), baseList.end(),
+                [](const std::string& a, const std::string& b){ return strcasecmp(a.c_str(), b.c_str()) < 0; });
+        const int N = (int)baseList.size();
+
+        // 3) Reserve valid existing numbers (dedupe), then fill the gaps for the rest
+        std::unordered_set<int> used;
+        std::map<std::string,int> reserved;  // base -> kept number
+        for (const auto& base : baseList){
+            auto it = baseExistingNums.find(base);
+            if (it == baseExistingNums.end()) continue;
+
+            // keep the smallest valid number within [1..N]
+            int keep = 0;
+            for (int n : it->second){
+                if (n >= 1 && n <= N) keep = (keep == 0) ? n : std::min(keep, n);
+            }
+            if (keep > 0 && !used.count(keep)) {
+                reserved[base] = keep;
+                used.insert(keep);
+            }
+        }
+
+        std::map<std::string,int> assigned = reserved;
+        if (gclCfg.catsort){
+            int next = 1;
+            for (const auto& base : baseList){
+                if (assigned.count(base)) continue;
+                while (next <= N && used.count(next)) ++next;
+                if (next > N) break;
+                assigned[base] = next;
+                used.insert(next);
+                ++next;
+            }
+        } else {
+            // Sorting off: numbers aren’t rendered, but keep map complete
+            for (const auto& base : baseList) if (!assigned.count(base)) assigned[base] = 0;
+        }
+
+        // 4) Re-key the categories map (and each GameItem.path), carrying "Uncategorized" through unchanged.
+        std::map<std::string, std::vector<GameItem>> newCats;
+        std::vector<std::pair<std::string, std::string>> oldToNew; // capture display-name rewrites
+
+        for (auto &kv : categories){
+            const std::string& oldCat = kv.first;
+
+            if (!strcasecmp(oldCat.c_str(), "Uncategorized")) {
+                newCats.emplace("Uncategorized", std::move(kv.second));
+                continue;
+            }
+
+            std::string base = stripCategoryPrefixes(oldCat);
+            std::string want = formatCategoryNameFromBase(base, assigned[base]);
+
+            if (strcasecmp(oldCat.c_str(), want.c_str()) != 0) {
+                // Category display name changed -> update each GameItem.path
+                std::vector<GameItem> moved = std::move(kv.second);
+                for (auto &gi : moved) {
+                    replaceCatSegmentInPath(oldCat, want, gi.path);
+                }
+                oldToNew.emplace_back(oldCat, want);
+                newCats.emplace(want, std::move(moved));
+            } else {
+                newCats.emplace(want, std::move(kv.second));
+            }
+        }
+        categories.swap(newCats);
+
+        // --- Remap "no icon" memoization set after category display rewrites ---
+        if (!oldToNew.empty() && !noIconPaths.empty()) {
+            std::unordered_set<std::string> remapped;
+            remapped.reserve(noIconPaths.size());
+            for (const auto &p : noIconPaths) {
+                std::string q = p;
+                for (const auto &m : oldToNew) {
+                    replaceCatSegmentInPath(m.first, m.second, q);
+                }
+                remapped.insert(std::move(q));
+            }
+            noIconPaths.swap(remapped);
+        }
+
+        // --- Carry currently selected ICON0 across the key rewrite ---
+        if (!oldToNew.empty()
+            && selectionIconTex
+            && selectionIconTex != placeholderIconTexture
+            && !selectionIconKey.empty())
+        {
+            std::string newKey = selectionIconKey;
+            for (const auto &m : oldToNew) {
+                replaceCatSegmentInPath(m.first, m.second, newKey);
+            }
+            if (newKey != selectionIconKey) {
+                iconCarryTex     = selectionIconTex;     // ensureSelectionIcon() will reattach immediately
+                iconCarryForPath = newKey;
+                selectionIconTex = nullptr;
+                selectionIconKey.clear();
+            }
+        }
+
+        // Rebuild categoryNames (includes "Uncategorized" exactly as-is)
+        categoryNames.clear();
+        for (auto &kv : categories) {
+            if (!strcasecmp(kv.first.c_str(), "Uncategorized")) continue; // never put this into categoryNames
+            categoryNames.push_back(kv.first);
+        }
+
+        // Existing sorting code can remain; "Uncategorized" will sort by its plain name
+        // and is unaffected by XX/CAT_ since it has none.
+        if (gclCfg.catsort){
+            std::sort(categoryNames.begin(), categoryNames.end(), [](const std::string& a, const std::string& b){
+                auto parseXX = [](const std::string& s)->int{
+                    const char* p = s.c_str();
+                    if (startsWithCAT(p)) p += 4;
+                    if (p[0] >= '0' && p[0] <= '9' && p[1] >= '0' && p[1] <= '9')
+                        return (p[0]-'0')*10 + (p[1]-'0');
+                    return 0;
+                };
+                int ax = parseXX(a), bx = parseXX(b);
+                if (ax > 0 || bx > 0){
+                    if (ax != bx) return ax < bx;
+                    return strcasecmp(a.c_str(), b.c_str()) < 0;
+                }
+                return strcasecmp(a.c_str(), b.c_str()) < 0;
+            });
+        } else {
+            std::sort(categoryNames.begin(), categoryNames.end(),
+                [](const std::string& a, const std::string& b){ return strcasecmp(a.c_str(), b.c_str()) < 0; });
+        }
+
+        // --- Mirror into device snapshot so cached rebuilds keep the new order & paths ---
+        {
+            std::string key = rootPrefix(currentDevice);
+            auto &snap = deviceCache[key].snap;
+
+            // Re-key snapshot categories with the same mapping (and rewrite GameItem.path)
+            std::map<std::string, std::vector<GameItem>> snapNewCats;
+            for (auto &kv : snap.categories) {
+                const std::string& disp = kv.first;
+                if (!strcasecmp(disp.c_str(), "Uncategorized")) {
+                    snapNewCats.emplace("Uncategorized", kv.second); // keep as-is
+                    continue;
+                }
+                std::string base = stripCategoryPrefixes(disp);
+                std::string want = formatCategoryNameFromBase(base, assigned[base]);
+
+                if (strcasecmp(disp.c_str(), want.c_str()) != 0) {
+                    std::vector<GameItem> moved = kv.second; // copy; snapshot not moved-from elsewhere
+                    for (auto &gi : moved) {
+                        replaceCatSegmentInPath(disp, want, gi.path);
+                    }
+                    snapNewCats.emplace(want, std::move(moved));
+                } else {
+                    snapNewCats.emplace(want, kv.second);
+                }
+            }
+            snap.categories.swap(snapNewCats);
+
+            // Rebuild snapshot categoryNames to match
+            snap.categoryNames.clear();
+            for (auto &kv : snap.categories) {
+                if (!strcasecmp(kv.first.c_str(), "Uncategorized")) continue;
+                snap.categoryNames.push_back(kv.first);
+            }
+            if (gclCfg.catsort) {
+                std::sort(snap.categoryNames.begin(), snap.categoryNames.end(), [](const std::string& a, const std::string& b){
+                    auto parseXX = [](const std::string& s)->int{
+                        const char* p = s.c_str();
+                        if (startsWithCAT(p)) p += 4;
+                        if (p[0] >= '0' && p[0] <= '9' && p[1] >= '0' && p[1] <= '9')
+                            return (p[0]-'0')*10 + (p[1]-'0');
+                        return 0;
+                    };
+                    int ax = parseXX(a), bx = parseXX(b);
+                    if (ax > 0 || bx > 0) return (ax != bx) ? ax < bx : (strcasecmp(a.c_str(), b.c_str()) < 0);
+                    return strcasecmp(a.c_str(), b.c_str()) < 0;
+                });
+            } else {
+                std::sort(snap.categoryNames.begin(), snap.categoryNames.end(),
+                        [](const std::string& a, const std::string& b){ return strcasecmp(a.c_str(), b.c_str()) < 0; });
+            }
+            snap.hasCategories = !snap.categoryNames.empty();
+        }
+    }
+
+
+
+
+    static bool isPspGo() {
+        SceUID d = pspIoOpenDir("ef0:/"); if (d >= 0) { pspIoCloseDir(d); return true; }
+        return false;
+    }
+
+    // Find the visible row index of a category name inside the current Categories screen.
+    // This accounts for the top "Category Settings" row and the bottom "Uncategorized" row.
+    int findCategoryRowByName(const std::string& name) const {
+        for (int i = 0; i < (int)entries.size(); ++i) {
+            if (!FIO_S_ISDIR(entries[i].d_stat.st_mode)) continue; // categories are shown as DIR rows
+            if (!strcasecmp(entries[i].d_name, name.c_str())) return i;
+        }
+        return 0;
+    }
+
+    // ===== Category numbering & naming helpers/enforcement (ADD THIS AFTER isPspGo()) =====
+
+    static inline bool hasTwoDigitsAfter(const char* p){
+        return p && p[0] >= '0' && p[0] <= '9' && p[1] >= '0' && p[1] <= '9';
+    }
+
+    static int extractLeadingXXAfterOptionalCAT(const char* name){
+        if (!name) return 0;
+        const char* s = name;
+        if (startsWithCAT(s)) s += 4;
+        if (hasTwoDigitsAfter(s)) return (s[0]-'0')*10 + (s[1]-'0');
+        return 0;
+    }
+
+    // Strip CAT_, XX, or CAT_XX from a display/category folder name to its base.
+    static std::string stripCategoryPrefixes(const std::string& in){
+        std::string s = in;
+        if (startsWithCAT(s.c_str())) {
+            s.erase(0, 4); // remove "CAT_"
+            if (hasTwoDigitsAfter(s.c_str())) s.erase(0, 2);
+        } else if (hasTwoDigitsAfter(s.c_str())) {
+            s.erase(0, 2);
+        }
+        return s;
+    }
+
+    // Find the enforced on-disk folder name for a base (e.g., base "ARPG" -> "CAT_03ARPG" or "03ARPG")
+    static std::string findDisplayNameForCategoryBase(const std::string& dev, const std::string& base) {
+        const char* roots[] = { "ISO/","ISO/PSP/","PSP/GAME/","PSP/GAME/PSX/","PSP/GAME/Utility/","PSP/GAME150/" };
+        for (auto r : roots) {
+            std::string absRoot = dev + std::string(r);
+            std::vector<std::string> subs;
+            listSubdirs(absRoot, subs); // class-static helper
+            for (auto& sub : subs) {
+                // Skip real game folders; only consider category folders
+                std::string subAbs = joinDirFile(absRoot, sub.c_str());
+                if (!findEbootCaseInsensitive(subAbs).empty()) continue; // global helper is already visible
+                if (!strcasecmp(stripCategoryPrefixes(sub).c_str(), base.c_str())) {
+                    return sub; // enforced on-disk name we want
+                }
+            }
+        }
+        return base; // fallback (shouldn't happen immediately after enforcement)
+    }
+
+    // Build the final folder name from a base + index according to current settings.
+    // Build the final folder name from a base + index according to current settings.
+    static std::string formatCategoryNameFromBase(const std::string& base, int idx /*1-based*/){
+        if (!strcasecmp(base.c_str(), "Uncategorized")) return "Uncategorized";
+
+        char num[8]; num[0] = 0;
+        if (gclCfg.catsort) snprintf(num, sizeof(num), "%02d", idx); // only when Sort=ON
+
+        if (gclCfg.catsort) {
+            // Sort ON -> numbers are part of the on-disk name
+            if (gclCfg.prefix) return std::string("CAT_") + num + base; // CAT_XXbase
+            else               return std::string(num) + base;          // XXbase
+        } else {
+            // Sort OFF -> numbers must not appear on disk
+            if (gclCfg.prefix) return std::string("CAT_") + base;       // CAT_base
+            else               return base;                             // base
+        }
+    }
+
+
+
+
+    // Only blacklist ISO/VIDEO as a non-category (per plugin behavior).
+    static bool isBlacklistedCategoryFolder(const std::string& rootLabel, const std::string& sub){
+        // rootLabel is like "ISO/", "ISO/PSP/", "PSP/GAME/", etc.
+        if (!strcasecmp(rootLabel.c_str(), "ISO/") && !strcasecmp(sub.c_str(), "VIDEO")) return true;
+        return false;
+    }
+
+    // Enumerate immediate subfolders under a root.
+    static void listSubdirs(const std::string& root, std::vector<std::string>& out){
+        forEachEntry(root, [&](const SceIoDirent& e){
+            if (FIO_S_ISDIR(e.d_stat.st_mode)){
+                std::string n = e.d_name;
+                if (n != "." && n != "..") out.push_back(n);
+            }
+        });
+    }
+
+    // Rename “from”→“to” if it exists and differs (ignores case-only changes)
+    static void renameIfExists(const std::string& root, const std::string& from, const std::string& to){
+        if (!strcasecmp(from.c_str(), to.c_str())) return;
+        std::string a = joinDirFile(root, from.c_str());
+        std::string b = joinDirFile(root, to.c_str());
+        if (dirExists(a)) sceIoRename(a.c_str(), b.c_str());
+    }
+
+    // Enforce naming/numbering for category folders on a device, obeying rules:
+    // • Leave folders that already have an XX number alone, UNLESS the number > total categories (then reassign).
+    // • Never produce duplicate XX across different categories; if duplicates exist, keep the first by base (A→Z).
+    // • Assign numbers to unnumbered bases in alphabetical order, filling the remaining 01..N slots without gaps.
+    // • Respect "Use CAT prefix" (gclCfg.prefix) and "Sort Categories" (gclCfg.catsort).
+    // • Skip game folders (subdirs that contain an EBOOT.PBP) and ISO/VIDEO.
+    // • Skip game folders (subdirs that contain an EBOOT.PBP) and ISO/VIDEO.
+    static void enforceCategorySchemeForDevice(const std::string& dev){
+        const char* isoRoots[]  = {"ISO/"};                // drop ISO/PSP/ as a root
+        const char* gameRoots[] = {"PSP/GAME/","PSP/GAME150/"}; // drop PSX/ and Utility/ as roots
+
+        // (absRoot, rootLabel)
+        std::vector<std::pair<std::string,std::string>> roots;
+
+        for (auto r : isoRoots)  roots.emplace_back(dev + std::string(r), std::string(r));
+        for (auto r : gameRoots) roots.emplace_back(dev + std::string(r), std::string(r));
+
+        // 1) Discover candidate bases (exclude EBOOT folders and blacklisted)
+        std::unordered_set<std::string> baseSet;
+        // Track existing numbers per base
+        std::map<std::string, std::vector<int>> baseExistingNums;
+
+        for (auto &rp : roots){
+            const std::string& absRoot  = rp.first;
+            const std::string& rootLabel= rp.second;
+            std::vector<std::string> subs;
+            listSubdirs(absRoot, subs);
+            for (auto &sub : subs){
+                if (isBlacklistedCategoryFolder(rootLabel, sub)) continue;
+                // Skip real game folders
+                std::string subAbs = joinDirFile(absRoot, sub.c_str());
+                if (!findEbootCaseInsensitive(subAbs).empty()) continue;
+
+                std::string base = stripCategoryPrefixes(sub);
+                baseSet.insert(base);
+
+                // Record any existing two-digit number (after optional CAT_)
+                int n = extractLeadingXXAfterOptionalCAT(sub.c_str());
+                if (n > 0) baseExistingNums[base].push_back(n);
+            }
+        }
+
+        if (baseSet.empty()) return;
+
+        // 2) Build sorted base list and desired numbering range 1..N
+        std::vector<std::string> baseList(baseSet.begin(), baseSet.end());
+        std::sort(baseList.begin(), baseList.end(),
+                [](const std::string& a, const std::string& b){ return strcasecmp(a.c_str(), b.c_str()) < 0; });
+        const int N = (int)baseList.size();
+
+        // 3) Reserve already-numbered bases (unique, within 1..N). If duplicates or out-of-range → treat as unnumbered.
+        std::unordered_set<int> used;
+        std::map<std::string,int> reserved; // base -> number we will keep
+
+        // Choose a stable "keeper" for duplicates by alphabetical base.
+        for (const auto& base : baseList){
+            auto it = baseExistingNums.find(base);
+            if (it == baseExistingNums.end()) continue;
+            // prefer the smallest valid number present
+            int keep = 0;
+            for (int n : it->second){
+                if (n >= 1 && n <= N) keep = (keep == 0) ? n : (std::min(keep, n));
+            }
+            if (keep == 0) continue; // none valid; will be assigned later
+            // If number already used, we cannot keep it for this base (avoid duplicates)
+            if (!used.count(keep)) { reserved[base] = keep; used.insert(keep); }
+            // else: duplicate → this base becomes unnumbered (will be assigned later)
+        }
+
+        // 4) Assign numbers for all unnumbered bases, filling remaining 01..N in order.
+        std::map<std::string,int> assigned = reserved;
+        if (gclCfg.catsort){
+            int next = 1;
+            for (const auto& base : baseList){
+                if (assigned.count(base)) continue;
+                while (used.count(next) && next <= N) ++next;
+                if (next > N) break; // safety
+                assigned[base] = next;
+                used.insert(next);
+                ++next;
+            }
+        } else {
+            // Sorting disabled: numbers ignored by formatter, but keep map complete
+            for (const auto& base : baseList){
+                if (!assigned.count(base)) assigned[base] = 0;
+            }
+        }
+
+        // 5) For each root, rename any present variant → desired formatted name
+        for (auto &rp : roots){
+            const std::string& absRoot = rp.first;
+            std::vector<std::string> subs;
+            listSubdirs(absRoot, subs);
+
+            for (const auto& base : baseList){
+                const int idx = assigned[base];
+                const std::string want = formatCategoryNameFromBase(base, idx);
+
+                // Find existing entry for this base on this root (any variant).
+                std::string found;
+                for (const auto &sub : subs){
+                    if (!strcasecmp(stripCategoryPrefixes(sub).c_str(), base.c_str())) { found = sub; break; }
+                }
+                if (found.empty()) continue; // not present on this root
+                if (!strcasecmp(found.c_str(), want.c_str())) continue; // already correct
+
+                // Double-check: skip game folders (paranoia)
+                std::string subAbs = joinDirFile(absRoot, found.c_str());
+                if (!findEbootCaseInsensitive(subAbs).empty()) continue;
+
+                renameIfExists(absRoot, found, want);
+            }
+        }
+    }
+
+
+
+
+
+
+    static std::string gclConfigPath() {
+        const char* root = isPspGo() ? "ef0:/" : "ms0:/";
+        return std::string(root) + "seplugins/gclite.bin";
+    }
+
     // Pick/drop state
     bool moving = false;
 
     intraFont*  font   = nullptr;
     MessageBox* msgBox = nullptr;
     FileOpsMenu* fileMenu = nullptr;
+    OptionListMenu* optMenu = nullptr;   // ← NEW: modal option picker
+    static bool rootPickGcl;             // ← declaration only; no in-class initializer
     bool inputWaitRelease = false;
+
+    // Which Categories Lite setting is currently being edited
+    enum GclSettingKey { GCL_SK_None = -1, GCL_SK_Mode = 0, GCL_SK_Prefix = 1, GCL_SK_Uncat = 2, GCL_SK_Sort = 3 };
+    static GclSettingKey gclPending;
 
     // Track which kind of menu is open (content vs categories)
     enum MenuContext { MC_ContentOps, MC_CategoryOps };
     MenuContext menuContext = MC_ContentOps;
 
     // Debug overlay
-    bool showDebugTimes = false; // toggle with Square
-    // Label mode
-    bool showTitles = false;     // toggle with Triangle
+    bool showDebugTimes = false; // ...
+    bool showTitles     = false; // ...
+
+    // ---- Categories sort mode (UI) ----
+    bool catSortMode     = false;   // SELECT toggles this while in View_Categories
+
+    // Helper: is a visible row non-movable (header/footer)?
+    bool isCategoryRowLocked(int row) const {
+        if (row < 0 || row >= (int)entries.size()) return true;
+        // Top row is Category Settings
+        if (!strcasecmp(entries[row].d_name, "Category Settings")) return true;
+        // Bottom row is Uncategorized (when present)
+        if (!strcasecmp(entries[row].d_name, "Uncategorized"))     return true;
+        return false;
+    }
+
 
     // Edge detection for analog-stick up → debug toggle
     bool analogUpHeld = false;
@@ -1516,6 +2140,230 @@ private:
 
     // Cache of entries that have no embedded icon; use placeholder and don't retry.
     std::unordered_set<std::string> noIconPaths;
+
+    // Apply current on-screen order of categories to XX numbering and on-disk names.
+    // - Skips "Uncategorized" entirely.
+    // - If catsort==ON: assigns 01..N in the exact visible order; renames CAT folders across roots.
+    // - If catsort==OFF: just patches the cache order (no XX, no renames).
+    void applyCategoryOrderAndPersist() {
+        // 1) Build an ordered list of BASE names from the visible entries
+        std::vector<std::string> orderedBases;
+        orderedBases.reserve(entries.size());
+        for (int i = 0; i < (int)entries.size(); ++i) {
+            const char* nm = entries[i].d_name;
+            if (!strcasecmp(nm, "Category Settings")) continue;
+            if (!strcasecmp(nm, "Uncategorized"))     continue;
+            orderedBases.push_back(stripCategoryPrefixes(nm));
+        }
+        if (orderedBases.empty()) return;
+
+        // 2) Make a base->index map according to the on-screen order
+        std::map<std::string,int> assigned;
+        if (gclCfg.catsort) {
+            for (size_t i = 0; i < orderedBases.size(); ++i)
+                assigned[orderedBases[i]] = (int)i + 1; // 01..N visual order
+        } else {
+            for (auto& b : orderedBases) assigned[b] = 0; // numbers suppressed
+        }
+
+        // 3) Build desired final names for each base
+        std::map<std::string,std::string> baseToWant;
+        for (auto& b : orderedBases) {
+            baseToWant[b] = formatCategoryNameFromBase(b, assigned[b]);
+        }
+
+        // 4) Rename on disk (for devices that exist) to match the new wanted names
+        const char* isoRoots[]  = {"ISO/"};                // drop ISO/PSP/ as a root
+        const char* gameRoots[] = {"PSP/GAME/","PSP/GAME150/"}; // drop PSX/ and Utility/ as roots
+        auto doDevice = [&](const std::string& dev){
+            if (dev.empty() || dev[3] != ':') return;
+            for (auto& kv : baseToWant) {
+                const std::string& base = kv.first;
+                const std::string& want = kv.second;
+
+                // For each root, find any variant for this base and rename to the wanted name
+                auto renameIn = [&](const char* r){
+                    std::string abs = dev + std::string(r);
+                    std::vector<std::string> subs; listSubdirs(abs, subs);
+                    for (auto& s : subs) {
+                        if (!strcasecmp(stripCategoryPrefixes(s).c_str(), base.c_str())) {
+                            // Skip real game folders (paranoia)
+                            std::string subAbs = joinDirFile(abs, s.c_str());
+                            if (!findEbootCaseInsensitive(subAbs).empty()) continue;
+                            renameIfExists(abs, s, want);
+                        }
+                    }
+                };
+                renameIn(isoRoots[0]); renameIn(isoRoots[1]);
+                renameIn(gameRoots[0]); renameIn(gameRoots[1]); renameIn(gameRoots[2]); renameIn(gameRoots[3]);
+            }
+        };
+
+        // Persist renames for the *current* device.
+        doDevice(currentDevice);
+
+        // Mirror to the other root (PSP Go: ms0 <-> ef0), if present.
+        if (isPspGo()) {
+            const std::string cur = rootPrefix(currentDevice);   // "ms0:/" or "ef0:/"
+            const std::string other = (!strcasecmp(cur.c_str(), "ms0:/")) ? "ef0:/" : "ms0:/";
+
+            // Only touch the other root if it exists / is mounted.
+            SceUID d = pspIoOpenDir(other.c_str());
+            if (d >= 0) {
+                pspIoCloseDir(d);
+                doDevice(other);          // perform the same rename enforcement on the other root
+                markDeviceDirty(other);   // if you already use a “dirty” flag in your cache
+            }
+        }
+
+        // PSP Go may have both devices; if both exist, update the other too
+        if (isPspGo()) {
+            const std::string other = (rootPrefix(currentDevice) == "ms0:/") ? std::string("ef0:/")
+                                                                            : std::string("ms0:/");
+            if (!rootPrefix(other).empty()) {
+                doDevice(other);
+                markDeviceDirty(other); // force a rescan if you switch devices later
+            }
+        }
+
+
+        // 5) Patch the in-memory cache to reflect new names WITHOUT rescanning
+        //    Re-key categories and rebuild categoryNames using the SAME mapping (baseToWant)
+        {
+            // Build a new categories map using the wanted display names
+            // ... inside KernelFileExplorer::applyCategoryOrderAndPersist()
+
+            // Declare these ONCE at the top of your “rebuild categories” section
+            // ... inside KernelFileExplorer::applyCategoryOrderAndPersist()
+            std::map<std::string, std::vector<GameItem>> newCats;
+            std::vector<std::pair<std::string, std::string>> oldToNew;
+
+            // re-key categories to wanted names and record old→new for patching icon caches
+            for (auto &kv : categories) {
+                const std::string& oldCat = kv.first;
+                if (!strcasecmp(oldCat.c_str(), "Uncategorized")) {
+                    newCats.emplace("Uncategorized", std::move(kv.second));
+                    continue;
+                }
+                std::string base   = stripCategoryPrefixes(oldCat);
+                std::string newCat = formatCategoryNameFromBase(base, assigned[base]);
+                if (strcasecmp(oldCat.c_str(), newCat.c_str()) != 0) {
+                    std::vector<GameItem> moved = std::move(kv.second);
+                    for (auto &gi : moved) replaceCatSegmentInPath(oldCat, newCat, gi.path);
+                    oldToNew.emplace_back(oldCat, newCat);
+                    newCats.emplace(newCat, std::move(moved));
+                } else {
+                    newCats.emplace(newCat, std::move(kv.second));
+                }
+            }
+            categories.swap(newCats);
+
+
+            // --- Remap "no icon" memoization set after category display rewrites ---
+            if (!oldToNew.empty() && !noIconPaths.empty()) {
+                std::unordered_set<std::string> remapped;
+                remapped.reserve(noIconPaths.size());
+                for (const auto &p : noIconPaths) {
+                    std::string q = p;
+                    for (const auto &m : oldToNew) {
+                        replaceCatSegmentInPath(m.first, m.second, q);
+                    }
+                    remapped.insert(std::move(q));
+                }
+                noIconPaths.swap(remapped);
+            }
+
+            // --- Carry currently selected ICON0 across the key rewrite ---
+            if (!oldToNew.empty()
+                && selectionIconTex
+                && selectionIconTex != placeholderIconTexture
+                && !selectionIconKey.empty())
+            {
+                std::string newKey = selectionIconKey;
+                for (const auto &m : oldToNew) {
+                    replaceCatSegmentInPath(m.first, m.second, newKey);
+                }
+                if (newKey != selectionIconKey) {
+                    iconCarryTex     = selectionIconTex;
+                    iconCarryForPath = newKey;
+                    selectionIconTex = nullptr;
+                    selectionIconKey.clear();
+                }
+            }
+
+
+            // --- NEW: remap the "no icon" memoization set to the new paths
+            if (!oldToNew.empty() && !noIconPaths.empty()) {
+                std::unordered_set<std::string> remapped;
+                remapped.reserve(noIconPaths.size());
+                for (const auto &p : noIconPaths) {
+                    std::string q = p;
+                    for (const auto &m : oldToNew) {
+                        replaceCatSegmentInPath(m.first, m.second, q);
+                    }
+                    remapped.insert(std::move(q));
+                }
+                noIconPaths.swap(remapped);
+            }
+
+            // --- NEW: carry the currently selected ICON0 across the key rewrite
+            if (!oldToNew.empty() && selectionIconTex && selectionIconTex != placeholderIconTexture && !selectionIconKey.empty()) {
+                std::string newKey = selectionIconKey;
+                for (const auto &m : oldToNew) {
+                    replaceCatSegmentInPath(m.first, m.second, newKey);
+                }
+                if (newKey != selectionIconKey) {
+                    iconCarryTex     = selectionIconTex;     // let ensureSelectionIcon() reattach
+                    iconCarryForPath = newKey;
+                    selectionIconTex = nullptr;
+                    selectionIconKey.clear();
+                }
+            }
+
+
+
+            // Rebuild categoryNames to match (exclude "Uncategorized")
+            categoryNames.clear();
+            for (auto &kv : categories) {
+                if (!strcasecmp(kv.first.c_str(), "Uncategorized")) continue;
+                categoryNames.push_back(kv.first);
+            }
+
+            // Keep the on-screen order stable: if catsort is ON, sort numerically by XX (or CAT_XX),
+            // otherwise alphabetical (your existing rule).
+            if (gclCfg.catsort) {
+                std::sort(categoryNames.begin(), categoryNames.end(), [](const std::string& a, const std::string& b){
+                    auto parseXX = [](const std::string& s)->int{
+                        const char* p = s.c_str();
+                        if (startsWithCAT(p)) p += 4;
+                        if (p[0] >= '0' && p[0] <= '9' && p[1] >= '0' && p[1] <= '9')
+                            return (p[0]-'0')*10 + (p[1]-'0');
+                        return 0;
+                    };
+                    int ax = parseXX(a), bx = parseXX(b);
+                    if (ax > 0 || bx > 0){
+                        if (ax != bx) return ax < bx;
+                        return strcasecmp(a.c_str(), b.c_str()) < 0;
+                    }
+                    return strcasecmp(a.c_str(), b.c_str()) < 0;
+                });
+            } else {
+                std::sort(categoryNames.begin(), categoryNames.end(),
+                          [](const std::string& a, const std::string& b){ return strcasecmp(a.c_str(), b.c_str()) < 0; });
+            }
+
+            // Mirror into the device snapshot so cache-based rebuilds reflect the new order
+            {
+                std::string key = rootPrefix(currentDevice);
+                auto &snap = deviceCache[key].snap;
+                snap.categories    = categories;
+                snap.categoryNames = categoryNames;
+                snap.hasCategories = hasCategories;
+            }
+        }
+    }
+
+
 
     // -----------------------------
     // New: Operation (Move/Copy) state
@@ -1802,11 +2650,52 @@ private:
     }
 
 
-    static void replaceCatSegmentInPath(const std::string& oldCat, const std::string& newCat,
+    static void replaceCatSegmentInPath(const std::string& oldCat,
+                                        const std::string& newCat,
                                         std::string& pathInOut) {
+        if (oldCat.empty() || oldCat == newCat) return;
+
+        // Helper: replace the *category* segment immediately following a given root
+        auto replaceAfterRoot = [&](const char* root) -> bool {
+            size_t rootPos = pathInOut.find(root);
+            if (rootPos == std::string::npos) return false;
+
+            // Start of the candidate segment (category folder name)
+            size_t start = rootPos + strlen(root);
+            size_t slash = pathInOut.find('/', start);
+            if (slash == std::string::npos) return false;
+
+            size_t segLen = slash - start;
+            if (segLen != oldCat.size()) return false;
+            if (pathInOut.compare(start, segLen, oldCat) != 0) return false;
+
+            pathInOut.replace(start, segLen, newCat);
+            return true;
+        };
+
+        // ISO categories: ms0:/ISO/<cat>/...
+        const char* isoRoots[] = { "ISO/" };                  // drop ISO/PSP/ as a root
+        for (int i = 0; i < 1; ++i) {
+            if (replaceAfterRoot(isoRoots[i])) return;
+        }
+
+        // EBOOT folder categories: ms0:/PSP/GAME/<cat>/..., ms0:/PSP/GAME150/<cat>/...
+        const char* gameRoots[] = {
+            "PSP/GAME/",
+            "PSP/GAME150/"
+        };                                                    // drop PSX/ and Utility/ as roots
+        for (int i = 0; i < 2; ++i) {
+            if (replaceAfterRoot(gameRoots[i])) return;
+        }
+
+
+        // Fallback for any unexpected layouts: keep old behavior
         size_t pos = pathInOut.find(oldCat);
-        if (pos != std::string::npos) pathInOut.replace(pos, oldCat.size(), newCat);
+        if (pos != std::string::npos) {
+            pathInOut.replace(pos, oldCat.size(), newCat);
+        }
     }
+
 
     void cachePatchRenameCategory(const std::string& oldCat, const std::string& newCat) {
         auto doOne = [&](std::map<std::string, std::vector<GameItem>>& cats,
@@ -1835,41 +2724,67 @@ private:
         std::string key = rootPrefix(currentDevice);
         auto &snap = deviceCache[key].snap;
         doOne(snap.categories, snap.categoryNames, snap.hasCategories);
-    }
 
-
-    void cachePatchRenameItem(const std::string& oldPath, const std::string& newPath, GameItem::Kind k) {
-        auto apply = [&](ScanSnapshot& s){
-            snapErasePath(s, oldPath);
-            const std::string dstCat = deriveCategoryFromPath(newPath);
-            GameItem gi = makeItemFor(newPath, k);
-            snapUpsertItem(s, gi, dstCat);
-        };
-
-        // Live members
-        {
-            ScanSnapshot tmp;
-            tmp.categories    = categories;
-            tmp.uncategorized = uncategorized;
-            tmp.flatAll       = flatAll;
-            tmp.categoryNames = categoryNames;
-            tmp.hasCategories = hasCategories;
-
-            apply(tmp);
-
-            categories    = std::move(tmp.categories);
-            uncategorized = std::move(tmp.uncategorized);
-            flatAll       = std::move(tmp.flatAll);
-            categoryNames = std::move(tmp.categoryNames);
-            hasCategories = tmp.hasCategories;
+        // NEW: remap the "no icon" set
+        if (!noIconPaths.empty()) {
+            std::unordered_set<std::string> remapped;
+            remapped.reserve(noIconPaths.size());
+            for (const auto &p : noIconPaths) {
+                std::string q = p;
+                replaceCatSegmentInPath(oldCat, newCat, q);
+                remapped.insert(std::move(q));
+            }
+            noIconPaths.swap(remapped);
         }
 
-        // Device snapshot
-        {
-            std::string key = rootPrefix(currentDevice);
-            apply(deviceCache[key].snap);
+        // NEW: carry selected icon if it’s inside the renamed category
+        if (selectionIconTex && selectionIconTex != placeholderIconTexture && !selectionIconKey.empty()) {
+            std::string newKey = selectionIconKey;
+            replaceCatSegmentInPath(oldCat, newCat, newKey);
+            if (newKey != selectionIconKey) {
+                iconCarryTex     = selectionIconTex;
+                iconCarryForPath = newKey;
+                selectionIconTex = nullptr;
+                selectionIconKey.clear();
+            }
         }
-    }
+        }
+
+
+
+        void cachePatchRenameItem(const std::string& oldPath, const std::string& newPath, GameItem::Kind k) {
+            auto apply = [&](ScanSnapshot& s){
+                snapErasePath(s, oldPath);
+                const std::string dstCat = parseCategoryFromFullPath(newPath, k);
+                GameItem gi = makeItemFor(newPath, k);
+                snapUpsertItem(s, gi, dstCat);
+            };
+
+            // Live members
+            {
+                ScanSnapshot tmp;
+                tmp.categories    = categories;
+                tmp.uncategorized = uncategorized;
+                tmp.flatAll       = flatAll;
+                tmp.categoryNames = categoryNames;
+                tmp.hasCategories = hasCategories;
+
+                apply(tmp);
+
+                categories    = std::move(tmp.categories);
+                uncategorized = std::move(tmp.uncategorized);
+                flatAll       = std::move(tmp.flatAll);
+                categoryNames = std::move(tmp.categoryNames);
+                hasCategories = tmp.hasCategories;
+            }
+
+            // Device snapshot
+            {
+                std::string key = rootPrefix(currentDevice);
+                apply(deviceCache[key].snap);
+            }
+        }
+
 
 
 
@@ -1946,15 +2861,15 @@ private:
         GameItem gi = makeItemFor(dst, k);
 
         // Insert into destination lists in correct category and sorted order
-        const std::string dstCat = deriveCategoryFromPath(dst);
+        const std::string dstCat = parseCategoryFromFullPath(dst, k);
         snapUpsertItem(dstSnap, gi, dstCat);
     }
 
 
+
     void rebuildFlatFromCache() {
-        // Same as openDevice(...) else-branch when hasCategories == false
-        // workingList ← flatAll, sort, set view, clear UI, populate rows, hide roots.
-        workingList = flatAll;
+        // Mirror openDevice() behavior when Categories Lite is Off
+        workingList = (gclArkOn || gclProOn) ? flatAll : uncategorized;
         sortLikeLegacy(workingList);
         view = View_AllFlat;
         clearUI();
@@ -2018,11 +2933,14 @@ private:
                 }
             } else if (view == View_CategoryContents) {
                 snprintf(buf, sizeof(buf), "Category: %s — %s  | Label: %s", currentCategory.c_str(), rootDisplayName(currentDevice.c_str()), lbl);
+            } else if (view == View_GclSettings) {
+                snprintf(buf, sizeof(buf), "Category Settings");
             } else {
                 snprintf(buf, sizeof(buf), "%s — All content  | Label: %s", rootDisplayName(currentDevice.c_str()), lbl);
             }
             drawText(10,25,buf,COLOR_WHITE);
         }
+
     }
 
     void freeSelectionIcon() {
@@ -2173,7 +3091,19 @@ private:
                 if (disabledCat) labelCol = COLOR_GRAY;
             }
 
-            drawText(10,y+2, isDir ? "[DIR]" : (isMoveRow ? "[MOVE]" : "FILE"), labelCol);
+            // When sorting categories: highlight the picked row as [MOVE] in yellow
+            const bool isCatMoveRow =
+                (!showRoots && view == View_Categories && catSortMode &&
+                catPickActive && i == catPickIndex && !isCategoryRowLocked(i));
+
+            uint32_t labelColor = labelCol;
+            const char* labelText =
+                isCatMoveRow ? "[MOVE]" :
+                (isDir ? "[DIR]" : (isMoveRow ? "[MOVE]" : "FILE"));
+
+            if (isCatMoveRow) labelColor = COLOR_YELLOW;
+
+            drawText(10, y+2, labelText, labelColor);
 
             // checkbox left of filename (content views only)
             // --- filesize column (content views only, to the LEFT of the checkbox) ---
@@ -2283,9 +3213,16 @@ private:
 
         if (showRoots) {
             drawText(10,y,"X: Select Device",COLOR_WHITE);
-        } else if (view == View_Categories) {
-            drawText(10,y,"X: Open Category | L: Rename CAT_ | O: Back to Devices | △: Label Title/Name",COLOR_WHITE);
-        } else if (view == View_CategoryContents || view == View_AllFlat) {
+            } else if (view == View_Categories) {
+                if (!catSortMode) {
+                    std::string s = "X: Open Category | L: Rename CAT_ | ";
+                    if (gclCfg.catsort) s += "SELECT: Sort Mode | ";
+                    s += "O: Back to Devices | △: Label Title/Name";
+                    drawText(10, y, s.c_str(), COLOR_WHITE);
+                } else {
+                    drawText(10, y, "SORT MODE — X: Pick/Drop | ↑/↓: Move | SELECT: Done | O: Cancel (exit sort mode)", COLOR_WHITE);
+                }
+            } else if (view == View_CategoryContents || view == View_AllFlat) {
             char buf[256];
             snprintf(buf, sizeof(buf),
                 "%s | START: Save | L: Rename | O: Back | □: Debug | △: Label (%s) | SELECT: A→Z (%s) | Hold ↑/↓: Fast",
@@ -2497,14 +3434,16 @@ private:
 
         if (view == View_Categories) {
             if (selectedIndex < 0 || selectedIndex >= (int)entries.size()) return;
-            std::string oldName = entries[selectedIndex].d_name;
-            if (!strcasecmp(oldName.c_str(), "Uncategorized")) return;
-            if (!startsWithCAT(oldName.c_str())) return;
+            std::string oldDisplay = entries[selectedIndex].d_name;
+            if (!strcasecmp(oldDisplay.c_str(), "Uncategorized")) return;
 
             std::string typed;
-            if (!promptTextOSK("Rename Category", oldName.c_str(), 64, typed)) return;
-            if (!startsWithCAT(typed.c_str())) typed = std::string("CAT_") + typed;
-            if (typed == oldName) return;
+            if (!promptTextOSK("Rename Category", oldDisplay.c_str(), 64, typed)) return;
+
+            // Treat user input as a BASE name (strip CAT_/XX if they typed it)
+            typed = sanitizeFilename(stripCategoryPrefixes(typed));
+            // If base didn’t change, nothing to do
+            if (!strcasecmp(stripCategoryPrefixes(oldDisplay).c_str(), typed.c_str())) return;
 
             msgBox = new MessageBox("Renaming...", nullptr, SCREEN_WIDTH, SCREEN_HEIGHT, 1.0f, 0, "", 16, 18, 8, 14);
             renderOneFrame();
@@ -2513,9 +3452,10 @@ private:
             const char* gameRoots[] = {"PSP/GAME/","PSP/GAME/PSX/","PSP/GAME/Utility/","PSP/GAME150/"};
             bool anyOk=false, anyFail=false;
 
+            // First, rename the existing folder (whatever its current prefix) to the BASE on each root
             for (auto r : isoRoots) {
                 std::string base = currentDevice + std::string(r);
-                std::string from = base + oldName;
+                std::string from = base + oldDisplay;
                 std::string to   = base + typed;
                 if (dirExists(from)) {
                     int rc = sceIoRename(from.c_str(), to.c_str());
@@ -2524,7 +3464,7 @@ private:
             }
             for (auto r : gameRoots) {
                 std::string base = currentDevice + std::string(r);
-                std::string from = base + oldName;
+                std::string from = base + oldDisplay;
                 std::string to   = base + typed;
                 if (dirExists(from)) {
                     int rc = sceIoRename(from.c_str(), to.c_str());
@@ -2532,24 +3472,42 @@ private:
                 }
             }
 
-            // Patch cache & UI while modal is still up
-            cachePatchRenameCategory(oldName, typed);
-            buildCategoryRows();
-            // reselect as needed, possibly show a short "Renamed" toast
-            drawMessage("Renamed", COLOR_GREEN);
-            sceKernelDelayThread(600*1000);
+            enforceCategorySchemeForDevice(currentDevice);
+            // Old display name was captured earlier in this function as 'oldDisplay'
 
-            // NOW dismiss the modal
-            delete msgBox; msgBox = nullptr;
-            renderOneFrame();
-            for (int i=0;i<(int)entries.size();++i)
-                if (!strcmp(entries[i].d_name, typed.c_str())) { selectedIndex=i; break; }
+            // Compute the *display* name we will now use for this category
+            std::string newDisplay = findDisplayNameForCategoryBase(currentDevice, typed);
+
+            // Patch in-memory caches (icon paths, no-icon memo set, selection key) to follow the rename
+            cachePatchRenameCategory(oldDisplay, newDisplay);
+            buildCategoryRows();
+
+
+            // Select the renamed category by BASE and make it visible
+            auto sameBase = [&](const char* disp){
+                return !strcasecmp(stripCategoryPrefixes(disp).c_str(), typed.c_str());
+            };
+            int idx = -1;
+            for (int i = 0; i < (int)entries.size(); ++i) {
+                if (sameBase(entries[i].d_name)) { idx = i; break; }
+            }
+            if (idx >= 0) {
+                selectedIndex = idx;
+                scrollOffset  = (idx >= MAX_DISPLAY) ? (idx - MAX_DISPLAY + 1) : 0;
+            }
 
             drawMessage(anyOk && !anyFail ? "Category renamed" : (anyOk ? "Some renamed" : "Rename failed"),
                         anyOk ? COLOR_GREEN : COLOR_RED);
             sceKernelDelayThread(600*1000);
+
+            // Dismiss the “Renaming...” modal, just like item rename does.
+            delete msgBox; 
+            msgBox = nullptr;
+            renderOneFrame();
+
             return;
         }
+
 
         if (view == View_AllFlat || view == View_CategoryContents) {
             if (selectedIndex < 0 || selectedIndex >= (int)workingList.size()) return;
@@ -2695,10 +3653,13 @@ private:
         if (gUsbBox) gUsbBox->render(font);
         if (fileMenu) fileMenu->render(font);
 
-        // (MessageBox input is handled exclusively in run().)
+        // NEW: draw the option picker modal (on top)
+        // NEW: draw the option picker modal (on top)
+        if (optMenu) optMenu->render(font);
+
+        // USB Connected modal (handle input here so Circle disconnects)
         if (gUsbBox) {
             if (!gUsbBox->update()) {
-                // User pressed Circle → disconnect and close
                 UsbDeactivate();
                 gUsbActive = false;
                 delete gUsbBox; gUsbBox = nullptr;
@@ -2713,6 +3674,9 @@ private:
         sceDisplayWaitVblankStart();
         sceGuSwapBuffers();
     }
+
+
+
 
     void selectByPath(const std::string& path){
         if (path.empty()) return;
@@ -2791,10 +3755,11 @@ private:
         forEachEntry(base, [&](const SceIoDirent &e){
             std::string name = e.d_name;
             if (FIO_S_ISDIR(e.d_stat.st_mode)) {
-                if (startsWithCAT(name.c_str())){
+                // Treat ANY subfolder as a category EXCEPT the blacklisted "VIDEO" folder.
+                if (strcasecmp(name.c_str(), "VIDEO") != 0) {
                     hasCategories = true;
 
-                    // NEW: ensure the category is created/listed even if empty or contains no ISO-like files
+                    // Ensure the category is created/listed even if empty or contains no ISO-like files
                     categories[name];  // creates empty vector if not present
 
                     std::string catDir = base + name;
@@ -2809,7 +3774,7 @@ private:
                                 if (getStat(gi.path, st)){
                                     gi.time     = st.sce_st_mtime;
                                     gi.sortKey  = buildLegacySortKey(gi.time);
-                                    gi.sizeBytes= (uint64_t)st.st_size;   // <--- NEW
+                                    gi.sizeBytes= (uint64_t)st.st_size;
                                 }
 
                                 if (endsWithNoCase(fn, ".iso")) {
@@ -2836,7 +3801,7 @@ private:
                     if (getStat(gi.path, st)){
                         gi.time     = st.sce_st_mtime;
                         gi.sortKey  = buildLegacySortKey(gi.time);
-                        gi.sizeBytes= (uint64_t)st.st_size;   // <--- NEW
+                        gi.sizeBytes= (uint64_t)st.st_size;
                     }
 
                     if (endsWithNoCase(name, ".iso")) {
@@ -2855,89 +3820,117 @@ private:
         });
     }
 
+
     void scanGameRootDir(const std::string& base){
         if (!dirExists(base)) return;
         forEachEntry(base, [&](const SceIoDirent &e){
             if (!FIO_S_ISDIR(e.d_stat.st_mode)) return;
             std::string name = e.d_name;
-            if (startsWithCAT(name.c_str())){
-                hasCategories = true;
 
-                // NEW: ensure the category is created/listed even if no EBOOT children are found
-                categories[name];  // creates empty vector if not present
+            // If the folder itself contains an EBOOT.PBP, treat it as a stand-alone game (UNCATEGORIZED).
+            std::string folderNoSlashRoot = joinDirFile(base, name.c_str());
+            if (dirExists(folderNoSlashRoot) && !findEbootCaseInsensitive(folderNoSlashRoot).empty()){
+                GameItem gi; gi.kind = GameItem::EBOOT_FOLDER;
+                gi.label = name;
+                gi.path  = folderNoSlashRoot;
+                SceIoStat stF{};
+                if (getStatDirNoSlash(gi.path, stF)) {
+                    gi.time     = stF.sce_st_mtime;
+                    gi.sortKey  = buildLegacySortKey(gi.time);
+                }
+                // Optional: compute folder size
+                uint64_t folderBytes = 0;
+                sumDirBytes(gi.path, folderBytes);
+                gi.sizeBytes = folderBytes;
 
-                std::string catDir = base + name;
-                forEachEntry(catDir, [&](const SceIoDirent &sub){
-                    if (FIO_S_ISDIR(sub.d_stat.st_mode)){
-                        std::string title = sub.d_name;
-                        std::string folderNoSlash = joinDirFile(catDir, title.c_str());
-                        if (dirExists(folderNoSlash)){
-                            if (!findEbootCaseInsensitive(folderNoSlash).empty()){
-                                GameItem gi; gi.kind = GameItem::EBOOT_FOLDER;
-                                gi.label = title;
-                                gi.path  = folderNoSlash;
-                                SceIoStat stF{};
-                                if (getStatDirNoSlash(gi.path, stF)) {
-                                    gi.time     = stF.sce_st_mtime;
-                                    gi.sortKey  = buildLegacySortKey(gi.time);
-                                }
-                                // Optional: compute folder size for display (can be O(total files))
-                                uint64_t folderBytes = 0;
-                                sumDirBytes(gi.path, folderBytes);
-                                gi.sizeBytes = folderBytes;    // <--- NEW
+                std::string t; if (getFolderTitle(gi.path, t)) gi.title = t;
+                uncategorized.push_back(gi);
+                return;
+            }
 
-                                std::string t; if (getFolderTitle(gi.path, t)) gi.title = t;
-                                categories[name].push_back(gi);
+            // Otherwise, treat it as a CATEGORY folder (regardless of CAT_ prefix).
+            hasCategories = true;
+            categories[name];  // creates empty vector if not present
 
+            std::string catDir = base + name;
+            forEachEntry(catDir, [&](const SceIoDirent &sub){
+                if (FIO_S_ISDIR(sub.d_stat.st_mode)){
+                    std::string title = sub.d_name;
+                    std::string folderNoSlash = joinDirFile(catDir, title.c_str());
+                    if (dirExists(folderNoSlash)){
+                        if (!findEbootCaseInsensitive(folderNoSlash).empty()){
+                            GameItem gi; gi.kind = GameItem::EBOOT_FOLDER;
+                            gi.label = title;
+                            gi.path  = folderNoSlash;
+                            SceIoStat stF{};
+                            if (getStatDirNoSlash(gi.path, stF)) {
+                                gi.time     = stF.sce_st_mtime;
+                                gi.sortKey  = buildLegacySortKey(gi.time);
                             }
-                        }
-                    }
-                });
-            } else {
-                std::string folderNoSlash = joinDirFile(base, name.c_str());
-                if (dirExists(folderNoSlash)){
-                    if (!findEbootCaseInsensitive(folderNoSlash).empty()){
-                        GameItem gi; gi.kind = GameItem::EBOOT_FOLDER;
-                        gi.label = name;
-                        gi.path  = folderNoSlash;
-                        SceIoStat stF{};
-                        if (getStatDirNoSlash(gi.path, stF)) {
-                            gi.time     = stF.sce_st_mtime;
-                            gi.sortKey  = buildLegacySortKey(gi.time);
-                        }
-                        // Optional: compute folder size
-                        uint64_t folderBytes = 0;
-                        sumDirBytes(gi.path, folderBytes);
-                        gi.sizeBytes = folderBytes;
+                            // Optional: compute folder size for display (can be O(total files))
+                            uint64_t folderBytes = 0;
+                            sumDirBytes(gi.path, folderBytes);
+                            gi.sizeBytes = folderBytes;
 
-                        std::string t; if (getFolderTitle(gi.path, t)) gi.title = t;
-                        uncategorized.push_back(gi);  // <--- FIX: do NOT create a category
+                            std::string t; if (getFolderTitle(gi.path, t)) gi.title = t;
+                            categories[name].push_back(gi);
+                        }
                     }
                 }
-            }
+            });
         });
     }
 
+
     void scanDevice(const std::string& dev){
-        resetLists();
+            resetLists();
 
-        const char* isoRoots[]  = {"ISO/","ISO/PSP/"};
-        const char* gameRoots[] = {"PSP/GAME/","PSP/GAME/PSX/","PSP/GAME/Utility/","PSP/GAME150/"};
+            const char* isoRoots[]  = {"ISO/"};                // drop ISO/PSP/ as a root
+            const char* gameRoots[] = {"PSP/GAME/","PSP/GAME150/"}; // drop PSX/ and Utility/ as roots
 
-        for (size_t i=0;i<sizeof(isoRoots)/sizeof(isoRoots[0]);++i)  scanIsoRootDir(dev + std::string(isoRoots[i]));
-        for (size_t i=0;i<sizeof(gameRoots)/sizeof(gameRoots[0]);++i) scanGameRootDir(dev + std::string(gameRoots[i]));
+            for (size_t i=0;i<sizeof(isoRoots)/sizeof(isoRoots[0]);++i)  scanIsoRootDir(dev + std::string(isoRoots[i]));
+            for (size_t i=0;i<sizeof(gameRoots)/sizeof(gameRoots[0]);++i) scanGameRootDir(dev + std::string(gameRoots[i]));
 
-        if (!categories.empty()) hasCategories = true;
 
-        if (!hasCategories){
-            flatAll = uncategorized;
-        } else {
-            for (auto &kv : categories) categoryNames.push_back(kv.first);
-            std::sort(categoryNames.begin(), categoryNames.end(),
-                      [](const std::string& a, const std::string& b){ return strcasecmp(a.c_str(), b.c_str()) < 0; });
-            if (!uncategorized.empty()) categories["Uncategorized"]; // flag presence
+            if (!categories.empty()) hasCategories = true;
+
+            if (!hasCategories){
+                flatAll = uncategorized;
+            } else {
+                for (auto &kv : categories) categoryNames.push_back(kv.first);
+
+                if (gclCfg.catsort) {
+                    // When Sort Categories is ON, sort by leading XX (after optional CAT_)
+                    std::sort(categoryNames.begin(), categoryNames.end(),
+                            [](const std::string& a, const std::string& b){
+                                auto parseXX = [](const std::string& s)->int{
+                                    const char* p = s.c_str();
+                                    if (startsWithCAT(p)) p += 4;
+                                    if (p[0] >= '0' && p[0] <= '9' && p[1] >= '0' && p[1] <= '9')
+                                        return (p[0]-'0')*10 + (p[1]-'0');
+                                    return 0;
+                                };
+                                int ax = parseXX(a), bx = parseXX(b);
+                                if (ax > 0 || bx > 0) {
+                                    if (ax != bx) return ax < bx;
+                                    // tie-breaker: alpha
+                                    return strcasecmp(a.c_str(), b.c_str()) < 0;
+                                }
+                                // no numbers: fallback to alpha
+                                return strcasecmp(a.c_str(), b.c_str()) < 0;
+                            });
+                } else {
+                    // Sorting disabled: alphabetical for stable browsing
+                    std::sort(categoryNames.begin(), categoryNames.end(),
+                            [](const std::string& a, const std::string& b){ return strcasecmp(a.c_str(), b.c_str()) < 0; });
+                }
+
+                if (!uncategorized.empty()) categories["Uncategorized"]; // flag presence
+            }
         }
-    }
+
+
+
 
     void clearUI(){
         rowFreeBytes.clear();
@@ -2976,23 +3969,493 @@ private:
         freeSelectionIcon();
     }
 
+    // ---------------------------------------------------------------
+    // Game Categories Lite - helpers & settings screen (class-scoped)
+    // ---------------------------------------------------------------
+
+    // Pick ef0:/ on PSP Go if present; otherwise ms0:/
+    std::string gclPickDeviceRoot() {
+        if (DeviceExists("ef0:/")) return "ef0:/";
+        return "ms0:/";
+    }
+
+    // Recursive search under /SEPLUGINS for category_lite.prx
+    std::string gclFindCategoryLitePrx(const std::string& sepluginsNoSlash) {
+        SceUID d = pspIoOpenDir(sepluginsNoSlash.c_str());
+        if (d < 0) return {};
+        std::vector<std::string> stack{sepluginsNoSlash};
+        pspIoCloseDir(d);
+
+        while (!stack.empty()) {
+            std::string dpath = stack.back(); stack.pop_back();
+            SceUID dd = pspIoOpenDir(dpath.c_str()); if (dd < 0) continue;
+            SceIoDirent ent; memset(&ent, 0, sizeof(ent));
+            while (pspIoReadDir(dd, &ent) > 0) {
+                if (!strcmp(ent.d_name, ".") || !strcmp(ent.d_name, "..")) { memset(&ent,0,sizeof(ent)); continue; }
+                std::string child = joinDirFile(dpath, ent.d_name);
+                if (FIO_S_ISDIR(ent.d_stat.st_mode)) {
+                    stack.push_back(child);
+                } else if (strcasecmp(ent.d_name, "category_lite.prx") == 0) {
+                    pspIoCloseDir(dd);
+                    return child;
+                }
+                memset(&ent, 0, sizeof(ent));
+            }
+            pspIoCloseDir(dd);
+        }
+        return {};
+    }
+
+    // Use the existing global helper to find VSH.txt / PLUGINS.txt (case-insensitive)
+    std::string gclFindTxtInSeplugins(const std::string& seplugins, const char* wantUpperOrLower){
+        return findFileCaseInsensitive(seplugins, wantUpperOrLower);
+    }
+
+    bool gclReadWholeText(const std::string& path, std::string& out){
+        SceUID fd = sceIoOpen(path.c_str(), PSP_O_RDONLY, 0);
+        if (fd < 0) return false;
+        SceIoStat st{}; if (sceIoGetstat(path.c_str(), &st) < 0) { sceIoClose(fd); return false; }
+        if (st.st_size <= 0 || st.st_size > 512*1024) { sceIoClose(fd); return false; }
+        out.resize((size_t)st.st_size);
+        int got = sceIoRead(fd, &out[0], (uint32_t)out.size());
+        sceIoClose(fd);
+        return got >= 0;
+    }
+
+    bool gclWriteWholeText(const std::string& path, const std::string& data){
+        SceUID fd = sceIoOpen(path.c_str(), PSP_O_WRONLY|PSP_O_CREAT|PSP_O_TRUNC, 0777);
+        if (fd < 0) return false;
+        int wr = sceIoWrite(fd, data.data(), (uint32_t)data.size());
+        sceIoClose(fd);
+        return wr == (int)data.size();
+    }
+
+    // Accepts: "1" (both files), and for ARK PLUGINS.txt only: "on", "true", "enabled"
+    // Accepts:
+    //  - PRO/ME VSH.txt: "<path> 1"
+    //  - ARK-4 PLUGINS.txt: "vsh, <path>, 1" (also accepts on/true/enabled)
+    bool gclLineEnables(const std::string& line, bool arkPluginsTxt){
+        auto toLower = [](std::string s){ for(char& c:s) if(c>='A'&&c<='Z') c=c-'A'+'a'; return s; };
+        auto trim = [](std::string s){
+            size_t a=0,b=s.size();
+            while (a<b && (s[a]==' '||s[a]=='\t')) ++a;
+            while (b>a && (s[b-1]==' '||s[b-1]=='\t'||s[b-1]=='\r')) --b;
+            return s.substr(a,b-a);
+        };
+
+        if (!arkPluginsTxt) {
+            // PRO/ME: space-separated
+            std::string l = toLower(line);
+            if (l.find("category_lite.prx") == std::string::npos) return false;
+            std::vector<std::string> toks;
+            size_t i=0; while (i<l.size()){
+                while (i<l.size() && (l[i]==' '||l[i]=='\t'||l[i]=='\r'||l[i]=='\n')) ++i;
+                size_t j=i; while (j<l.size() && !(l[j]==' '||l[j]=='\t'||l[j]=='\r'||l[j]=='\n')) ++j;
+                if (j>i) toks.emplace_back(l.substr(i,j-i));
+                i=j;
+            }
+            for (size_t k=0;k<toks.size();++k){
+                if (toks[k].find("category_lite.prx") != std::string::npos){
+                    for (size_t m=k+1; m<toks.size(); ++m){
+                        const std::string& v = toks[m];
+                        if (v == "1") return true;
+                    }
+                    break;
+                }
+            }
+            return false;
+        } else {
+            // ARK-4: CSV columns -> "vsh, <path>, 1"
+            std::string l = toLower(line);
+            std::vector<std::string> cols;
+            size_t start=0;
+            while (start<=l.size()){
+                size_t pos = l.find(',', start);
+                if (pos == std::string::npos) pos = l.size();
+                cols.push_back(trim(l.substr(start, pos - start)));
+                start = pos + (pos < l.size() ? 1 : 0);
+                if (pos == l.size()) break;
+            }
+            if (cols.size() < 3) return false;
+            if (cols[1].find("category_lite.prx") == std::string::npos) return false;
+            const std::string& state = cols[2];
+            return (state == "1" || state == "on" || state == "true" || state == "enabled");
+        }
+    }
+
+
+    void gclComputeInitial() {
+        gclDevice = gclPickDeviceRoot();
+        std::string seplugins = joinDirFile(gclDevice, "SEPLUGINS");
+        gclPrxPath = gclFindCategoryLitePrx(seplugins);
+        bool havePrx = !gclPrxPath.empty();
+
+        // ARK-4: PLUGINS.txt
+        bool arkEnabled = false;
+        std::string plugins = gclFindTxtInSeplugins(seplugins, "PLUGINS.TXT");
+        if (!plugins.empty()){
+            std::string txt; if (gclReadWholeText(plugins, txt)) {
+                size_t pos=0, s=0;
+                while (pos<=txt.size()){
+                    if (pos==txt.size() || txt[pos]=='\n' || txt[pos]=='\r'){
+                        std::string line = txt.substr(s, pos-s);
+                        if (gclLineEnables(line, true)) { arkEnabled = true; break; }
+                        if (pos+1<txt.size() && txt[pos]=='\r' && txt[pos+1]=='\n') ++pos;
+                        s = pos + 1;
+                    }
+                    ++pos;
+                }
+            }
+        }
+
+        // PRO/ME: VSH.txt
+        bool proEnabled = false;
+        std::string vsh = gclFindTxtInSeplugins(seplugins, "VSH.TXT");
+        if (!vsh.empty()){
+            std::string txt; if (gclReadWholeText(vsh, txt)) {
+                size_t pos=0, s=0;
+                while (pos<=txt.size()){
+                    if (pos==txt.size() || txt[pos]=='\n' || txt[pos]=='\r'){
+                        std::string line = txt.substr(s, pos-s);
+                        if (gclLineEnables(line, false)) { proEnabled = true; break; }
+                        if (pos+1<txt.size() && txt[pos]=='\r' && txt[pos+1]=='\n') ++pos;
+                        s = pos + 1;
+                    }
+                    ++pos;
+                }
+            }
+        }
+
+        gclArkOn = havePrx && arkEnabled;
+        gclProOn = havePrx && proEnabled;
+    }
+
+    // Update/append a line enabling/disabling the PRX
+    // Update/append a line enabling/disabling the PRX
+    // Writes either:
+    //  - PRO/ME: "<path> 1/0"
+    //  - ARK-4:  "vsh, <path>, 1/0"
+    bool gclWriteEnableToFile(const std::string& filePath, bool enable, bool arkPluginsTxt){
+        auto toLower = [](std::string s){ for(char& c:s) if(c>='A'&&c<='Z') c=c-'A'+'a'; return s; };
+        auto trim = [](std::string s){
+            size_t a=0,b=s.size();
+            while (a<b && (s[a]==' '||s[a]=='\t')) ++a;
+            while (b>a && (s[b-1]==' '||s[b-1]=='\t'||s[b-1]=='\r')) --b;
+            return s.substr(a,b-a);
+        };
+
+        std::string txt;
+        gclReadWholeText(filePath, txt); // ok if missing; we’ll create
+
+        // split into lines (preserve CRLF)
+        std::vector<std::string> lines;
+        size_t i=0, s=0; 
+        while (i<=txt.size()){
+            if (i==txt.size() || txt[i]=='\n' || txt[i]=='\r'){
+                lines.emplace_back(txt.substr(s, i-s));
+                if (i+1<txt.size() && txt[i]=='\r' && txt[i+1]=='\n') ++i;
+                s = i+1;
+            }
+            ++i;
+        }
+        if (txt.empty()) lines.clear();
+
+        bool found=false;
+        for (auto& ln : lines){
+            std::string low = toLower(ln);
+            if (low.find("category_lite.prx") != std::string::npos){
+                if (arkPluginsTxt) {
+                    if (enable) {
+                        if (gclPrxPath.empty()) return false;
+                        ln = std::string("vsh, ") + gclPrxPath + ", 1";
+                    } else {
+                        // keep existing path if present; fallback to normalized disable
+                        std::string keepPath;
+                        // parse CSV in lowercase copy to identify columns
+                        std::vector<std::string> cols;
+                        size_t start = 0;
+                        while (start <= low.size()){
+                            size_t pos = low.find(',', start);
+                            if (pos == std::string::npos) pos = low.size();
+                            cols.push_back(trim(low.substr(start, pos - start)));
+                            start = pos + (pos < low.size() ? 1 : 0);
+                            if (pos == low.size()) break;
+                        }
+                        if (cols.size() >= 2 && cols[1].find("category_lite.prx") != std::string::npos) {
+                            // recover original cased path from the source line
+                            std::vector<std::string> colsRaw;
+                            start = 0;
+                            while (start <= ln.size()){
+                                size_t pos = ln.find(',', start);
+                                if (pos == std::string::npos) pos = ln.size();
+                                colsRaw.push_back(trim(ln.substr(start, pos - start)));
+                                start = pos + (pos < ln.size() ? 1 : 0);
+                                if (pos == ln.size()) break;
+                            }
+                            if (colsRaw.size() >= 2) keepPath = colsRaw[1];
+                        }
+                        if (keepPath.empty()) keepPath = gclPrxPath;
+                        if (keepPath.empty()) keepPath = "ms0:/SEPLUGINS/category_lite.prx";
+                        ln = std::string("vsh, ") + keepPath + ", 0";
+                    }
+                } else {
+                    // PRO/ME space-separated
+                    if (enable) {
+                        if (gclPrxPath.empty()) return false;
+                        ln = gclPrxPath + " 1";
+                    } else {
+                        while (!ln.empty() && (ln.back()==' '||ln.back()=='\t')) ln.pop_back();
+                        size_t sp = ln.find_last_of(" \t");
+                        if (sp != std::string::npos) ln.erase(sp);
+                        ln += " 0";
+                    }
+                }
+                found = true; break;
+            }
+        }
+
+        if (!found && enable){
+            if (gclPrxPath.empty()) return false;
+            if (!lines.empty() && !lines.back().empty()) lines.push_back(std::string());
+            if (arkPluginsTxt) lines.push_back(std::string("vsh, ") + gclPrxPath + ", 1");
+            else               lines.push_back(gclPrxPath + " 1");
+        }
+
+        std::string out;
+        for (size_t k=0;k<lines.size();++k){ out += lines[k]; if (k+1<lines.size()) out += "\r\n"; }
+        return gclWriteWholeText(filePath, out);
+    }
+
+
+    // NEW: load/save gclite.bin (CategoryConfig)
+    static void gclLoadConfig() {
+        const std::string path = gclConfigPath();
+        SceUID fd = sceIoOpen(path.c_str(), PSP_O_RDONLY, 0777);
+        if (fd >= 0) {
+            GclConfig tmp{};
+            int rd = sceIoRead(fd, &tmp, sizeof(tmp));
+            sceIoClose(fd);
+            if (rd == (int)sizeof(tmp)) { gclCfg = tmp; gclCfgLoaded = true; return; }
+        }
+        // defaults if missing or size mismatch
+        gclCfg = GclConfig{0,0,0,0,0};
+        gclCfgLoaded = true;
+    }
+
+    static bool gclSaveConfig() {
+        const std::string path = gclConfigPath();
+        // Ensure seplugins directory exists
+        sceIoMkdir((isPspGo()? "ef0:/seplugins" : "ms0:/seplugins"), 0777);
+        SceUID fd = sceIoOpen(path.c_str(), PSP_O_WRONLY | PSP_O_CREAT | PSP_O_TRUNC, 0777);
+        if (fd < 0) return false;
+        int wr = sceIoWrite(fd, &gclCfg, sizeof(gclCfg));
+        sceIoClose(fd);
+        return wr == (int)sizeof(gclCfg);
+    }
+
+    // Helpers to stringify current values (labels from the plugin’s language table)
+    static const char* gclModeLabel(uint32_t m) {
+        switch (m) { case 0: return "Multi MS"; case 1: return "Contextual menu"; case 2: return "Folders"; default: return "?"; }
+    }
+    static const char* gclPrefixLabel(uint32_t p) {
+        return (p==0) ? "None" : "Use CAT prefix";
+    }
+    static const char* gclUncatLabel(uint32_t u, bool go) {
+        switch (u) { case 0: return "No";
+                    case 1: return "Only Memory Stick\u2122";
+                    case 2: return "Only Internal Storage";
+                    case 3: return "Both";
+                    default: return "?"; }
+    }
+    static const char* gclSortLabel(uint32_t s) {
+        return (s==0) ? "No" : "Yes";
+    }
+
+    void buildGclSettingsRowsFromState() {
+        const int prevSel = selectedIndex, prevOff = scrollOffset;
+
+        entries.clear(); entryPaths.clear(); entryKinds.clear();
+        rowFlags.clear(); rowFreeBytes.clear(); rowReason.clear(); rowNeedBytes.clear();
+
+        auto add = [&](const std::string& label){
+            SceIoDirent e{}; e.d_stat.st_mode = FIO_S_IFDIR;
+            strncpy(e.d_name, label.c_str(), sizeof(e.d_name)-1);
+            entries.push_back(e);
+            entryPaths.emplace_back("");
+            entryKinds.push_back(GameItem::ISO_FILE);
+            rowFlags.push_back(0); rowFreeBytes.push_back(0);
+            rowReason.push_back(RD_NONE); rowNeedBytes.push_back(0);
+        };
+
+        add(std::string("Category mode: ")      + gclModeLabel(gclCfg.mode));
+        add(std::string("Category prefix: ")    + gclPrefixLabel(gclCfg.prefix));
+        add(std::string("Show uncategorized: ") + gclUncatLabel(gclCfg.uncategorized, isPspGo()));
+        add(std::string("Sort categories: ")    + gclSortLabel(gclCfg.catsort));
+
+        selectedIndex = std::min(prevSel, (int)entries.size()-1);
+        scrollOffset  = std::min(prevOff, std::max(0, (int)entries.size()-1));
+        showRoots = false; view = View_GclSettings;
+    }
+
+
+
+
+    void openGclSettingsScreen(){
+            // Load the plugin’s current settings so the list reflects them
+            gclLoadConfig();   // ← no args; your function is void gclLoadConfig()
+
+            // Your existing detection of ARK/PRO enablement, etc.
+            gclComputeInitial();
+
+            // Build rows (now showing the values from gclite.bin)
+            buildGclSettingsRowsFromState();
+        }
+
+
+
+
+    void handleGclToggleAt(int idx){
+        if (idx < 0) return;
+
+        // No master toggles here anymore – just open the pickers for 0..3
+        const bool go = isPspGo();
+
+        if (idx == 0) {
+            // Category mode
+            std::vector<OptionItem> items = { {"Multi MS", false}, {"Contextual menu", false}, {"Folders", false} };
+            optMenu = new OptionListMenu("Category mode", "Selects the display mode for the Games/Homebrew.", items, SCREEN_WIDTH, SCREEN_HEIGHT);
+            gclPending = GCL_SK_Mode;
+            optMenu->setSelected((int)gclCfg.mode);
+
+            // NEW: Prime & debounce so held X/O won't auto-activate the choice
+            SceCtrlData now{}; sceCtrlReadBufferPositive(&now, 1);
+            optMenu->primeButtons(now.Buttons);
+            inputWaitRelease = true;
+        } else if (idx == 1) {
+            // Category prefix
+            std::vector<OptionItem> items = {
+                {"None", false}, {"Use CAT prefix", false}
+            };
+            optMenu = new OptionListMenu("Category prefix", "Use the \"CAT_\" prefix to recognize the categories.", items, SCREEN_WIDTH, SCREEN_HEIGHT);
+            gclPending = GCL_SK_Prefix;
+            optMenu->setSelected((int)gclCfg.prefix);
+
+            // NEW: Prime & debounce so held X/O won't auto-activate the choice
+            SceCtrlData now{}; sceCtrlReadBufferPositive(&now, 1);
+            optMenu->primeButtons(now.Buttons);
+            inputWaitRelease = true;
+        } else if (idx == 2) {
+            // Show uncategorized
+            std::vector<OptionItem> items = {
+                {"No", false}, {"Only Memory Stick", false}, {"Only Internal Storage", !go}, {"Both", !go}
+            };
+            optMenu = new OptionListMenu("Show uncategorized", "Allows hiding the uncategorized content.", items, SCREEN_WIDTH, SCREEN_HEIGHT);
+            gclPending = GCL_SK_Uncat;
+            optMenu->setSelected((int)gclCfg.uncategorized);
+
+            // NEW: Prime & debounce so held X/O won't auto-activate the choice
+            SceCtrlData now{}; sceCtrlReadBufferPositive(&now, 1);
+            optMenu->primeButtons(now.Buttons);
+            inputWaitRelease = true;
+        } else if (idx == 3) {
+            // Sort categories
+            std::vector<OptionItem> items = { {"No", false}, {"Yes", false} };
+            optMenu = new OptionListMenu("Sort categories", "Allows sorting categories using CAT_XX or XXhomebrew.", items, SCREEN_WIDTH, SCREEN_HEIGHT);
+            gclPending = GCL_SK_Sort;
+            optMenu->setSelected((int)gclCfg.catsort);
+
+            // NEW: Prime & debounce so held X/O won't auto-activate the choice
+            SceCtrlData now{}; sceCtrlReadBufferPositive(&now, 1);
+            optMenu->primeButtons(now.Buttons);
+            inputWaitRelease = true;
+        }
+    }
+
+
+
+
+
+
+        // ---- GCL: install-on-demand helpers --------------------------------
+
+    bool copyFileBuffered(const std::string& src, const std::string& dst) {
+        SceUID in = sceIoOpen(src.c_str(), PSP_O_RDONLY, 0);
+        if (in < 0) return false;
+        SceUID out = sceIoOpen(dst.c_str(), PSP_O_WRONLY | PSP_O_CREAT | PSP_O_TRUNC, 0777);
+        if (out < 0) { sceIoClose(in); return false; }
+
+        char buf[16 * 1024];
+        for (;;) {
+            int rd = sceIoRead(in, buf, sizeof(buf));
+            if (rd < 0) { sceIoClose(in); sceIoClose(out); return false; }
+            if (rd == 0) break;
+            int wr = sceIoWrite(out, buf, rd);
+            if (wr != rd) { sceIoClose(in); sceIoClose(out); return false; }
+        }
+        sceIoClose(in); sceIoClose(out);
+        return true;
+    }
+
+    // Ensure category_lite.prx exists under <ef0|ms0>:/SEPLUGINS
+    // If missing, copy it from "<app base>/resources/category_lite.prx"
+    bool gclEnsurePrxPresent() {
+        if (!gclPrxPath.empty()) return true;
+
+        // Where we’re going to install
+        gclDevice = gclPickDeviceRoot();
+        std::string seplugins = joinDirFile(gclDevice, "SEPLUGINS");
+        if (!dirExists(seplugins)) {
+            sceIoMkdir(seplugins.c_str(), 0777);
+        }
+        std::string dst = joinDirFile(seplugins, "category_lite.prx");
+
+        // Where we’re copying from (next to your images)
+        std::string baseDir = getBaseDir(gExecPath);
+        std::string src = baseDir + "resources/category_lite.prx";
+
+        if (!copyFileBuffered(src, dst)) return false;
+
+        gclPrxPath = dst;   // remember the exact installed path
+        return true;
+    }
+
     void buildRootRows(){
         clearUI();
         int preselect = -1;
         const uint64_t HEADROOM = (4ull << 20); // keep ~4 MiB headroom
 
-        // Add a synthetic "USB Mode" row only when NOT picking a device (Move/Copy)
+        // Add synthetic rows only when NOT picking a device (Move/Copy)
+        // buildRootRows()
         if (opPhase != OP_SelectDevice) {
-            SceIoDirent ue{}; strncpy(ue.d_name, "__USB_MODE__", sizeof(ue.d_name) - 1);
-            ue.d_stat.st_mode = FIO_S_IFDIR;
-            entries.push_back(ue);
-            entryPaths.emplace_back("");
-            entryKinds.push_back(GameItem::ISO_FILE);
-            rowFlags.push_back(0);
-            rowFreeBytes.push_back(0);
-            rowReason.push_back(RD_NONE);
-            rowNeedBytes.push_back(0);
+            // Make sure toggle state is current
+            gclLoadConfig();
+            gclComputeInitial();
+
+            // Master toggles on the root/device screen
+            // Master toggle (single picker) on the root/device screen
+            {
+                SceIoDirent t{}; t.d_stat.st_mode = FIO_S_IFDIR;
+                const char* state = (!gclArkOn && !gclProOn) ? "Off" : (gclArkOn ? "ARK-4" : "PRO/ME");
+                std::string l = std::string("Game Categories Lite: ") + state;
+                strncpy(t.d_name, l.c_str(), sizeof(t.d_name)-1);
+                entries.push_back(t);
+                entryPaths.emplace_back("");
+                entryKinds.push_back(GameItem::ISO_FILE);
+                rowFlags.push_back(0); rowFreeBytes.push_back(0); rowReason.push_back(RD_NONE); rowNeedBytes.push_back(0);
+            }
+
+
+            // USB Mode (unchanged)
+            {
+                SceIoDirent ue{}; strncpy(ue.d_name, "__USB_MODE__", sizeof(ue.d_name) - 1);
+                ue.d_stat.st_mode = FIO_S_IFDIR;
+                entries.push_back(ue);
+                entryPaths.emplace_back("");
+                entryKinds.push_back(GameItem::ISO_FILE);
+                rowFlags.push_back(0); rowFreeBytes.push_back(0); rowReason.push_back(RD_NONE); rowNeedBytes.push_back(0);
+            }
         }
+
 
         for (auto &r : roots){
             SceIoDirent e{}; strncpy(e.d_name, r.c_str(), sizeof(e.d_name)-1);
@@ -3062,9 +4525,46 @@ private:
 
     void buildCategoryRows(){
         clearUI(); moving = false;
+
+        // First: enforce on-disk category naming to match current settings.
+        // This strips "##" from folder names when Sort is OFF, and applies CAT_ as needed.
+        // Do it for the current device, and mirror to the paired root on PSPgo.
+        enforceCategorySchemeForDevice(currentDevice);
+        if (isPspGo()) {
+            const bool onMs0 = (strncasecmp(currentDevice.c_str(), "ms0:/", 5) == 0);
+            enforceCategorySchemeForDevice(onMs0 ? std::string("ef0:/")
+                                                : std::string("ms0:/"));
+        }
+
+        // First: enforce on-disk names to match current settings (removes "##" when Sort=OFF, applies CAT_ if needed)
+        {
+            // Only enforce on first time we hit this device root this session
+            const std::string root = rootPrefix(currentDevice); // e.g. "ms0:/" or "ef0:/"
+            if (s_catNamingEnforced.insert(root).second) {
+                enforceCategorySchemeForDevice(root);
+                if (isPspGo()) {
+                    const std::string other = (strncasecmp(root.c_str(), "ms0:/", 5) == 0) ? "ef0:/" : "ms0:/";
+                    enforceCategorySchemeForDevice(other);
+                    s_catNamingEnforced.insert(other); // mark the sibling as enforced too
+                }
+            }
+
+            // Always patch the *cache* to reflect the current mapping (cheap & safe)
+            patchCategoryCacheFromSettings();
+        }
+
+
         std::vector<std::string> catsSorted = categoryNames;
         bool hasUnc = (categories.find("Uncategorized") != categories.end());
-        if (hasUnc) catsSorted.push_back("Uncategorized");
+        if (hasUnc && gclCfg.uncategorized) catsSorted.push_back("Uncategorized");
+
+
+        // Add an entry to open the plugin settings here
+        {
+            SceIoDirent z{}; strncpy(z.d_name, "Category Settings", sizeof(z.d_name)-1);
+            z.d_stat.st_mode = FIO_S_IFDIR;
+            entries.push_back(z);
+        }
 
         int preselect = -1;
         for (auto &name : catsSorted){
@@ -3078,9 +4578,13 @@ private:
         }
         showRoots = false; view = View_Categories;
 
-        selectedIndex = (preselect >= 0) ? preselect : 0;
+        // Default to the settings row if nothing specific is selected
+        selectedIndex = (preselect >= 0) ? (preselect + 1) : 0;
         scrollOffset  = (selectedIndex >= MAX_DISPLAY) ? (selectedIndex - MAX_DISPLAY + 1) : 0;
     }
+
+
+
 
     static std::string parseCategoryFromFullPath(const std::string& full, GameItem::Kind kind) {
         std::string sub = subrootFor(full, kind);
@@ -3133,7 +4637,21 @@ private:
             entryKinds.push_back(GameItem::ISO_FILE);
         }
         showRoots = false;
+        // ... backing out to categories ...
         view = View_Categories;
+
+        // (Removed call to buildCategoriesListForDevice(); not defined & not needed here)
+
+        // Put the cursor back on the category we just left
+        selectedIndex = findCategoryRowByName(currentCategory);
+        if (selectedIndex < 0) selectedIndex = 0;
+        if (selectedIndex >= (int)entries.size()) selectedIndex = (int)entries.size() - 1;
+
+        // Clamp scroll to show the selected row
+        if (selectedIndex < scrollOffset) scrollOffset = selectedIndex;
+        if (selectedIndex >= scrollOffset + MAX_DISPLAY)
+            scrollOffset = selectedIndex - (MAX_DISPLAY - 1);
+
 
         // Select the first NON-disabled category
         int sel = 0;
@@ -3194,10 +4712,30 @@ private:
             FreeSpaceRequestRefresh();
         }
 
-        if (hasCategories) {
+        if (gclArkOn || gclProOn) {
+            // RUN-ONCE per device root (ms0:/ or ef0:/). Avoids slow renames when backing out.
+            {
+                std::string rootKey = rootPrefix(currentDevice);  // "ms0:/" or "ef0:/"
+                if (!rootKey.empty() && !gclSchemeApplied.count(rootKey)) {
+                    enforceCategorySchemeForDevice(currentDevice);
+
+                    // PSP Go: if we're on one root and the other exists, mirror the scheme once
+                    if (isPspGo()) {
+                        std::string other = oppositeRootOf(currentDevice);
+                        if (!other.empty()) enforceCategorySchemeForDevice(other);
+                    }
+
+                    // Update the in-memory cache so ICON0s continue to resolve after renames
+                    patchCategoryCacheFromSettings();
+
+                    gclSchemeApplied.insert(rootKey);
+                }
+            }
+
             buildCategoryRows();
         } else {
-            workingList = flatAll;
+            // Categories Lite is Off → bypass categories and list only "Uncategorized"
+            workingList = uncategorized;
             sortLikeLegacy(workingList);
             view = View_AllFlat;
             clearUI();
@@ -3211,6 +4749,7 @@ private:
             }
             showRoots = false;
         }
+
     }
 
     void openCategory(const std::string& catName){
@@ -3621,25 +5160,21 @@ private:
     }
 
     static bool parseCategoryFromPath(const std::string& pathAfterSubroot, std::string& outCat, std::string& outLeaf) {
-        // pathAfterSubroot = e.g. "CAT_02PS1/SLUS12345"  or "SLUS12345"  or "CAT_01PSP/Game.iso"
+        // pathAfterSubroot examples:
+        //   "CAT_02PS1/SLUS12345", "Emulators/CPS1 (Capcom Play System 1)", "SLUS12345", "CAT_01PSP/Game.iso"
         size_t slash = pathAfterSubroot.find('/');
         if (slash == std::string::npos) {
-            // no category
+            // No category component
             outCat.clear();
             outLeaf = pathAfterSubroot;
             return false;
         }
-        std::string first = pathAfterSubroot.substr(0, slash);
-        if (startsWithCAT(first.c_str())) {
-            outCat  = first;
-            outLeaf = pathAfterSubroot.substr(slash+1);
-            return true;
-        } else {
-            outCat.clear();
-            outLeaf = pathAfterSubroot.substr(0); // leaf starts immediately
-            return false;
-        }
+        // Treat the first segment as the category regardless of prefix
+        outCat  = pathAfterSubroot.substr(0, slash);
+        outLeaf = pathAfterSubroot.substr(slash + 1);
+        return true;
     }
+
 
     static std::string afterSubroot(const std::string& full, const std::string& subroot) {
         // full: "ms0:/PSP/GAME/CAT_foo/Leaf", subroot: "PSP/GAME/"
@@ -4061,13 +5596,14 @@ private:
 
 
 
-    // --- helper (NEW): quick probe for any CAT_ on a device ---
+    // --- helper (NEW): “any device has categories?” quick probe for any CAT_ on a device ---
     bool deviceHasAnyCategory(const std::string& dev) const {
-        const char* isoRoots[]  = {"ISO/","ISO/PSP/"};
-        const char* gameRoots[] = {"PSP/GAME/","PSP/GAME/PSX/","PSP/GAME/Utility/","PSP/GAME150/"};
+        const char* isoRoots[]  = {"ISO/"};                // drop ISO/PSP/ as a root
+        const char* gameRoots[] = {"PSP/GAME/","PSP/GAME150/"}; // drop PSX/ and Utility/ as roots
 
         auto hasCatIn = [](const std::string& base)->bool {
             if (!dirExists(base)) return false;
+
             bool hit = false;
             forEachEntry(base, [&](const SceIoDirent &e){
                 if (FIO_S_ISDIR(e.d_stat.st_mode) && startsWithCAT(e.d_name)) hit = true;
@@ -4213,6 +5749,8 @@ private:
             (opDestCategory.empty() ? "Uncategorized" : opDestCategory.c_str()));
 
         bool didCross = false;  // <--- ADD THIS
+        (void)didCross; // suppress 'set but not used' warnings when no cross-device move happens
+
 
         // Cached, non-blocking preflight (PSP Go, running from ms0, both devices present).
         // Uses the background probe only; never calls getFreeBytesCMF() here.
@@ -4420,16 +5958,15 @@ public:
             }
             const bool connected = (s & PSP_USB_CONNECTION_ESTABLISHED);
             if (connected != gUsbShownConnected) {
-                // Rebuild the message to reflect state
                 if (gUsbBox) { delete gUsbBox; gUsbBox = nullptr; }
                 gUsbBox = new MessageBox(
                     connected ? "Connected to PC...\nPress \xE2\x97\xAF to disconnect."
                             : "Connect to PC...\nPress \xE2\x97\xAF to disconnect.",
-                    nullptr, SCREEN_WIDTH, SCREEN_HEIGHT, 1.0f, 0, "", 16, 18, 8, 14,
-                    PSP_CTRL_CIRCLE);
+                    nullptr, SCREEN_WIDTH, SCREEN_HEIGHT, 1.0f, 0, "", 16, 18, 8, 14, PSP_CTRL_CIRCLE);
                 gUsbShownConnected = connected;
             }
         }
+
 
 
         
@@ -4499,8 +6036,47 @@ bool analogUpNow = (pad.Ly <= 30);
             }
         }
 
+        // ===== SELECT: Category sort mode in Categories view; A→Z in content views =====
+        // if (pressed & PSP_CTRL_SELECT) {
+        //     if (!showRoots && view == View_Categories) {
+        //         // Toggle on-screen sort mode
+        //         if (!catSortMode) {
+        //             catSortMode   = true;
+        //             catPickActive = false;
+        //             catPickIndex  = -1;
+        //         } else {
+        //             // Leaving sort mode: apply the visible order to numbering & rename as needed
+        //             catSortMode   = false;
+        //             catPickActive = false;
+        //             catPickIndex  = -1;
+
+        //             applyCategoryOrderAndPersist();   // updates XX and CAT_XX (if enabled), renames on disk
+        //             buildCategoryRows();              // rebuild rows from current cache/files
+
+        //             // Clamp selection to a valid row (stay in Categories screen)
+        //             if (selectedIndex >= (int)entries.size()) selectedIndex = (int)entries.size() - 1;
+        //             if (selectedIndex < 0) selectedIndex = 0;
+        //         }
+        //         return; // swallow SELECT
+        //     }
+
+        //     // In content views, keep existing behavior: quick A→Z sort of the working list
+        //     if (!showRoots && (view == View_AllFlat || view == View_CategoryContents)) {
+        //         moving = false;
+        //         sortWorkingListAlpha(
+        //             /*byTitle=*/showTitles,
+        //             /*workingList=*/workingList,
+        //             /*selectedIndex=*/selectedIndex,
+        //             /*scrollOffset=*/scrollOffset
+        //         );
+        //         refillRowsFromWorkingPreserveSel();
+        //         return;
+        //     }
+        // }
+
+
         // ---------------------------
-        // While an op is active (Move), restrict navigation per spec
+        // While an op is active (Move),
         // ---------------------------
         // ---------------------------
         // While an op is active (Move/Copy), restrict navigation per spec
@@ -4652,24 +6228,24 @@ bool analogUpNow = (pad.Ly <= 30);
             return; // swallow other inputs during op mode
         }
 
-        // --- OPEN (X) while just browsing categories (not in Move/Copy) ---
-        if ((pressed & PSP_CTRL_CROSS) &&
-            actionMode == AM_None &&
-            !showRoots &&
-            view == View_Categories &&
-            !msgBox && !fileMenu)
-        {
-            // Freeze background free-space probes so the UI can react instantly
+        // --- OPEN (X) while just browsing categories ---
+        if ((pressed & PSP_CTRL_CROSS) && actionMode == AM_None &&
+            !showRoots && view == View_Categories && !msgBox && !fileMenu &&
+            !catSortMode) { // ← don’t open while sorting
             FreeSpacePauseNow();
-
             if (selectedIndex >= 0 && selectedIndex < (int)entries.size()) {
-                openCategory(entries[selectedIndex].d_name);
+                std::string nm = entries[selectedIndex].d_name;
+                if (nm == "Category Settings" || nm == "__GCL_SETTINGS__") {
+                    openGclSettingsScreen();
+                } else {
+                    openCategory(nm.c_str());
+                }
             }
-
-            // Category view is ready — let the probe continue
             FreeSpaceResume();
             return;
         }
+
+
 
 
         // L trigger: rename
@@ -4706,15 +6282,72 @@ bool analogUpNow = (pad.Ly <= 30);
             return;
         }
 
-        // SELECT: A→Z
+        // SELECT: Categories → toggle Sort Mode (only if enabled); Content views → A→Z
         if (pressed & PSP_CTRL_SELECT) {
+            if (!showRoots && view == View_Categories) {
+                // If "Sort categories" is OFF, ignore SELECT on Categories
+                if (!gclCfg.catsort) {
+                    return; // setting disabled → do nothing
+                }
+
+                // Toggle Category Sort Mode
+                catSortMode   = !catSortMode;
+                catPickActive = false;
+                catPickIndex  = -1;
+
+                if (!catSortMode) {
+                    // Remember which category (by BASE, ignoring prefixes) was focused
+                    std::string keepBase;
+                    if (selectedIndex >= 0 && selectedIndex < (int)entries.size()) {
+                        const char* disp = entries[selectedIndex].d_name;
+                        // Skip synthetic/locked rows
+                        if (strcasecmp(disp, "Category Settings") != 0 && strcasecmp(disp, "Uncategorized") != 0) {
+                            keepBase = stripCategoryPrefixes(disp);
+                        }
+                    }
+
+                    applyCategoryOrderAndPersist();
+                    buildCategoryRows();
+
+                    // Reselect the same category by BASE and ensure it’s visible
+                    int idx = -1;
+                    if (!keepBase.empty()) {
+                        for (int i = 0; i < (int)entries.size(); ++i) {
+                            if (!strcasecmp(stripCategoryPrefixes(entries[i].d_name).c_str(), keepBase.c_str())) {
+                                idx = i; break;
+                            }
+                        }
+                    }
+                    if (idx < 0) {
+                        // Fallback: clamp to previous index if still valid, else to a safe row
+                        idx = (selectedIndex >= 0 && selectedIndex < (int)entries.size())
+                            ? selectedIndex
+                            : (int)entries.size() - 1;
+                        if (idx < 0) idx = 0;
+                    }
+
+                    selectedIndex = idx;
+                    if (selectedIndex < scrollOffset) scrollOffset = selectedIndex;
+                    const int lastVisible = scrollOffset + MAX_DISPLAY - 1;
+                    if (selectedIndex > lastVisible) scrollOffset = selectedIndex - (MAX_DISPLAY - 1);
+                }
+                return; // swallow SELECT on Categories
+            }
+
+            // Content views: quick A→Z
             if (!showRoots && (view == View_AllFlat || view == View_CategoryContents)) {
                 moving = false;
                 sortWorkingListAlpha(showTitles, workingList, selectedIndex, scrollOffset);
                 refillRowsFromWorkingPreserveSel();
+                return;
             }
             return;
         }
+
+
+
+
+
 
         // △: open modal menu (content views → Move/Copy/Delete; categories → New/Delete)
         if (pressed & PSP_CTRL_TRIANGLE) {
@@ -4731,6 +6364,11 @@ bool analogUpNow = (pad.Ly <= 30);
                     };
                     menuContext = MC_ContentOps;
                     fileMenu = new FileOpsMenu(items, SCREEN_WIDTH, SCREEN_HEIGHT);
+
+                    // NEW: Prime & debounce
+                    SceCtrlData now{}; sceCtrlReadBufferPositive(&now, 1);
+                    fileMenu->primeButtons(now.Buttons);
+                    inputWaitRelease = true;
                 } else if (view == View_Categories) {
                     std::vector<FileOpsItem> items = {
                         { "New",    false },
@@ -4738,6 +6376,11 @@ bool analogUpNow = (pad.Ly <= 30);
                     };
                     menuContext = MC_CategoryOps;
                     fileMenu = new FileOpsMenu(items, SCREEN_WIDTH, SCREEN_HEIGHT);
+
+                    // NEW: Prime & debounce
+                    SceCtrlData now{}; sceCtrlReadBufferPositive(&now, 1);
+                    fileMenu->primeButtons(now.Buttons);
+                    inputWaitRelease = true;
                 }
             }
             return;
@@ -4768,9 +6411,23 @@ bool analogUpNow = (pad.Ly <= 30);
                         if (selectedIndex < scrollOffset) scrollOffset = selectedIndex;
                     }
                 } else {
-                    if (selectedIndex > 0){
-                        selectedIndex--;
-                        if (selectedIndex < scrollOffset) scrollOffset = selectedIndex;
+                    // NEW: while sorting categories and a row is picked, move the picked category instead of just moving selection
+                    if (!showRoots && view == View_Categories && catSortMode && catPickActive) {
+                        int i = selectedIndex;
+                        int j = i - 1;
+                        // skip locked rows (e.g., "Category Settings", "Uncategorized")
+                        while (j >= 0 && isCategoryRowLocked(j)) j--;
+                        if (j >= 0) {
+                            std::swap(entries[i], entries[j]);
+                            selectedIndex = j;
+                            catPickIndex  = j; // keep [MOVE] on the row you're carrying
+                            if (selectedIndex < scrollOffset) scrollOffset = selectedIndex;
+                        }
+                    } else {
+                        if (selectedIndex > 0){
+                            selectedIndex--;
+                            if (selectedIndex < scrollOffset) scrollOffset = selectedIndex;
+                        }
                     }
                 }
             }
@@ -4799,55 +6456,162 @@ bool analogUpNow = (pad.Ly <= 30);
                         if (selectedIndex >= scrollOffset + MAX_DISPLAY) scrollOffset = selectedIndex - MAX_DISPLAY + 1;
                     }
                 } else {
-                    if (selectedIndex + 1 < (int)entries.size()){
-                        selectedIndex++;
-                        if (selectedIndex >= scrollOffset + MAX_DISPLAY) scrollOffset = selectedIndex - MAX_DISPLAY + 1;
+                    // NEW: while sorting categories and a row is picked, move the picked category instead of just moving selection
+                    if (!showRoots && view == View_Categories && catSortMode && catPickActive) {
+                        int i = selectedIndex;
+                        int j = i + 1;
+                        // skip locked rows (e.g., "Category Settings", "Uncategorized")
+                        while (j < (int)entries.size() && isCategoryRowLocked(j)) j++;
+                        if (j < (int)entries.size()) {
+                            std::swap(entries[i], entries[j]);
+                            selectedIndex = j;
+                            catPickIndex  = j; // keep [MOVE] on the row you're carrying
+                            const int lastVisible = scrollOffset + MAX_DISPLAY - 1;
+                            if (selectedIndex > lastVisible) scrollOffset = selectedIndex - (MAX_DISPLAY - 1);
+                        }
+                    } else {
+                        if (selectedIndex + 1 < (int)entries.size()){
+                            selectedIndex++;
+                            if (selectedIndex >= scrollOffset + MAX_DISPLAY) scrollOffset = selectedIndex - MAX_DISPLAY + 1;
+                        }
                     }
                 }
             }
         }
+
 
         // X / O default behaviors
         if (pressed & PSP_CTRL_CROSS) {
             if (selectedIndex < 0 || selectedIndex >= (int)entries.size()) return;
 
+            // NEW: handle toggles inside the settings screen
+            if (!showRoots && view == View_GclSettings) {
+                handleGclToggleAt(selectedIndex);
+                return;
+            }
+
             if (showRoots) {
                 if (selectedIndex < (int)rowFlags.size() && (rowFlags[selectedIndex] & ROW_DISABLED)) return;
 
                 std::string dev = entries[selectedIndex].d_name;
-                if (dev == "__USB_MODE__") {
-                    if (!gUsbActive) {
-                        UsbActivate();
-                        gUsbActive = true;
-                        gUsbShownConnected = false;
-                        gUsbBox = new MessageBox(
-                            "Connect to PC...\nPress \xE2\x97\xAF to disconnect.",
-                            nullptr, SCREEN_WIDTH, SCREEN_HEIGHT, 1.0f, 0, "", 16, 18, 8, 14,
-                            PSP_CTRL_CIRCLE);  // CLOSE ON CIRCLE
-                    }
-                    return; // don’t fall through to openDevice()
+                // Root-level master toggles
+                if (dev.rfind("Game Categories Lite:", 0) == 0) {
+                    // Show a 3-option picker: Off / ARK-4 / PRO/ME
+                    std::vector<OptionItem> items = {
+                        { "Off",   false },
+                        { "ARK-4", false },
+                        { "PRO/ME",false }
+                    };
+                    optMenu = new OptionListMenu(
+                        "Game Categories Lite",
+                        "Pick which implementation to use (or turn it off).",
+                        items, SCREEN_WIDTH, SCREEN_HEIGHT
+                    );
+                    // Preselect current state
+                    int sel = (!gclArkOn && !gclProOn) ? 0 : (gclArkOn ? 1 : 2);
+                    optMenu->setSelected(sel);
+
+                    // Prime & debounce so held X/O won't auto-activate the choice
+                    SceCtrlData now{}; sceCtrlReadBufferPositive(&now, 1);
+                    optMenu->primeButtons(now.Buttons);
+                    inputWaitRelease = true;
+
+                    rootPickGcl = true;
+                    return;
                 }
+
+
+                if (dev == "__USB_MODE__") { /* ... */ return; }
 
                 openDevice(dev);
                 return;
             }
+            // (other view handling continues…)
+
 
 
             if (view == View_Categories) {
-                if (FIO_S_ISDIR(entries[selectedIndex].d_stat.st_mode)) openCategory(entries[selectedIndex].d_name);
+                std::string nm = entries[selectedIndex].d_name;
+
+                // Block "Category Settings" row
+                if (nm == "__GCL_SETTINGS__") {
+                    openGclSettingsScreen();
+                    return;
+                }
+
+                // In sort mode: X = Pick/Drop (no opening)
+                if (catSortMode) {
+                    // Block non-movable rows: top "Category Settings" and bottom "Uncategorized"
+                    if (!isCategoryRowLocked(selectedIndex)) {
+                        if (!catPickActive) {
+                            // Start a pick
+                            catPickActive = true;
+                            catPickIndex  = selectedIndex;
+                        } else {
+                            // Drop onto the new spot (swap visible rows)
+                            if (catPickIndex >= 0 && catPickIndex < (int)entries.size() &&
+                                selectedIndex  >= 0 && selectedIndex  < (int)entries.size() &&
+                                catPickIndex != selectedIndex &&
+                                !isCategoryRowLocked(catPickIndex) && !isCategoryRowLocked(selectedIndex)) {
+
+                                std::swap(entries[catPickIndex], entries[selectedIndex]);
+                                std::swap(entryPaths[catPickIndex], entryPaths[selectedIndex]);
+                                std::swap(entryKinds[catPickIndex], entryKinds[selectedIndex]);
+
+                                // Immediately reflect numbering (visible & on disk) after each drop
+                                applyCategoryOrderAndPersist();
+                            }
+                            // End pick/drop cycle; stay in sort mode until SELECT
+                            catPickActive = false;
+                            catPickIndex  = -1;
+                        }
+                    }
+                    return; // swallow X in sort mode
+                }
+
+
+
+                // Normal mode: open the category
+                if (FIO_S_ISDIR(entries[selectedIndex].d_stat.st_mode)) {
+                    openCategory(nm.c_str());
+                }
             } else {
                 moving = !moving;
             }
+
+
+
         }
         else if (pressed & PSP_CTRL_CIRCLE) {
             if (showRoots) {
                 // nothing
+            } else if (view == View_GclSettings) {
+                patchCategoryCacheFromSettings();
+                buildCategoryRows();      // Back to categories
+                selectedIndex = 0;        // highlight "Category Settings"
+                scrollOffset  = 0;        // ensure it's visible at the top
+                return;                   // stop further input from this frame
             } else if (view == View_CategoryContents) {
                 if (moving) {
                     moving = false;
                 } else {
                     checked.clear();
                     buildCategoryRows();
+
+                    // Re-highlight the category we just left
+                    // (match the *displayed* name exactly)
+                    int idx = -1;
+                    for (int i = 0; i < (int)entries.size(); ++i) {
+                        if (!strcmp(entries[i].d_name, currentCategory.c_str())) { idx = i; break; }
+                    }
+                    if (idx < 0) idx = 0;
+                    if (idx >= (int)entries.size()) idx = (int)entries.size() - 1;
+                    selectedIndex = idx;
+
+                    // Ensure visible
+                    if (selectedIndex < scrollOffset) scrollOffset = selectedIndex;
+                    const int lastVisible = scrollOffset + MAX_DISPLAY - 1;
+                    if (selectedIndex > lastVisible) scrollOffset = selectedIndex - (MAX_DISPLAY - 1);
                 }
             } else if (view == View_AllFlat) {
                 if (moving) {
@@ -4861,12 +6625,22 @@ bool analogUpNow = (pad.Ly <= 30);
                 else buildRootRows();
             }
         }
+
+
+
     }
 
     void run(){
         init();
         while (1) {
             renderOneFrame();
+
+            // Global debounce: wait for full release before any modal eats input
+            if (inputWaitRelease) {
+                SceCtrlData pad{}; sceCtrlReadBufferPositive(&pad, 1);
+                if (pad.Buttons != 0) continue;   // keep waiting
+                inputWaitRelease = false;          // buttons now released
+            }
 
             // Handle active dialogs
             if (msgBox) {
@@ -4916,6 +6690,86 @@ bool analogUpNow = (pad.Ly <= 30);
                 }
             }
 
+            // NEW: Categories Lite option picker (modal)
+            // NEW: Categories Lite option picker (modal)
+            else if (optMenu) {
+                if (!optMenu->update()) {
+                    const int pick = optMenu->choice();   // -1 if canceled
+                    const GclSettingKey pending = gclPending;  // capture BEFORE clearing
+                    const bool wasRootPick = rootPickGcl;       // capture BEFORE clearing
+                    delete optMenu; optMenu = nullptr;
+                    gclPending = GCL_SK_None;
+                    if (wasRootPick) rootPickGcl = false;
+
+                    if (pick >= 0) {
+                        if (wasRootPick) {
+                            // Apply Off / ARK-4 / PRO/ME to the two back-end toggles
+                            gclDevice = gclPickDeviceRoot();
+                            std::string seplugins = joinDirFile(gclDevice, "SEPLUGINS");
+                            if (!dirExists(seplugins)) sceIoMkdir(seplugins.c_str(), 0777);
+
+                            std::string plugins = gclFindTxtInSeplugins(seplugins, "PLUGINS.TXT");
+                            if (plugins.empty()) plugins = joinDirFile(seplugins, "PLUGINS.txt");
+                            std::string vsh = gclFindTxtInSeplugins(seplugins, "VSH.TXT");
+                            if (vsh.empty()) vsh = joinDirFile(seplugins, "VSH.txt");
+
+                            const bool wantArk = (pick == 1);
+                            const bool wantPro = (pick == 2);
+
+                            // Ensure the PRX is present if enabling either mode
+                            if ((wantArk || wantPro) && gclPrxPath.empty() && !gclEnsurePrxPresent()) {
+                                msgBox = new MessageBox("Could not install category_lite.prx from /resources.\nMake sure resources/category_lite.prx exists.",
+                                                        nullptr, SCREEN_WIDTH, SCREEN_HEIGHT, 1.0f, 0, "", 16, 18, 8, 14, PSP_CTRL_CIRCLE);
+                            } else {
+                                // Simulate the two separate toggles
+                                gclWriteEnableToFile(plugins, wantArk, /*arkPluginsTxt=*/true);
+                                gclWriteEnableToFile(vsh,     wantPro, /*arkPluginsTxt=*/false);
+                                gclArkOn = wantArk;
+                                gclProOn = wantPro;
+                                buildRootRows();   // reflect new state immediately
+                            }
+                        } else {
+                            // Existing in-plugin settings pickers
+                            switch (pending) {
+                                case GCL_SK_Mode:   gclCfg.mode = (uint32_t)pick; break;
+                                case GCL_SK_Prefix: gclCfg.prefix = (uint32_t)pick; break;
+                                case GCL_SK_Uncat:  gclCfg.uncategorized = (uint32_t)pick; break;
+                                case GCL_SK_Sort:   gclCfg.catsort = (uint32_t)pick; break;
+                                default: break;
+                            }
+                            gclSaveConfig();
+
+                            // If Prefix or Sort changed, apply immediately and refresh caches
+                            if (pending == GCL_SK_Prefix || pending == GCL_SK_Sort) {
+                                // Clear run-once guard so future opens are allowed to re-enforce if needed
+                                gclSchemeApplied.erase(rootPrefix(currentDevice));
+
+                                enforceCategorySchemeForDevice(currentDevice);
+                                const bool onMs0 = (strncasecmp(currentDevice.c_str(), "ms0:/", 5) == 0);
+                                if (isPspGo()) {
+                                    // Also clear & enforce the opposite root once to keep ms0:/ and ef0:/ consistent
+                                    std::string other = onMs0 ? std::string("ef0:/") : std::string("ms0:/");
+                                    gclSchemeApplied.erase(rootPrefix(other));
+                                    enforceCategorySchemeForDevice(other);
+                                }
+
+                                // Keep in-memory cache consistent with on-disk names, preserving ICON0 paths
+                                patchCategoryCacheFromSettings();
+                            }
+
+                            buildGclSettingsRowsFromState();
+
+                        }
+                    }
+                    inputWaitRelease = true;
+                    continue;   // keep modal behavior consistent
+                } else {
+                    continue;   // still open; skip normal input
+                }
+            }
+
+
+
             // File ops menu (modal)
             if (fileMenu) {
                 if (!fileMenu->update()) {
@@ -4955,51 +6809,82 @@ bool analogUpNow = (pad.Ly <= 30);
                             }
                         }
                     } else {
-                        // MC_CategoryOps: 0=New, 1=Delete
+// MC_CategoryOps: 0=New, 1=Delete
                         if (choice == 0) {
                             // New category: OSK → create across roots
                             std::string typed;
-                            if (!promptTextOSK("New Category", "CAT_", 64, typed)) {
+                            if (!promptTextOSK("New Category", "", 64, typed)) {
                                 // cancelled → nothing
                             } else {
-                                if (!startsWithCAT(typed.c_str())) typed = std::string("CAT_") + typed;
-                                typed = sanitizeFilename(typed);
-                                createCategoryDirs(currentDevice, typed);
+                                // Treat as BASE name (strip any CAT_/XX they typed)
+                                typed = sanitizeFilename(stripCategoryPrefixes(typed));
 
-                                // Patch cache instead of full rescan
-                                cachePatchAddCategory(typed);
+                                // Create as BASE across roots…
+                                createCategoryDirs(currentDevice, typed);
+                                // Apply CAT_/XX scheme to category directories
+                                enforceCategorySchemeForDevice(currentDevice);
+
+                                // Compute the *display* name we will now use for this category
+                                std::string newDisplay = findDisplayNameForCategoryBase(currentDevice, typed);
+
+                                // Patch in-memory caches (icon paths, no-icon memo set, selection key)
+                                // to include the new (empty) category, instead of renaming the current one
+                                if (!newDisplay.empty()) {
+                                    cachePatchAddCategory(newDisplay);
+                                }
+
+                                // Invalidate per-device “scheme applied” so initial-load enforcement can run again
+                                gclSchemeApplied.erase(rootPrefix(currentDevice));
+                                if (isPspGo()) {
+                                    // Be safe on Go: clear both roots so next load can re-apply where needed
+                                    gclSchemeApplied.erase(std::string("ms0:/"));
+                                    gclSchemeApplied.erase(std::string("ef0:/"));
+                                }
+
                                 buildCategoryRows();
-                                for (int i=0;i<(int)entries.size();++i)
-                                    if (!strcasecmp(entries[i].d_name, typed.c_str())) { selectedIndex = i; break; }
+
+                                auto sameBase = [&](const char* disp){
+                                    return !strcasecmp(stripCategoryPrefixes(disp).c_str(), typed.c_str());
+                                };
+                                int idx = -1;
+                                for (int i = 0; i < (int)entries.size(); ++i) {
+                                    if (sameBase(entries[i].d_name)) { idx = i; break; }
+                                }
+                                if (idx >= 0) {
+                                    selectedIndex = idx;
+                                    scrollOffset  = (idx >= MAX_DISPLAY) ? (idx - MAX_DISPLAY + 1) : 0;
+                                }
                                 drawMessage("Category created", COLOR_GREEN);
                                 sceKernelDelayThread(600*1000);
                             }
+
                         } else if (choice == 1) {
                             // Delete category: count games first and confirm
                             if (selectedIndex < 0 || selectedIndex >= (int)entries.size()) {
                                 msgBox = new MessageBox("No category selected.", okIconTexture, SCREEN_WIDTH, SCREEN_HEIGHT, 1.0f, 20, "OK", 16, 18, 8, 14);
+                            } else if (isCategoryRowLocked(selectedIndex)) {
+                                // Don't allow deleting "Category Settings" or "Uncategorized"
+                                msgBox = new MessageBox("Pick a category folder.", okIconTexture, SCREEN_WIDTH, SCREEN_HEIGHT, 1.0f, 20, "OK", 16, 18, 8, 14);
                             } else {
                                 std::string cat = entries[selectedIndex].d_name;
-                                if (!startsWithCAT(cat.c_str())) {
-                                    msgBox = new MessageBox("Pick a CAT_ folder.", okIconTexture, SCREEN_WIDTH, SCREEN_HEIGHT, 1.0f, 20, "OK", 16, 18, 8, 14);
-                                } else {
-                                    int games = countGamesInCategory(currentDevice, cat);
-                                    char buf[128];
-                                    if (games > 0) {
-                                        snprintf(buf, sizeof(buf),
-                                                "%d game(s) are in this folder and will be deleted.\nPress X to confirm.", games);
-                                    } else {
-                                        snprintf(buf, sizeof(buf),
-                                                "Delete empty category?\nPress X to confirm.");
-                                    }
-                                    msgBox = new MessageBox(buf, okIconTexture, SCREEN_WIDTH, SCREEN_HEIGHT, 1.0f, 20, "OK", 16, 18, 8, 14);
 
-                                    // Reuse the confirm-close hook, sentinel device + stash cat in opDestCategory
-                                    actionMode = AM_None;
-                                    opPhase    = OP_Confirm;
-                                    opDestDevice   = "__DEL_CAT__";
-                                    opDestCategory = cat;
+                                int games = countGamesInCategory(currentDevice, cat);
+                                char buf[128];
+                                if (games > 0) {
+                                    snprintf(buf, sizeof(buf),
+                                             "%d game(s) are in this folder and will be deleted.\nPress X to confirm.",
+                                             games);
+                                } else {
+                                    snprintf(buf, sizeof(buf),
+                                             "Delete empty category?\nPress X to confirm.");
                                 }
+                                msgBox = new MessageBox(buf, okIconTexture, SCREEN_WIDTH, SCREEN_HEIGHT, 1.0f, 20, "OK", 16, 18, 8, 14);
+
+                                // Reuse the confirm-close hook, sentinel device + stash cat in opDestCategory
+                                actionMode = AM_None;
+                                opPhase    = OP_Confirm;
+                                opDestDevice   = "__DEL_CAT__";
+                                opDestCategory = cat;
                             }
                         }
                     }
@@ -5014,6 +6899,13 @@ bool analogUpNow = (pad.Ly <= 30);
     }
 
 };
+
+// --- static member definitions (moved out of class) ---
+KernelFileExplorer::GclConfig KernelFileExplorer::gclCfg = {0,0,0,0,0};
+bool KernelFileExplorer::gclCfgLoaded = false;
+KernelFileExplorer::GclSettingKey KernelFileExplorer::gclPending = KernelFileExplorer::GCL_SK_None;
+bool KernelFileExplorer::rootPickGcl = false;   // ← add this definition
+
 
 // Load & start fs_driver.prx
 int LoadStartModule(const char *path) {
