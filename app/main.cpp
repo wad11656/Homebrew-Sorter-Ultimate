@@ -69,6 +69,7 @@
 #include <stdint.h>
 #include <map>
 #include <unordered_set>
+#include <unordered_map>
 #include <stdarg.h>
 #include <set>
 
@@ -1643,6 +1644,10 @@ private:
     };
     static GclConfig gclCfg;        // initialized out-of-class
     static bool      gclCfgLoaded;  // initialized out-of-class
+    static std::unordered_map<std::string, std::vector<std::string>> gclBlacklistMap;        // key: root ("ms0:/", "ef0:/")
+    static std::unordered_map<std::string, bool> gclBlacklistLoadedMap;
+    static std::unordered_map<std::string, std::vector<std::string>> gclPendingUnblacklistMap;
+    static inline bool blacklistActive() { return gclCfg.prefix != 0; }
 
     // ---- Lightweight cache patch: update in-memory categories without rescanning disk ----
     void patchCategoryCacheFromSettings(){
@@ -1660,13 +1665,29 @@ private:
             if (!strcasecmp(key.c_str(), "Uncategorized")) continue; // never renumber/rename this pseudo-folder
 
             std::string base = stripCategoryPrefixes(key);
+            if (isBlacklistedBaseNameFor(currentDevice, base)) continue;
             baseSet.insert(base);
             int n = extractLeadingXXAfterOptionalCAT(key.c_str());
             if (n > 0) baseExistingNums[base].push_back(n);
         }
 
         if (baseSet.empty()){
+            std::map<std::string, std::vector<GameItem>> keep;
+            auto unc = categories.find("Uncategorized");
+            if (unc != categories.end()) keep.emplace("Uncategorized", std::move(unc->second));
+            categories.swap(keep);
+
             categoryNames.clear();
+            hasCategories = false;
+
+            std::string key = rootPrefix(currentDevice);
+            auto &snap = deviceCache[key].snap;
+            std::map<std::string, std::vector<GameItem>> snapKeep;
+            auto uncSnap = snap.categories.find("Uncategorized");
+            if (uncSnap != snap.categories.end()) snapKeep.emplace("Uncategorized", uncSnap->second);
+            snap.categories.swap(snapKeep);
+            snap.categoryNames.clear();
+            snap.hasCategories = false;
             return;
         }
 
@@ -1723,6 +1744,7 @@ private:
             }
 
             std::string base = stripCategoryPrefixes(oldCat);
+            if (isBlacklistedBaseNameFor(currentDevice, base)) continue;
             std::string want = formatCategoryNameFromBase(base, assigned[base]);
 
             if (strcasecmp(oldCat.c_str(), want.c_str()) != 0) {
@@ -1800,6 +1822,7 @@ private:
             std::sort(categoryNames.begin(), categoryNames.end(),
                 [](const std::string& a, const std::string& b){ return strcasecmp(a.c_str(), b.c_str()) < 0; });
         }
+        hasCategories = !categoryNames.empty();
 
         // --- Mirror into device snapshot so cached rebuilds keep the new order & paths ---
         {
@@ -1815,6 +1838,7 @@ private:
                     continue;
                 }
                 std::string base = stripCategoryPrefixes(disp);
+                if (isBlacklistedBaseNameFor(currentDevice, base)) continue;
                 std::string want = formatCategoryNameFromBase(base, assigned[base]);
 
                 if (strcasecmp(disp.c_str(), want.c_str()) != 0) {
@@ -1941,10 +1965,19 @@ private:
 
 
 
-    // Only blacklist ISO/VIDEO as a non-category (per plugin behavior).
-    static bool isBlacklistedCategoryFolder(const std::string& rootLabel, const std::string& sub){
+    // Only blacklist ISO/VIDEO as a non-category (per plugin behavior) plus user-defined blacklist.
+    static bool isBlacklistedCategoryFolder(const std::string& rootLabel, const std::string& sub, const std::string& absRoot){
         // rootLabel is like "ISO/", "ISO/PSP/", "PSP/GAME/", etc.
         if (!strcasecmp(rootLabel.c_str(), "ISO/") && !strcasecmp(sub.c_str(), "VIDEO")) return true;
+        if (!blacklistActive()) return false;
+
+        std::string base = stripCategoryPrefixes(sub);
+        if (isBlacklistedBaseNameFor(absRoot, base)) {
+            if (strcasecmp(sub.c_str(), base.c_str()) != 0) {
+                renameIfExists(absRoot, sub, base); // strip CAT_/## from blacklisted folders
+            }
+            return true;
+        }
         return false;
     }
 
@@ -1994,7 +2027,7 @@ private:
             std::vector<std::string> subs;
             listSubdirs(absRoot, subs);
             for (auto &sub : subs){
-                if (isBlacklistedCategoryFolder(rootLabel, sub)) continue;
+                if (isBlacklistedCategoryFolder(rootLabel, sub, absRoot)) continue;
                 // Skip real game folders
                 std::string subAbs = joinDirFile(absRoot, sub.c_str());
                 if (!findEbootCaseInsensitive(subAbs).empty()) continue;
@@ -2098,11 +2131,12 @@ private:
     MessageBox* msgBox = nullptr;
     FileOpsMenu* fileMenu = nullptr;
     OptionListMenu* optMenu = nullptr;   // ← NEW: modal option picker
+    std::vector<std::string> optMenuOwnedLabels; // keep dynamic labels alive for OptionListMenu
     static bool rootPickGcl;             // ← declaration only; no in-class initializer
     bool inputWaitRelease = false;
 
     // Which Categories Lite setting is currently being edited
-    enum GclSettingKey { GCL_SK_None = -1, GCL_SK_Mode = 0, GCL_SK_Prefix = 1, GCL_SK_Uncat = 2, GCL_SK_Sort = 3 };
+    enum GclSettingKey { GCL_SK_None = -1, GCL_SK_Mode = 0, GCL_SK_Prefix = 1, GCL_SK_Uncat = 2, GCL_SK_Sort = 3, GCL_SK_Blacklist = 4 };
     static GclSettingKey gclPending;
 
     // Track which kind of menu is open (content vs categories)
@@ -3084,6 +3118,10 @@ private:
             } else {
                 labelCol = isDir ? COLOR_CYAN : (isMoveRow ? COLOR_YELLOW : COLOR_WHITE);
             }
+            if (!showRoots && view == View_GclSettings &&
+                i < (int)rowFlags.size() && (rowFlags[i] & ROW_DISABLED)) {
+                labelCol = COLOR_GRAY;
+            }
 
             // NEW: when picking a destination category, gray out categories marked as disabled
             if (!showRoots && view==View_Categories && actionMode!=AM_None && opPhase==OP_SelectCategory) {
@@ -3444,6 +3482,11 @@ private:
             typed = sanitizeFilename(stripCategoryPrefixes(typed));
             // If base didn’t change, nothing to do
             if (!strcasecmp(stripCategoryPrefixes(oldDisplay).c_str(), typed.c_str())) return;
+            if (isBlacklistedBaseNameFor(currentDevice, typed)) {
+                drawMessage("Blacklisted name", COLOR_RED);
+                sceKernelDelayThread(700*1000);
+                return;
+            }
 
             msgBox = new MessageBox("Renaming...", nullptr, SCREEN_WIDTH, SCREEN_HEIGHT, 1.0f, 0, "", 16, 18, 8, 14);
             renderOneFrame();
@@ -3755,43 +3798,46 @@ private:
         forEachEntry(base, [&](const SceIoDirent &e){
             std::string name = e.d_name;
             if (FIO_S_ISDIR(e.d_stat.st_mode)) {
-                // Treat ANY subfolder as a category EXCEPT the blacklisted "VIDEO" folder.
-                if (strcasecmp(name.c_str(), "VIDEO") != 0) {
-                    hasCategories = true;
+                if (isBlacklistedCategoryFolder("ISO/", name, base)) return;
+                hasCategories = true;
 
-                    // Ensure the category is created/listed even if empty or contains no ISO-like files
-                    categories[name];  // creates empty vector if not present
+                // Ensure the category is created/listed even if empty or contains no ISO-like files
+                categories[name];  // creates empty vector if not present
 
-                    std::string catDir = base + name;
-                    forEachEntry(catDir, [&](const SceIoDirent &ee){
-                        if (!FIO_S_ISDIR(ee.d_stat.st_mode)){
-                            std::string fn = ee.d_name;
-                            if (isIsoLike(fn)){
-                                GameItem gi; gi.kind = GameItem::ISO_FILE;
-                                gi.label = fn;
-                                gi.path  = joinDirFile(catDir, fn.c_str());
-                                SceIoStat st;
-                                if (getStat(gi.path, st)){
-                                    gi.time     = st.sce_st_mtime;
-                                    gi.sortKey  = buildLegacySortKey(gi.time);
-                                    gi.sizeBytes= (uint64_t)st.st_size;
-                                }
-
-                                if (endsWithNoCase(fn, ".iso")) {
-                                    std::string t; if (readIsoTitle(gi.path, t)) gi.title = t;
-                                } else if (endsWithNoCase(fn, ".cso") || endsWithNoCase(fn, ".zso")) {
-                                    std::string t; if (readCompressedIsoTitle(gi.path, t)) gi.title = t;
-                                } else if (endsWithNoCase(fn, ".dax")) {
-                                    std::string t; if (readDaxTitle(gi.path, t)) gi.title = t;
-                                } else if (endsWithNoCase(fn, ".jso")) {
-                                    std::string t; if (readJsoTitle(gi.path, t)) gi.title = t;
-                                }
-
-                                categories[name].push_back(gi);
+                std::string catDir = base + name;
+                forEachEntry(catDir, [&](const SceIoDirent &ee){
+                    if (!FIO_S_ISDIR(ee.d_stat.st_mode)){
+                        std::string fn = ee.d_name;
+                        if (isIsoLike(fn)){
+                            GameItem gi; gi.kind = GameItem::ISO_FILE;
+                            gi.label = fn;
+                            gi.path  = joinDirFile(catDir, fn.c_str());
+                            SceIoStat st;
+                            if (getStat(gi.path, st)){
+                                gi.time     = st.sce_st_mtime;
+                                gi.sortKey  = buildLegacySortKey(gi.time);
+                                gi.sizeBytes= (uint64_t)st.st_size;
                             }
+
+                            if (endsWithNoCase(fn, ".iso")) {
+                                std::string t; if (readIsoTitle(gi.path, t)) gi.title = t;
+                            } else if (endsWithNoCase(fn, ".cso") || endsWithNoCase(fn, ".zso")) {
+                                std::string t; if (readCompressedIsoTitle(gi.path, t)) gi.title = t;
+                            } else if (endsWithNoCase(fn, ".dax")) {
+                                std::string t; if (readDaxTitle(gi.path, t)) gi.title = t;
+                            } else if (endsWithNoCase(fn, ".jso")) {
+                                std::string t; if (readJsoTitle(gi.path, t)) gi.title = t;
+                            }
+
+                            categories[name].push_back(gi);
+                            snapInsertSorted(flatAll, gi);
                         }
-                    });
-                }
+                    }
+                });
+                std::sort(categories[name].begin(), categories[name].end(),
+                          [](const GameItem& a, const GameItem& b){
+                              return strcasecmp(a.label.c_str(), b.label.c_str()) < 0;
+                          });
             } else {
                 if (isIsoLike(name)){
                     GameItem gi; gi.kind = GameItem::ISO_FILE;
@@ -3815,6 +3861,7 @@ private:
                     }
 
                     uncategorized.push_back(gi);
+                    snapInsertSorted(flatAll, gi);
                 }
             }
         });
@@ -3826,6 +3873,12 @@ private:
         forEachEntry(base, [&](const SceIoDirent &e){
             if (!FIO_S_ISDIR(e.d_stat.st_mode)) return;
             std::string name = e.d_name;
+            std::string baseName = stripCategoryPrefixes(name);
+            bool isBlacklisted = isBlacklistedBaseNameFor(currentDevice, baseName);
+            if (isBlacklisted && strcasecmp(name.c_str(), baseName.c_str()) != 0) {
+                renameIfExists(base, name, baseName);
+                name = baseName;
+            }
 
             // If the folder itself contains an EBOOT.PBP, treat it as a stand-alone game (UNCATEGORIZED).
             std::string folderNoSlashRoot = joinDirFile(base, name.c_str());
@@ -3845,10 +3898,12 @@ private:
 
                 std::string t; if (getFolderTitle(gi.path, t)) gi.title = t;
                 uncategorized.push_back(gi);
+                snapInsertSorted(flatAll, gi);
                 return;
             }
 
             // Otherwise, treat it as a CATEGORY folder (regardless of CAT_ prefix).
+            if (isBlacklisted) return;
             hasCategories = true;
             categories[name];  // creates empty vector if not present
 
@@ -3874,16 +3929,22 @@ private:
 
                             std::string t; if (getFolderTitle(gi.path, t)) gi.title = t;
                             categories[name].push_back(gi);
+                            snapInsertSorted(flatAll, gi);
                         }
                     }
                 }
             });
+            std::sort(categories[name].begin(), categories[name].end(),
+                      [](const GameItem& a, const GameItem& b){
+                          return strcasecmp(a.label.c_str(), b.label.c_str()) < 0;
+                      });
         });
     }
 
 
     void scanDevice(const std::string& dev){
             resetLists();
+            gclLoadBlacklistFor(dev);
 
             const char* isoRoots[]  = {"ISO/"};                // drop ISO/PSP/ as a root
             const char* gameRoots[] = {"PSP/GAME/","PSP/GAME150/"}; // drop PSX/ and Utility/ as roots
@@ -3927,8 +3988,247 @@ private:
 
                 if (!uncategorized.empty()) categories["Uncategorized"]; // flag presence
             }
+            // With eager loading we no longer track per-category load flags.
         }
 
+
+    // Add categories that exist on disk but are missing from the current cache (e.g., after removing blacklist entries).
+    void refreshNewlyAllowedCategories(const std::string& dev) {
+        if (dev.empty()) return;
+        gclLoadBlacklistFor(dev);
+
+        // Build a set of BASE names already present in the cache
+        std::set<std::string, bool(*)(const std::string&, const std::string&)> existing(
+            [](const std::string& a, const std::string& b){ return strcasecmp(a.c_str(), b.c_str()) < 0; }
+        );
+        std::unordered_map<std::string, bool> baseHasItems;
+        for (const auto& kv : categories) {
+            if (!strcasecmp(kv.first.c_str(), "Uncategorized")) continue;
+            std::string base = stripCategoryPrefixes(kv.first);
+            existing.insert(base);
+            baseHasItems[base] = baseHasItems[base] || !kv.second.empty();
+        }
+
+        auto dropEmptyForBase = [&](const std::string& base){
+            for (auto it = categories.begin(); it != categories.end(); ) {
+                if (!strcasecmp(stripCategoryPrefixes(it->first).c_str(), base.c_str()) && it->second.empty()) {
+                    it = categories.erase(it);
+                } else ++it;
+            }
+        };
+
+        auto addIsoCategory = [&](const std::string& rootLabel, const std::string& absRoot, const std::string& sub){
+            if (isBlacklistedCategoryFolder(rootLabel, sub, absRoot)) return;
+            std::string base = stripCategoryPrefixes(sub);
+            if (existing.find(base) != existing.end() && baseHasItems[base]) return;
+
+            std::string subAbs = joinDirFile(absRoot, sub.c_str());
+            if (!findEbootCaseInsensitive(subAbs).empty()) return; // skip real games
+
+            std::vector<GameItem> items;
+            forEachEntry(subAbs, [&](const SceIoDirent &ee){
+                if (!FIO_S_ISDIR(ee.d_stat.st_mode)){
+                    std::string fn = ee.d_name;
+                    if (isIsoLike(fn)){
+                        GameItem gi; gi.kind = GameItem::ISO_FILE;
+                        gi.label = fn;
+                        gi.path  = joinDirFile(subAbs, fn.c_str());
+                        SceIoStat st;
+                        if (getStat(gi.path, st)){
+                            gi.time     = st.sce_st_mtime;
+                            gi.sortKey  = buildLegacySortKey(gi.time);
+                            gi.sizeBytes= (uint64_t)st.st_size;
+                        }
+
+                        if (endsWithNoCase(fn, ".iso")) {
+                            std::string t; if (readIsoTitle(gi.path, t)) gi.title = t;
+                        } else if (endsWithNoCase(fn, ".cso") || endsWithNoCase(fn, ".zso")) {
+                            std::string t; if (readCompressedIsoTitle(gi.path, t)) gi.title = t;
+                        } else if (endsWithNoCase(fn, ".dax")) {
+                            std::string t; if (readDaxTitle(gi.path, t)) gi.title = t;
+                        } else if (endsWithNoCase(fn, ".jso")) {
+                            std::string t; if (readJsoTitle(gi.path, t)) gi.title = t;
+                        }
+
+                        items.push_back(gi);
+                    }
+                }
+            });
+
+            categories[sub] = std::move(items);
+            dropEmptyForBase(base);
+            existing.insert(base);
+            baseHasItems[base] = true;
+            hasCategories = true;
+        };
+
+        const char* isoRoots[]  = {"ISO/"};                // drop ISO/PSP/ as a root
+        const char* gameRoots[] = {"PSP/GAME/","PSP/GAME150/"}; // drop PSX/ and Utility/ as roots
+
+        auto addGameCategory = [&](const std::string& rootLabel, const std::string& absRoot, const std::string& sub){
+            if (isBlacklistedCategoryFolder(rootLabel, sub, absRoot)) return;
+            std::string base = stripCategoryPrefixes(sub);
+            if (existing.find(base) != existing.end() && baseHasItems[base]) return;
+
+            std::string subAbs = joinDirFile(absRoot, sub.c_str());
+            if (!findEbootCaseInsensitive(subAbs).empty()) return; // sub itself is a game folder
+
+            std::vector<GameItem> items;
+            forEachEntry(subAbs, [&](const SceIoDirent &e){
+                if (FIO_S_ISDIR(e.d_stat.st_mode)) {
+                    std::string title = e.d_name;
+                    std::string folderNoSlash = joinDirFile(subAbs, title.c_str());
+                    if (!dirExists(folderNoSlash)) return;
+                    if (!findEbootCaseInsensitive(folderNoSlash).empty()){
+                        GameItem gi; gi.kind = GameItem::EBOOT_FOLDER;
+                        gi.label = title;
+                        gi.path  = folderNoSlash;
+                        SceIoStat stF{};
+                        if (getStatDirNoSlash(gi.path, stF)) {
+                            gi.time     = stF.sce_st_mtime;
+                            gi.sortKey  = buildLegacySortKey(gi.time);
+                        }
+                        uint64_t folderBytes = 0;
+                        sumDirBytes(gi.path, folderBytes);
+                        gi.sizeBytes = folderBytes;
+
+                        std::string t; if (getFolderTitle(gi.path, t)) gi.title = t;
+                        items.push_back(gi);
+                    }
+                }
+            });
+
+            categories[sub] = std::move(items);
+            dropEmptyForBase(base);
+            existing.insert(base);
+            baseHasItems[base] = true;
+            hasCategories = true;
+        };
+
+        for (auto r : isoRoots) {
+            std::string abs = dev + std::string(r);
+            std::vector<std::string> subs; listSubdirs(abs, subs);
+            for (auto &s : subs) addIsoCategory(r, abs, s);
+        }
+        for (auto r : gameRoots) {
+            std::string abs = dev + std::string(r);
+            std::vector<std::string> subs; listSubdirs(abs, subs);
+            for (auto &s : subs) addGameCategory(r, abs, s);
+        }
+
+        // Do NOT inject categories from the opposite root; just mark it dirty so it refreshes on visit.
+        if (isPspGo()) {
+            std::string other = oppositeRootOf(dev);
+            if (!other.empty()) markDeviceDirty(other);
+        }
+    }
+
+    // Targeted refresh for a set of BASE names that were just un-blacklisted.
+    void refreshCategoriesForBases(const std::string& dev, const std::vector<std::string>& bases) {
+        if (dev.empty() || bases.empty()) return;
+        gclLoadBlacklistFor(dev);
+
+        auto lower = [](std::string s){ for (char& c : s) c = toLowerC(c); return s; };
+        std::unordered_set<std::string> targets;
+        for (auto b : bases) {
+            b = stripCategoryPrefixes(sanitizeFilename(b));
+            if (b.empty()) continue;
+            targets.insert(lower(b));
+        }
+        if (targets.empty()) return;
+
+        auto isTargetBase = [&](const std::string& name)->bool{
+            std::string base = stripCategoryPrefixes(name);
+            return targets.find(lower(base)) != targets.end();
+        };
+
+        auto refreshIso = [&](const std::string& rootLabel, const std::string& absRoot){
+            std::vector<std::string> subs; listSubdirs(absRoot, subs);
+            for (auto &sub : subs) {
+                if (!isTargetBase(sub)) continue;
+                if (isBlacklistedCategoryFolder(rootLabel, sub, absRoot)) continue;
+                std::string subAbs = joinDirFile(absRoot, sub.c_str());
+                if (!findEbootCaseInsensitive(subAbs).empty()) continue; // skip real games
+
+                std::vector<GameItem> items;
+                forEachEntry(subAbs, [&](const SceIoDirent &ee){
+                    if (!FIO_S_ISDIR(ee.d_stat.st_mode)){
+                        std::string fn = ee.d_name;
+                        if (isIsoLike(fn)){
+                            GameItem gi; gi.kind = GameItem::ISO_FILE;
+                            gi.label = fn;
+                            gi.path  = joinDirFile(subAbs, fn.c_str());
+                            SceIoStat st;
+                            if (getStat(gi.path, st)){
+                                gi.time     = st.sce_st_mtime;
+                                gi.sortKey  = buildLegacySortKey(gi.time);
+                                gi.sizeBytes= (uint64_t)st.st_size;
+                            }
+
+                            if (endsWithNoCase(fn, ".iso")) {
+                                std::string t; if (readIsoTitle(gi.path, t)) gi.title = t;
+                            } else if (endsWithNoCase(fn, ".cso") || endsWithNoCase(fn, ".zso")) {
+                                std::string t; if (readCompressedIsoTitle(gi.path, t)) gi.title = t;
+                            } else if (endsWithNoCase(fn, ".dax")) {
+                                std::string t; if (readDaxTitle(gi.path, t)) gi.title = t;
+                            } else if (endsWithNoCase(fn, ".jso")) {
+                                std::string t; if (readJsoTitle(gi.path, t)) gi.title = t;
+                            }
+
+                            items.push_back(gi);
+                        }
+                    }
+                });
+
+                categories[sub] = std::move(items);
+                hasCategories = true;
+            }
+        };
+
+        auto refreshGame = [&](const std::string& rootLabel, const std::string& absRoot){
+            std::vector<std::string> subs; listSubdirs(absRoot, subs);
+            for (auto &sub : subs) {
+                if (!isTargetBase(sub)) continue;
+                if (isBlacklistedCategoryFolder(rootLabel, sub, absRoot)) continue;
+
+                std::string subAbs = joinDirFile(absRoot, sub.c_str());
+                if (!findEbootCaseInsensitive(subAbs).empty()) continue; // sub itself is a game folder
+
+                std::vector<GameItem> items;
+                forEachEntry(subAbs, [&](const SceIoDirent &e){
+                    if (FIO_S_ISDIR(e.d_stat.st_mode)) {
+                        std::string title = e.d_name;
+                        std::string folderNoSlash = joinDirFile(subAbs, title.c_str());
+                        if (!dirExists(folderNoSlash)) return;
+                        if (!findEbootCaseInsensitive(folderNoSlash).empty()){
+                            GameItem gi; gi.kind = GameItem::EBOOT_FOLDER;
+                            gi.label = title;
+                            gi.path  = folderNoSlash;
+                            SceIoStat stF{};
+                            if (getStatDirNoSlash(gi.path, stF)) {
+                                gi.time     = stF.sce_st_mtime;
+                                gi.sortKey  = buildLegacySortKey(gi.time);
+                            }
+                            uint64_t folderBytes = 0;
+                            sumDirBytes(gi.path, folderBytes);
+                            gi.sizeBytes = folderBytes;
+
+                            std::string t; if (getFolderTitle(gi.path, t)) gi.title = t;
+                            items.push_back(gi);
+                        }
+                    }
+                });
+
+                categories[sub] = std::move(items);
+                hasCategories = true;
+            }
+        };
+
+        const char* isoRoots[]  = {"ISO/"};                // drop ISO/PSP/ as a root
+        const char* gameRoots[] = {"PSP/GAME/","PSP/GAME150/"}; // drop PSX/ and Utility/ as roots
+        for (auto r : isoRoots)  refreshIso(r,   dev + std::string(r));
+        for (auto r : gameRoots) refreshGame(r, dev + std::string(r));
+    }
 
 
 
@@ -4011,7 +4311,7 @@ private:
         return findFileCaseInsensitive(seplugins, wantUpperOrLower);
     }
 
-    bool gclReadWholeText(const std::string& path, std::string& out){
+    static bool gclReadWholeText(const std::string& path, std::string& out){
         SceUID fd = sceIoOpen(path.c_str(), PSP_O_RDONLY, 0);
         if (fd < 0) return false;
         SceIoStat st{}; if (sceIoGetstat(path.c_str(), &st) < 0) { sceIoClose(fd); return false; }
@@ -4022,7 +4322,7 @@ private:
         return got >= 0;
     }
 
-    bool gclWriteWholeText(const std::string& path, const std::string& data){
+    static bool gclWriteWholeText(const std::string& path, const std::string& data){
         SceUID fd = sceIoOpen(path.c_str(), PSP_O_WRONLY|PSP_O_CREAT|PSP_O_TRUNC, 0777);
         if (fd < 0) return false;
         int wr = sceIoWrite(fd, data.data(), (uint32_t)data.size());
@@ -4228,6 +4528,145 @@ private:
 
 
     // NEW: load/save gclite.bin (CategoryConfig)
+    static std::string defaultBlacklistRoot() {
+        if (DeviceExists("ef0:/")) return "ef0:/";
+        return "ms0:/";
+    }
+
+    static std::string blacklistRootKey(const std::string& dev) {
+        std::string key = rootPrefix(dev);
+        if (key.empty()) key = defaultBlacklistRoot();
+        return key;
+    }
+
+    static std::string gclBlacklistPathFor(const std::string& root) {
+        std::string key = root.empty() ? defaultBlacklistRoot() : root;
+        std::string suffix = "ms0";
+        if (!key.empty() && toLowerC(key[0]) == 'e') suffix = "ef0";
+        return key + "seplugins/gclite_blacklist_" + suffix + ".txt";
+    }
+
+    static std::string trimSpaces(const std::string& in) {
+        size_t a = 0, b = in.size();
+        while (a < b && (in[a] == ' ' || in[a] == '\t')) ++a;
+        while (b > a && (in[b-1] == ' ' || in[b-1] == '\t' || in[b-1] == '\r' || in[b-1] == '\n')) --b;
+        return in.substr(a, b - a);
+    }
+
+    static void gclLoadBlacklistFor(const std::string& dev) {
+        std::string root = blacklistRootKey(dev);
+        if (root.empty()) return;
+        if (gclBlacklistLoadedMap[root]) return;
+
+        gclBlacklistLoadedMap[root] = true;
+        std::vector<std::string> items;
+
+        std::string txt;
+        if (gclReadWholeText(gclBlacklistPathFor(root), txt)) {
+            size_t pos = 0, start = 0;
+            while (pos <= txt.size()) {
+                if (pos == txt.size() || txt[pos] == '\n' || txt[pos] == '\r') {
+                    std::string line = trimSpaces(txt.substr(start, pos - start));
+                    line = stripCategoryPrefixes(sanitizeFilename(line));
+                    if (!line.empty()) {
+                        bool dup = false;
+                        for (auto &w : items) {
+                            if (!strcasecmp(w.c_str(), line.c_str())) { dup = true; break; }
+                        }
+                        if (!dup) items.push_back(line);
+                    }
+                    if (pos + 1 < txt.size() && txt[pos] == '\r' && txt[pos+1] == '\n') ++pos;
+                    start = pos + 1;
+                }
+                ++pos;
+            }
+        }
+        gclBlacklistMap[root] = std::move(items);
+    }
+
+    static bool gclSaveBlacklistFor(const std::string& dev) {
+        std::string root = blacklistRootKey(dev);
+        if (root.empty()) return false;
+        gclBlacklistLoadedMap[root] = true;
+        std::vector<std::string>& bl = gclBlacklistMap[root];
+
+        std::string dir = root + "seplugins";
+        sceIoMkdir(dir.c_str(), 0777);
+
+        std::string out;
+        for (size_t i = 0; i < bl.size(); ++i) {
+            out += bl[i];
+            if (i + 1 < bl.size()) out += "\r\n";
+        }
+        return gclWriteWholeText(gclBlacklistPathFor(root), out);
+    }
+
+    static bool isBlacklistedBaseNameFor(const std::string& root, const std::string& base) {
+        if (base.empty() || !blacklistActive()) return false;
+        gclLoadBlacklistFor(root);
+        const auto& bl = gclBlacklistMap[blacklistRootKey(root)];
+        for (const auto& w : bl) {
+            if (w.empty()) continue;
+            if (endsWithNoCase(base, w.c_str())) return true;
+        }
+        return false;
+    }
+
+    bool isBlacklistedBaseName(const std::string& base) {
+        return isBlacklistedBaseNameFor(blacklistRootKey(currentDevice), base);
+    }
+
+    static std::string normalizeBlacklistInput(const std::string& raw) {
+        std::string t = trimSpaces(raw);
+        if (t.empty()) return {};
+        t = stripCategoryPrefixes(sanitizeFilename(t));
+        if (t.empty()) return {};
+        return t;
+    }
+
+    void applyBlacklistChanges() {
+        gclSaveBlacklistFor(currentDevice);
+
+        if (!blacklistActive()) {
+            gclPendingUnblacklistMap[blacklistRootKey(currentDevice)].clear();
+            buildGclSettingsRowsFromState();
+            return;
+        }
+
+        // Force re-enforcement and cache patching so renamed folders disappear from categories immediately
+        gclSchemeApplied.clear();
+        s_catNamingEnforced.clear();
+
+        if (currentDevice.empty()) {
+            buildGclSettingsRowsFromState();
+            return;
+        }
+
+        enforceCategorySchemeForDevice(currentDevice);
+        if (isPspGo()) {
+            std::string other = oppositeRootOf(currentDevice);
+            if (!other.empty()) enforceCategorySchemeForDevice(other);
+        }
+
+        // Lightweight refresh: add back categories that were un-blacklisted, otherwise add any missing
+        auto &pending = gclPendingUnblacklistMap[blacklistRootKey(currentDevice)];
+        if (blacklistActive() && !pending.empty()) {
+            refreshCategoriesForBases(currentDevice, pending);
+            if (isPspGo()) {
+                std::string other = oppositeRootOf(currentDevice);
+                if (!other.empty()) markDeviceDirty(other); // refresh on next switch
+            }
+            pending.clear();
+        } else if (blacklistActive()) {
+            refreshNewlyAllowedCategories(currentDevice);
+        } else {
+            pending.clear();
+        }
+
+        patchCategoryCacheFromSettings();
+        buildGclSettingsRowsFromState();
+    }
+
     static void gclLoadConfig() {
         const std::string path = gclConfigPath();
         SceUID fd = sceIoOpen(path.c_str(), PSP_O_RDONLY, 0777);
@@ -4235,11 +4674,14 @@ private:
             GclConfig tmp{};
             int rd = sceIoRead(fd, &tmp, sizeof(tmp));
             sceIoClose(fd);
-            if (rd == (int)sizeof(tmp)) { gclCfg = tmp; gclCfgLoaded = true; return; }
+            if (rd == (int)sizeof(tmp)) { gclCfg = tmp; gclCfgLoaded = true; }
         }
         // defaults if missing or size mismatch
-        gclCfg = GclConfig{0,0,0,0,0};
-        gclCfgLoaded = true;
+        if (!gclCfgLoaded) {
+            gclCfg = GclConfig{0,0,0,0,0};
+            gclCfgLoaded = true;
+        }
+        gclLoadBlacklistFor(defaultBlacklistRoot());
     }
 
     static bool gclSaveConfig() {
@@ -4277,23 +4719,46 @@ private:
         entries.clear(); entryPaths.clear(); entryKinds.clear();
         rowFlags.clear(); rowFreeBytes.clear(); rowReason.clear(); rowNeedBytes.clear();
 
-        auto add = [&](const std::string& label){
+        gclLoadBlacklistFor(currentDevice);
+
+        auto add = [&](const std::string& label, bool disabled = false){
             SceIoDirent e{}; e.d_stat.st_mode = FIO_S_IFDIR;
             strncpy(e.d_name, label.c_str(), sizeof(e.d_name)-1);
             entries.push_back(e);
             entryPaths.emplace_back("");
             entryKinds.push_back(GameItem::ISO_FILE);
-            rowFlags.push_back(0); rowFreeBytes.push_back(0);
+            rowFlags.push_back(disabled ? ROW_DISABLED : 0); rowFreeBytes.push_back(0);
             rowReason.push_back(RD_NONE); rowNeedBytes.push_back(0);
         };
+
+        gclLoadBlacklistFor(currentDevice);
+        const auto& blNow = gclBlacklistMap[blacklistRootKey(currentDevice)];
 
         add(std::string("Category mode: ")      + gclModeLabel(gclCfg.mode));
         add(std::string("Category prefix: ")    + gclPrefixLabel(gclCfg.prefix));
         add(std::string("Show uncategorized: ") + gclUncatLabel(gclCfg.uncategorized, isPspGo()));
         add(std::string("Sort categories: ")    + gclSortLabel(gclCfg.catsort));
+        {
+            char buf[64];
+            snprintf(buf, sizeof(buf), "Blacklist: %d item%s", (int)blNow.size(),
+                     blNow.size() == 1 ? "" : "s");
+            add(buf, gclCfg.prefix == 0);
+        }
 
         selectedIndex = std::min(prevSel, (int)entries.size()-1);
         scrollOffset  = std::min(prevOff, std::max(0, (int)entries.size()-1));
+        // Keep selection on a selectable row
+        if (!entries.empty()) {
+            if (selectedIndex < 0) selectedIndex = 0;
+            int firstEnabled = 0;
+            while (firstEnabled < (int)entries.size() && (rowFlags[firstEnabled] & ROW_DISABLED)) firstEnabled++;
+            if (firstEnabled >= (int)entries.size()) firstEnabled = 0;
+            if (selectedIndex >= (int)rowFlags.size() || (rowFlags[selectedIndex] & ROW_DISABLED)) {
+                selectedIndex = firstEnabled;
+            }
+            if (selectedIndex < scrollOffset) scrollOffset = selectedIndex;
+            if (selectedIndex >= scrollOffset + MAX_DISPLAY) scrollOffset = selectedIndex - MAX_DISPLAY + 1;
+        }
         showRoots = false; view = View_GclSettings;
     }
 
@@ -4316,6 +4781,12 @@ private:
 
     void handleGclToggleAt(int idx){
         if (idx < 0) return;
+
+        if (idx < (int)rowFlags.size() && (rowFlags[idx] & ROW_DISABLED)) {
+            drawMessage("Enable CAT prefix first", COLOR_RED);
+            sceKernelDelayThread(600*1000);
+            return;
+        }
 
         // No master toggles here anymore – just open the pickers for 0..3
         const bool go = isPspGo();
@@ -4365,6 +4836,30 @@ private:
             optMenu->setSelected((int)gclCfg.catsort);
 
             // NEW: Prime & debounce so held X/O won't auto-activate the choice
+            SceCtrlData now{}; sceCtrlReadBufferPositive(&now, 1);
+            optMenu->primeButtons(now.Buttons);
+            inputWaitRelease = true;
+        } else if (idx == 4) {
+            optMenuOwnedLabels.clear();
+            gclLoadBlacklistFor(currentDevice);
+            const auto& blNow = gclBlacklistMap[blacklistRootKey(currentDevice)];
+            optMenuOwnedLabels.reserve(blNow.size() + 3);
+            std::vector<OptionItem> items;
+            optMenuOwnedLabels.push_back("Add new...");
+            items.push_back({optMenuOwnedLabels.back().c_str(), false});
+            if (blNow.empty()) {
+                optMenuOwnedLabels.push_back("(No entries)");
+                items.push_back({optMenuOwnedLabels.back().c_str(), true});
+            } else {
+                for (const auto& word : blNow) {
+                    optMenuOwnedLabels.push_back(word);
+                    items.push_back({optMenuOwnedLabels.back().c_str(), false});
+                }
+            }
+            optMenu = new OptionListMenu("Blacklist", "Folders ending with these strings skip CAT_ prefixes.", items, SCREEN_WIDTH, SCREEN_HEIGHT);
+            gclPending = GCL_SK_Blacklist;
+            optMenu->setSelected(0);
+
             SceCtrlData now{}; sceCtrlReadBufferPositive(&now, 1);
             optMenu->primeButtons(now.Buttons);
             inputWaitRelease = true;
@@ -4526,17 +5021,7 @@ private:
     void buildCategoryRows(){
         clearUI(); moving = false;
 
-        // First: enforce on-disk category naming to match current settings.
-        // This strips "##" from folder names when Sort is OFF, and applies CAT_ as needed.
-        // Do it for the current device, and mirror to the paired root on PSPgo.
-        enforceCategorySchemeForDevice(currentDevice);
-        if (isPspGo()) {
-            const bool onMs0 = (strncasecmp(currentDevice.c_str(), "ms0:/", 5) == 0);
-            enforceCategorySchemeForDevice(onMs0 ? std::string("ef0:/")
-                                                : std::string("ms0:/"));
-        }
-
-        // First: enforce on-disk names to match current settings (removes "##" when Sort=OFF, applies CAT_ if needed)
+        // Enforce on-disk names to match current settings only when needed (run-once per root until settings change).
         {
             // Only enforce on first time we hit this device root this session
             const std::string root = rootPrefix(currentDevice); // e.g. "ms0:/" or "ef0:/"
@@ -4579,7 +5064,7 @@ private:
         showRoots = false; view = View_Categories;
 
         // Default to the settings row if nothing specific is selected
-        selectedIndex = (preselect >= 0) ? (preselect + 1) : 0;
+        selectedIndex = (preselect >= 0) ? preselect : 0;
         scrollOffset  = (selectedIndex >= MAX_DISPLAY) ? (selectedIndex - MAX_DISPLAY + 1) : 0;
     }
 
@@ -4773,6 +5258,20 @@ private:
             entryKinds.push_back(gi.kind);
         }
         showRoots = false;
+    }
+
+    // Quick overlay used when backing out of screens to avoid abrupt jumps.
+    MessageBox* pushReturningModal(const char* text = "Returning...") {
+        if (msgBox) { delete msgBox; msgBox = nullptr; }
+        msgBox = new MessageBox(text, nullptr, SCREEN_WIDTH, SCREEN_HEIGHT, 1.0f, 0, "", 16, 18, 8, 14);
+        renderOneFrame();
+        return msgBox;
+    }
+    void popModal(MessageBox* box) {
+        if (!box) return;
+        delete box;
+        if (msgBox == box) msgBox = nullptr;
+        renderOneFrame();
     }
 
     // -----------------------------------------------------------
@@ -5803,6 +6302,8 @@ private:
                 std::string title = getCachedTitleForPath(src);
                 if (title.empty()) title = basenameOf(src);
                 msgBox->setProgressTitle(title.c_str());
+                // Show filename detail + progress bar, even for instant renames
+                msgBox->showProgress(basenameOf(src).c_str(), 0, 1);
                 renderOneFrame();
             }
 
@@ -5810,6 +6311,10 @@ private:
 
             // Filename detail appears from the underlying copy/move implementation
             bool ok = moveOne(src, dst, k, this);
+            if (msgBox) {
+                msgBox->updateProgress(1, 1);
+                renderOneFrame();
+            }
             if (ok) { okCount++; checked.erase(src); }
             else    { failCount++; }
             sceKernelDelayThread(0);
@@ -6411,6 +6916,14 @@ bool analogUpNow = (pad.Ly <= 30);
                         if (selectedIndex < scrollOffset) scrollOffset = selectedIndex;
                     }
                 } else {
+                    if (view == View_GclSettings) {
+                        int j = selectedIndex - 1;
+                        while (j >= 0 && (rowFlags[j] & ROW_DISABLED)) j--;
+                        if (j >= 0) {
+                            selectedIndex = j;
+                            if (selectedIndex < scrollOffset) scrollOffset = selectedIndex;
+                        }
+                    } else
                     // NEW: while sorting categories and a row is picked, move the picked category instead of just moving selection
                     if (!showRoots && view == View_Categories && catSortMode && catPickActive) {
                         int i = selectedIndex;
@@ -6456,6 +6969,14 @@ bool analogUpNow = (pad.Ly <= 30);
                         if (selectedIndex >= scrollOffset + MAX_DISPLAY) scrollOffset = selectedIndex - MAX_DISPLAY + 1;
                     }
                 } else {
+                    if (view == View_GclSettings) {
+                        int j = selectedIndex + 1;
+                        while (j < (int)entries.size() && (rowFlags[j] & ROW_DISABLED)) j++;
+                        if (j < (int)entries.size()) {
+                            selectedIndex = j;
+                            if (selectedIndex >= scrollOffset + MAX_DISPLAY) scrollOffset = selectedIndex - MAX_DISPLAY + 1;
+                        }
+                    } else
                     // NEW: while sorting categories and a row is picked, move the picked category instead of just moving selection
                     if (!showRoots && view == View_Categories && catSortMode && catPickActive) {
                         int i = selectedIndex;
@@ -6586,10 +7107,13 @@ bool analogUpNow = (pad.Ly <= 30);
             if (showRoots) {
                 // nothing
             } else if (view == View_GclSettings) {
+                MessageBox* retBox = pushReturningModal();
                 patchCategoryCacheFromSettings();
                 buildCategoryRows();      // Back to categories
                 selectedIndex = 0;        // highlight "Category Settings"
                 scrollOffset  = 0;        // ensure it's visible at the top
+                popModal(retBox);
+                inputWaitRelease = true;
                 return;                   // stop further input from this frame
             } else if (view == View_CategoryContents) {
                 if (moving) {
@@ -6622,7 +7146,12 @@ bool analogUpNow = (pad.Ly <= 30);
                 }
             } else if (view == View_Categories) {
                 if (moving) moving = false;
-                else buildRootRows();
+                else {
+                    MessageBox* retBox = pushReturningModal();
+                    buildRootRows();
+                    popModal(retBox);
+                    inputWaitRelease = true;
+                }
             }
         }
 
@@ -6698,6 +7227,7 @@ bool analogUpNow = (pad.Ly <= 30);
                     const GclSettingKey pending = gclPending;  // capture BEFORE clearing
                     const bool wasRootPick = rootPickGcl;       // capture BEFORE clearing
                     delete optMenu; optMenu = nullptr;
+                    optMenuOwnedLabels.clear();
                     gclPending = GCL_SK_None;
                     if (wasRootPick) rootPickGcl = false;
 
@@ -6735,26 +7265,84 @@ bool analogUpNow = (pad.Ly <= 30);
                                 case GCL_SK_Prefix: gclCfg.prefix = (uint32_t)pick; break;
                                 case GCL_SK_Uncat:  gclCfg.uncategorized = (uint32_t)pick; break;
                                 case GCL_SK_Sort:   gclCfg.catsort = (uint32_t)pick; break;
+                                case GCL_SK_Blacklist: {
+                                    if (pick == 0) {
+                                        std::string typed;
+                                        if (!promptTextOSK("Add blacklist item", "", 64, typed)) break;
+                                        typed = normalizeBlacklistInput(typed);
+                                        if (typed.empty()) {
+                                            drawMessage("Name is empty", COLOR_RED);
+                                            sceKernelDelayThread(600*1000);
+                                            break;
+                                        }
+                                        gclLoadBlacklistFor(currentDevice);
+                                        auto& blDup = gclBlacklistMap[blacklistRootKey(currentDevice)];
+                                        bool dup = false;
+                                        for (const auto& w : blDup) {
+                                            if (!strcasecmp(w.c_str(), typed.c_str())) { dup = true; break; }
+                                        }
+                                        if (dup) {
+                                            drawMessage("Already listed", COLOR_RED);
+                                            sceKernelDelayThread(600*1000);
+                                            break;
+                                        }
+            auto& bl = gclBlacklistMap[blacklistRootKey(currentDevice)];
+            gclLoadBlacklistFor(currentDevice);
+            bl.push_back(typed);
+            applyBlacklistChanges();
+            drawMessage("Added to blacklist", COLOR_GREEN);
+            sceKernelDelayThread(600*1000);
+        } else {
+            auto& bl = gclBlacklistMap[blacklistRootKey(currentDevice)];
+            gclLoadBlacklistFor(currentDevice);
+            if (bl.empty()) break;
+            int idx = pick - 1;
+            if (idx >= 0 && idx < (int)bl.size()) {
+                std::string removed = bl[idx];
+                gclPendingUnblacklistMap[blacklistRootKey(currentDevice)].push_back(removed);
+                bl.erase(bl.begin() + idx);
+                applyBlacklistChanges();
+                drawMessage("Removed from blacklist", COLOR_GREEN);
+                sceKernelDelayThread(600*1000);
+            }
+        }
+                                    break;
+                                }
                                 default: break;
                             }
-                            gclSaveConfig();
+                            if (pending != GCL_SK_Blacklist) {
+                                gclSaveConfig();
 
-                            // If Prefix or Sort changed, apply immediately and refresh caches
-                            if (pending == GCL_SK_Prefix || pending == GCL_SK_Sort) {
-                                // Clear run-once guard so future opens are allowed to re-enforce if needed
-                                gclSchemeApplied.erase(rootPrefix(currentDevice));
+                                // If Prefix or Sort changed, apply immediately and refresh caches
+                                if (pending == GCL_SK_Prefix || pending == GCL_SK_Sort) {
+                                    // Clear run-once guard so future opens are allowed to re-enforce if needed
+                                    gclSchemeApplied.erase(rootPrefix(currentDevice));
+                                    s_catNamingEnforced.erase(rootPrefix(currentDevice));
 
-                                enforceCategorySchemeForDevice(currentDevice);
-                                const bool onMs0 = (strncasecmp(currentDevice.c_str(), "ms0:/", 5) == 0);
-                                if (isPspGo()) {
-                                    // Also clear & enforce the opposite root once to keep ms0:/ and ef0:/ consistent
-                                    std::string other = onMs0 ? std::string("ef0:/") : std::string("ms0:/");
-                                    gclSchemeApplied.erase(rootPrefix(other));
-                                    enforceCategorySchemeForDevice(other);
+                                    enforceCategorySchemeForDevice(currentDevice);
+                                    const bool onMs0 = (strncasecmp(currentDevice.c_str(), "ms0:/", 5) == 0);
+                                    if (isPspGo()) {
+                                        // Also clear & enforce the opposite root once to keep ms0:/ and ef0:/ consistent
+                                        std::string other = onMs0 ? std::string("ef0:/") : std::string("ms0:/");
+                                        gclSchemeApplied.erase(rootPrefix(other));
+                                        s_catNamingEnforced.erase(rootPrefix(other));
+                                        enforceCategorySchemeForDevice(other);
+                                    }
+
+                                    // If prefix was just disabled, immediately bring back blacklisted bases
+                                    if (!blacklistActive()) {
+                                        const auto& blNow = gclBlacklistMap[blacklistRootKey(currentDevice)];
+                                        refreshCategoriesForBases(currentDevice, blNow);
+                                        if (isPspGo()) {
+                                            std::string other = onMs0 ? std::string("ef0:/") : std::string("ms0:/");
+                                            markDeviceDirty(other);
+                                        }
+                                        gclPendingUnblacklistMap[blacklistRootKey(currentDevice)].clear();
+                                    }
+
+                                    // Keep in-memory cache consistent with on-disk names, preserving ICON0 paths
+                                    patchCategoryCacheFromSettings();
                                 }
-
-                                // Keep in-memory cache consistent with on-disk names, preserving ICON0 paths
-                                patchCategoryCacheFromSettings();
                             }
 
                             buildGclSettingsRowsFromState();
@@ -6818,6 +7406,11 @@ bool analogUpNow = (pad.Ly <= 30);
                             } else {
                                 // Treat as BASE name (strip any CAT_/XX they typed)
                                 typed = sanitizeFilename(stripCategoryPrefixes(typed));
+                                if (isBlacklistedBaseNameFor(currentDevice, typed)) {
+                                    drawMessage("Blacklisted name", COLOR_RED);
+                                    sceKernelDelayThread(600*1000);
+                                    continue;
+                                }
 
                                 // Create as BASE across roots…
                                 createCategoryDirs(currentDevice, typed);
@@ -6835,10 +7428,13 @@ bool analogUpNow = (pad.Ly <= 30);
 
                                 // Invalidate per-device “scheme applied” so initial-load enforcement can run again
                                 gclSchemeApplied.erase(rootPrefix(currentDevice));
+                                s_catNamingEnforced.erase(rootPrefix(currentDevice));
                                 if (isPspGo()) {
                                     // Be safe on Go: clear both roots so next load can re-apply where needed
                                     gclSchemeApplied.erase(std::string("ms0:/"));
                                     gclSchemeApplied.erase(std::string("ef0:/"));
+                                    s_catNamingEnforced.erase(std::string("ms0:/"));
+                                    s_catNamingEnforced.erase(std::string("ef0:/"));
                                 }
 
                                 buildCategoryRows();
@@ -6903,6 +7499,9 @@ bool analogUpNow = (pad.Ly <= 30);
 // --- static member definitions (moved out of class) ---
 KernelFileExplorer::GclConfig KernelFileExplorer::gclCfg = {0,0,0,0,0};
 bool KernelFileExplorer::gclCfgLoaded = false;
+std::unordered_map<std::string, std::vector<std::string>> KernelFileExplorer::gclBlacklistMap;
+std::unordered_map<std::string, bool> KernelFileExplorer::gclBlacklistLoadedMap;
+std::unordered_map<std::string, std::vector<std::string>> KernelFileExplorer::gclPendingUnblacklistMap;
 KernelFileExplorer::GclSettingKey KernelFileExplorer::gclPending = KernelFileExplorer::GCL_SK_None;
 bool KernelFileExplorer::rootPickGcl = false;   // ← add this definition
 
