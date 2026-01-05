@@ -66,6 +66,7 @@
 #include <string>
 #include <cstring>
 #include <algorithm>
+#include <cstdlib>
 #include <stdint.h>
 #include <map>
 #include <unordered_set>
@@ -249,6 +250,7 @@ extern "C" int scePowerUnlock(int);
 #define COLOR_BLACK    0xFF000000
 #define COLOR_GREEN    0xFF00FF00
 #define COLOR_RED      0xFF0000FF
+#define COLOR_BANNER   0xAA000000
 
 // OSK backdrop color: #205068 (RGB) => 0xFF685020 (ABGR)
 static uint32_t gOskBgColorABGR = 0xFF685020;
@@ -289,10 +291,37 @@ static unsigned int __attribute__((aligned(16))) list[262144];
 
 static Texture* backgroundTexture = nullptr;
 static Texture* okIconTexture = nullptr;
+static Texture* circleIconTexture = nullptr;
+static Texture* triangleIconTexture = nullptr;
+static Texture* selectIconTexture = nullptr;
+static Texture* startIconTexture = nullptr;
 static Texture* placeholderIconTexture = nullptr;
 // Checkbox icons (12x12 recommended)
 static Texture* checkTexUnchecked = nullptr;
 static Texture* checkTexChecked   = nullptr;
+// Root menu icons
+static Texture* rootMemIcon = nullptr;
+static Texture* rootInternalIcon = nullptr;
+static Texture* rootUsbIcon = nullptr;
+static Texture* rootCategoriesIcon = nullptr;
+static Texture* rootArk4Icon = nullptr;
+static Texture* rootProMeIcon = nullptr;
+static Texture* rootOffBulbIcon = nullptr;
+// Categories/menu icons
+static Texture* catFolderIcon = nullptr;
+static Texture* catSettingsIcon = nullptr;
+static Texture* blacklistIcon = nullptr;
+static Texture* lIconTexture = nullptr;
+static Texture* rIconTexture = nullptr;
+static bool gEnablePopAnimations = false; // Toggle Populating animation
+static std::vector<std::string> gPopAnimDirs;
+static std::vector<size_t> gPopAnimOrder;
+static size_t gPopAnimOrderIndex = 0;
+static std::string gPopAnimLoadedDir;
+static std::vector<MBAnimFrame> gPopAnimFrames;
+static unsigned long long gPopAnimMinDelayUs = 0;
+static const int POP_ANIM_TARGET_H = 60;
+static const char* POP_ANIM_PREF = ""; // Set to a folder name to force a specific animation
 static const int CHECKBOX_PX      = 11;
 
 // Reserve ~4–5 chars for sizes (e.g., "123M") so it clears the left tag.
@@ -719,10 +748,13 @@ bool readDaxIconPNG(const std::string& path, std::vector<uint8_t>& outPng);
 // ---------------------------------------------------------------
 // Small helpers
 // ---------------------------------------------------------------
+static const char* kCatSettingsLabel = "Game Categories settings";
+
 static const char* rootDisplayName(const char* r) {
     if (!r) return "";
     if (!strcmp(r, "__USB_MODE__"))     return "USB Mode";
-    if (!strcmp(r, "__GCL_SETTINGS__")) return "Category Settings";
+    if (!strcmp(r, "__GCL_TOGGLE__"))   return "Game Categories:";
+    if (!strcmp(r, "__GCL_SETTINGS__")) return kCatSettingsLabel;
     if (!strcmp(r, "ms0:/"))            return "ms0:/ (Memory Stick)";
     if (!strcmp(r, "ef0:/"))            return "ef0:/ (Internal)";
     return r;
@@ -851,6 +883,130 @@ static void forEachEntry(const std::string& dir, F f){
         memset(&ent, 0, sizeof(ent));
     }
     pspIoCloseDir(d);
+}
+
+struct AnimFileInfo {
+    std::string path;
+    int index = 0;
+    uint32_t delayMs = 0;
+};
+
+static bool parseAnimFrameName(const char* name, int& outIndex, uint32_t& outDelayMs) {
+    if (!name) return false;
+    if (!endsWithNoCase(name, ".png")) return false;
+
+    const char* prefix = "frame_";
+    size_t prefixLen = strlen(prefix);
+    if (strncmp(name, prefix, prefixLen) != 0) return false;
+
+    const char* p = name + prefixLen;
+    if (*p < '0' || *p > '9') return false;
+    char* endIdx = nullptr;
+    long idx = std::strtol(p, &endIdx, 10);
+    if (endIdx == p || idx < 0) return false;
+
+    const char* delayTag = strstr(endIdx, "delay-");
+    if (!delayTag) delayTag = strstr(name, "delay-");
+    if (!delayTag) return false;
+    delayTag += strlen("delay-");
+    char* endDelay = nullptr;
+    double secs = std::strtod(delayTag, &endDelay);
+    if (endDelay == delayTag || secs <= 0.0) return false;
+
+    uint32_t ms = (uint32_t)(secs * 1000.0 + 0.5);
+    if (ms < 1) ms = 1;
+    outIndex = (int)idx;
+    outDelayMs = ms;
+    return true;
+}
+
+static bool loadAnimationFrames(const std::string& dir,
+                                std::vector<MBAnimFrame>& outFrames,
+                                unsigned long long& outMinDelayUs) {
+    outMinDelayUs = 0;
+    std::vector<AnimFileInfo> files;
+    forEachEntry(dir, [&](const SceIoDirent& e){
+        if (FIO_S_ISDIR(e.d_stat.st_mode)) return;
+        int idx = 0;
+        uint32_t delayMs = 0;
+        if (!parseAnimFrameName(e.d_name, idx, delayMs)) return;
+        AnimFileInfo info;
+        info.path = joinDirFile(dir, e.d_name);
+        info.index = idx;
+        info.delayMs = delayMs;
+        files.push_back(info);
+    });
+
+    if (files.empty()) return false;
+    std::sort(files.begin(), files.end(),
+              [](const AnimFileInfo& a, const AnimFileInfo& b){ return a.index < b.index; });
+
+    outFrames.clear();
+    outFrames.reserve(files.size());
+    uint32_t minDelayMs = 0;
+    for (const auto& f : files) {
+        Texture* tex = texLoadPNG(f.path.c_str());
+        if (!tex || !tex->data) { if (tex) texFree(tex); continue; }
+        outFrames.push_back({tex, f.delayMs});
+        if (minDelayMs == 0 || f.delayMs < minDelayMs) minDelayMs = f.delayMs;
+    }
+
+    if (outFrames.empty()) return false;
+    if (minDelayMs == 0) minDelayMs = 100;
+    outMinDelayUs = (unsigned long long)minDelayMs * 1000ULL;
+    return true;
+}
+
+static void freeAnimationFrames(std::vector<MBAnimFrame>& frames) {
+    for (auto& f : frames) {
+        if (f.tex) { texFree(f.tex); f.tex = nullptr; }
+    }
+    frames.clear();
+}
+
+static uint32_t popAnimRand() {
+    static uint32_t seed = 0;
+    if (seed == 0) {
+        seed = (uint32_t)sceKernelGetSystemTimeWide();
+        if (seed == 0) seed = 1;
+    }
+    seed = seed * 1664525u + 1013904223u;
+    return seed;
+}
+
+static void shufflePopAnimOrder() {
+    gPopAnimOrder.clear();
+    gPopAnimOrder.reserve(gPopAnimDirs.size());
+    for (size_t i = 0; i < gPopAnimDirs.size(); ++i) gPopAnimOrder.push_back(i);
+    for (size_t i = gPopAnimOrder.size(); i > 1; --i) {
+        size_t j = popAnimRand() % i;
+        std::swap(gPopAnimOrder[i - 1], gPopAnimOrder[j]);
+    }
+    gPopAnimOrderIndex = 0;
+}
+
+static const std::string* nextPopAnimDir() {
+    if (gPopAnimDirs.empty()) return nullptr;
+    if (gPopAnimOrder.empty() || gPopAnimOrderIndex >= gPopAnimOrder.size()) {
+        shufflePopAnimOrder();
+    }
+    if (gPopAnimOrder.empty()) return nullptr;
+    size_t idx = gPopAnimOrder[gPopAnimOrderIndex++];
+    return &gPopAnimDirs[idx];
+}
+
+static bool ensurePopAnimLoaded(const std::string& dir) {
+    if (!gPopAnimLoadedDir.empty() && gPopAnimLoadedDir == dir && !gPopAnimFrames.empty()) {
+        return true;
+    }
+    freeAnimationFrames(gPopAnimFrames);
+    gPopAnimMinDelayUs = 0;
+    if (!loadAnimationFrames(dir, gPopAnimFrames, gPopAnimMinDelayUs)) {
+        gPopAnimLoadedDir.clear();
+        return false;
+    }
+    gPopAnimLoadedDir = dir;
+    return true;
 }
 
 // Dominant icon color calc (unchanged)
@@ -1425,7 +1581,7 @@ public:
                 intraFontSetStyle(font, 0.8f, col, 0, 0.f, INTRAFONT_ALIGN_LEFT);
                 intraFontPrint(font, (float)(_x + 16), (float)(startY + i*lineH), _items[i].label);
             }
-            intraFontSetStyle(font, 0.7f, COLOR_GRAY, 0, 0.f, INTRAFONT_ALIGN_LEFT);
+            intraFontSetStyle(font, 0.7f, 0xFFBBBBBB, 0, 0.f, INTRAFONT_ALIGN_LEFT);
             intraFontPrint(font, (float)(_x + 10), (float)(_y + _h - 16), "X: Select   O: Close");
         }
     }
@@ -1475,6 +1631,10 @@ public:
     }
 
     void primeButtons(unsigned buttons) { _lastButtons = buttons; }
+    void setOptionsOffsetAdjust(int dy) { _optionsOffsetAdjust = dy; }
+    void setMinVisibleRows(int rows) { _minVisibleRows = rows; }
+    void setAllowTriangleDelete(bool allow) { _allowTriangleDelete = allow; }
+    bool deleteRequested() const { return _deleteRequested; }
 
     // NEW: pre-position the highlight on the currently-selected option
     void setSelected(int idx) {
@@ -1485,6 +1645,7 @@ public:
 
     bool update() {
         if (!_visible) return false;
+        _deleteRequested = false;
         SceCtrlData pad{}; sceCtrlReadBufferPositive(&pad, 1);
         unsigned pressed = pad.Buttons & ~_lastButtons;
         _lastButtons = pad.Buttons;
@@ -1498,6 +1659,13 @@ public:
             _choice = -1; _visible = false;
         } else if (pressed & PSP_CTRL_CROSS) {
             if (!_items[_sel].disabled) { _choice = _sel; _visible = false; }
+        } else if ((pressed & PSP_CTRL_TRIANGLE) && _allowTriangleDelete) {
+            if (!_items[_sel].disabled && _sel > 0) {
+                _choice = _sel; _deleteRequested = true; _visible = false;
+            }
+        }
+        if (!_items.empty()) {
+            _ensureSelVisible(_lastVisibleRows > 0 ? _lastVisibleRows : (int)_items.size());
         }
         return _visible;
     }
@@ -1513,33 +1681,112 @@ public:
         const unsigned COLOR_PANEL  = 0xD0303030;
         const unsigned COLOR_BORDER = 0xFFFFFFFF;
         const unsigned COLOR_DESC   = 0xFFBBBBBB;
+        const unsigned COLOR_GLOW   = 0x80FFFFFF;
 
         _rect(_x-1, _y-1, _w+2, _h+2, COLOR_BORDER);
         _rect(_x,   _y,   _w,   _h,   COLOR_PANEL);
 
         if (font) {
+            const int textOffsetY = 4;
+            const int titleOffsetY = 2;
+            const int hrOffsetY = -9;
+            const int optionsOffsetY = 6 + _optionsOffsetAdjust;
+            const int controlsOffsetY = 3;
+            const int padX = 10;
+            const float titleScale = 0.9f;
+            const float descScale  = 0.7f;
+            const float itemScale  = 0.8f;
+
             // Title
-            intraFontSetStyle(font, 0.9f, COLOR_WHITE, 0, 0.f, INTRAFONT_ALIGN_LEFT);
-            intraFontPrint(font, (float)(_x + 10), (float)(_y + 12), _title ? _title : "");
+            intraFontSetStyle(font, titleScale, COLOR_WHITE, 0, 0.f, INTRAFONT_ALIGN_LEFT);
+            intraFontPrint(font, (float)(_x + padX), (float)(_y + 12 + textOffsetY + titleOffsetY), _title ? _title : "");
 
             // Description
-            intraFontSetStyle(font, 0.7f, COLOR_DESC, 0, 0.f, INTRAFONT_ALIGN_LEFT);
-            int descY = _y + 30;
-            if (_desc && *_desc) intraFontPrint(font, (float)(_x + 10), (float)descY, _desc);
-            const int startY = descY + 18;
-            const int lineH  = 18;
-
-            // Items
-            for (int i = 0; i < (int)_items.size(); ++i) {
-                bool sel = (i == _sel);
-                unsigned col = _items[i].disabled ? COLOR_GRAY : COLOR_WHITE;
-                if (sel) _rect(_x + 8, startY + i*lineH - 2, _w - 16, lineH + 4, 0x40FFFFFF);
-                intraFontSetStyle(font, 0.8f, col, 0, 0.f, INTRAFONT_ALIGN_LEFT);
-                intraFontPrint(font, (float)(_x + 16), (float)(startY + i*lineH), _items[i].label);
+            int descY = _y + 30 + textOffsetY;
+            const int descX = _x + padX;
+            const int descW = _w - (padX * 2);
+            std::vector<std::string> descLines;
+            _wrapText(font, descScale, _desc, descW, descLines);
+            const int descLineH = (int)(22.0f * descScale + 0.5f);
+            intraFontSetStyle(font, descScale, COLOR_DESC, 0, 0.f, INTRAFONT_ALIGN_LEFT);
+            for (const auto& line : descLines) {
+                intraFontPrint(font, (float)descX, (float)descY, line.c_str());
+                descY += descLineH;
             }
 
-            intraFontSetStyle(font, 0.7f, COLOR_GRAY, 0, 0.f, INTRAFONT_ALIGN_LEFT);
-            intraFontPrint(font, (float)(_x + 10), (float)(_y + _h - 16), "X: Select   O: Close");
+            // Divider
+            int hrY = descY + 4 + hrOffsetY;
+            _hFadeLine(_x + padX, hrY, _w - (padX * 2), 1, 0x90, 16, 0x00C0C0C0);
+
+            const int startY = descY + 10 + optionsOffsetY;
+            int lineH  = 18;
+            const float iconH = 15.0f;
+            const float controlsY = (float)(_y + _h - 18 + textOffsetY + controlsOffsetY);
+            const float controlsTextY = controlsY + 1.0f;
+            const int listBottom = (int)(controlsY - 6.0f);
+            const int availH = listBottom - startY;
+            if (_minVisibleRows > 0 && availH > 0) {
+                int testRows = availH / lineH;
+                if (testRows < _minVisibleRows) {
+                    int adj = availH / _minVisibleRows;
+                    if (adj < 14) adj = 14;
+                    lineH = adj;
+                }
+            }
+            int visibleRows = (availH > 0) ? (availH / lineH) : 1;
+            if (_minVisibleRows > 0 && visibleRows < _minVisibleRows) visibleRows = _minVisibleRows;
+            if (visibleRows < 1) visibleRows = 1;
+            _lastVisibleRows = visibleRows;
+            _ensureSelVisible(visibleRows);
+
+            // Items
+            const int startIdx = _scroll;
+            const int endIdx = std::min((int)_items.size(), startIdx + visibleRows);
+            for (int i = startIdx; i < endIdx; ++i) {
+                bool sel = (i == _sel);
+                bool disabled = _items[i].disabled;
+                unsigned col = disabled ? COLOR_GRAY : COLOR_WHITE;
+                unsigned shadow = (sel && !disabled) ? COLOR_GLOW : 0;
+                intraFontSetStyle(font, itemScale, col, shadow, 0.f, INTRAFONT_ALIGN_LEFT);
+                float itemY = (float)(startY + (i - startIdx) * lineH);
+                intraFontPrint(font, (float)(_x + 16), itemY, _items[i].label);
+                if (sel && !disabled) intraFontPrint(font, (float)(_x + 17), itemY, _items[i].label);
+            }
+
+            if ((int)_items.size() > visibleRows) {
+                const float trackX = (float)(_x + _w - 6);
+                const float trackY = (float)startY;
+                const float trackH = (float)(visibleRows * lineH);
+                _rect((int)trackX, (int)trackY, 2, (int)trackH, 0x40000000);
+                float thumbH = trackH * ((float)visibleRows / (float)_items.size());
+                if (thumbH < 6.0f) thumbH = 6.0f;
+                int maxScroll = (int)_items.size() - visibleRows;
+                if (maxScroll < 0) maxScroll = 0;
+                const float t = (maxScroll > 0) ? ((float)_scroll / (float)maxScroll) : 0.0f;
+                const float thumbY = trackY + t * (trackH - thumbH);
+                _rect((int)trackX, (int)thumbY, 2, (int)thumbH, 0xFFBBBBBB);
+            }
+
+            // Controls
+            float cx = (float)(_x + padX);
+            _drawTextureScaled(okIconTexture, cx, controlsY - 11.0f, iconH, 0xFFFFFFFF);
+            cx += iconH + 6.0f;
+            intraFontSetStyle(font, 0.7f, 0xFFBBBBBB, 0, 0.f, INTRAFONT_ALIGN_LEFT);
+            const char* selectLabel = "Select";
+            intraFontPrint(font, cx - 2.0f, controlsTextY, selectLabel);
+            cx += _measureText(font, 0.7f, selectLabel) + 12.0f;
+            if (_allowTriangleDelete) {
+                _drawTextureScaled(triangleIconTexture, cx, controlsY - 11.0f, iconH, 0xFFFFFFFF);
+                cx += iconH + 6.0f;
+                intraFontSetStyle(font, 0.7f, 0xFFBBBBBB, 0, 0.f, INTRAFONT_ALIGN_LEFT);
+                const char* delLabel = "Delete";
+                intraFontPrint(font, cx - 2.0f, controlsTextY, delLabel);
+                cx += _measureText(font, 0.7f, delLabel) + 12.0f;
+            }
+            _drawTextureScaled(circleIconTexture, cx, controlsY - 11.0f, iconH, 0xFFFFFFFF);
+            cx += iconH + 6.0f;
+            intraFontSetStyle(font, 0.7f, 0xFFBBBBBB, 0, 0.f, INTRAFONT_ALIGN_LEFT);
+            intraFontPrint(font, cx - 2.0f, controlsTextY, "Close");
         }
     }
 
@@ -1547,6 +1794,50 @@ public:
     int  choice()  const { return _choice; }
 
 private:
+    void _ensureSelVisible(int visible) {
+        if (visible < 1) visible = 1;
+        int maxScroll = (int)_items.size() - visible;
+        if (maxScroll < 0) maxScroll = 0;
+        if (_sel < _scroll) _scroll = _sel;
+        if (_sel >= _scroll + visible) _scroll = _sel - visible + 1;
+        if (_scroll < 0) _scroll = 0;
+        if (_scroll > maxScroll) _scroll = maxScroll;
+    }
+    static float _measureText(intraFont* font, float size, const char* s) {
+        if (!s) return 0.0f;
+        if (!font) return (float)(strlen(s) * 8) * size;
+        intraFontSetStyle(font, size, COLOR_WHITE, 0, 0.f, INTRAFONT_ALIGN_LEFT);
+        return intraFontMeasureText(font, s);
+    }
+    static void _wrapText(intraFont* font, float size, const char* text, int maxW, std::vector<std::string>& out) {
+        out.clear();
+        if (!text || !*text) return;
+        const char* p = text;
+        std::string line;
+        while (*p) {
+            if (*p == '\n') {
+                out.push_back(line);
+                line.clear();
+                ++p;
+                continue;
+            }
+            while (*p == ' ') ++p;
+            if (!*p) break;
+            const char* start = p;
+            while (*p && *p != ' ' && *p != '\n') ++p;
+            std::string word(start, p);
+
+            std::string candidate = line.empty() ? word : (line + " " + word);
+            float w = _measureText(font, size, candidate.c_str());
+            if (w <= (float)maxW || line.empty()) {
+                line = candidate;
+            } else {
+                out.push_back(line);
+                line = word;
+            }
+        }
+        if (!line.empty()) out.push_back(line);
+    }
     static void _rect(int x, int y, int w, int h, unsigned color) {
         struct V { unsigned color; short x,y,z; };
         V* v = (V*)sceGuGetMemory(2*sizeof(V));
@@ -1556,6 +1847,67 @@ private:
         sceGuShadeModel(GU_FLAT);
         sceGuAmbientColor(0xFFFFFFFF);
         sceGuDrawArray(GU_SPRITES, GU_COLOR_8888 | GU_VERTEX_16BIT | GU_TRANSFORM_2D, 2, 0, v);
+    }
+    static void _drawTextureScaled(Texture* t, float x, float y, float targetH, unsigned color) {
+        if (!t || !t->data || targetH <= 0.0f) return;
+        const int w = t->width;
+        const int h = t->height;
+        const int tbw = t->stride;
+        if (w <= 0 || h <= 0) return;
+        float s = targetH / (float)h;
+        float dw = (float)w * s;
+        float dh = targetH;
+
+        sceKernelDcacheWritebackRange(t->data, tbw * h * 4);
+        sceGuTexFlush();
+        sceGuTexMode(GU_PSM_8888, 0, 0, GU_FALSE);
+        sceGuTexFunc(GU_TFX_MODULATE, GU_TCC_RGBA);
+        sceGuTexImage(0, tbw, tbw, tbw, t->data);
+        sceGuTexFilter(GU_NEAREST, GU_NEAREST);
+        sceGuTexWrap(GU_CLAMP, GU_CLAMP);
+        sceGuEnable(GU_TEXTURE_2D);
+
+        struct V { float u, v; unsigned color; float x, y, z; };
+        V* vtx = (V*)sceGuGetMemory(2 * sizeof(V));
+        vtx[0].u = 0.0f;         vtx[0].v = 0.0f;
+        vtx[0].x = x;            vtx[0].y = y;            vtx[0].z = 0.0f; vtx[0].color = color;
+        vtx[1].u = (float)w;     vtx[1].v = (float)h;
+        vtx[1].x = x + dw;       vtx[1].y = y + dh;       vtx[1].z = 0.0f; vtx[1].color = color;
+
+        sceGuDrawArray(GU_SPRITES,
+                       GU_TEXTURE_32BITF | GU_VERTEX_32BITF |
+                       GU_COLOR_8888    | GU_TRANSFORM_2D,
+                       2, nullptr, vtx);
+        sceGuDisable(GU_TEXTURE_2D);
+    }
+    static void _hFadeLine(int x, int y, int w, int h, uint8_t midAlpha, int fadePx, uint32_t rgb) {
+        if (w <= 0 || h <= 0) return;
+        if (fadePx * 2 > w) fadePx = w / 2;
+        if (fadePx < 1) fadePx = 1;
+
+        const int steps = 6;
+        auto colWithAlpha = [&](uint8_t a)->unsigned { return (unsigned(a) << 24) | (rgb & 0x00FFFFFF); };
+
+        for (int i = 0; i < steps; ++i) {
+            int x0 = x + (fadePx * i) / steps;
+            int x1 = x + (fadePx * (i + 1)) / steps;
+            int segW = x1 - x0;
+            if (segW <= 0) continue;
+            uint8_t a = (uint8_t)((midAlpha * (i + 1)) / steps);
+            _rect(x0, y, segW, h, colWithAlpha(a));
+        }
+
+        int midW = w - (fadePx * 2);
+        if (midW > 0) _rect(x + fadePx, y, midW, h, colWithAlpha(midAlpha));
+
+        for (int i = 0; i < steps; ++i) {
+            int x0 = x + w - fadePx + (fadePx * i) / steps;
+            int x1 = x + w - fadePx + (fadePx * (i + 1)) / steps;
+            int segW = x1 - x0;
+            if (segW <= 0) continue;
+            uint8_t a = (uint8_t)((midAlpha * (steps - i)) / steps);
+            _rect(x0, y, segW, h, colWithAlpha(a));
+        }
     }
     bool _hasEnabled() const {
         for (auto& it : _items) if (!it.disabled) return true;
@@ -1572,6 +1924,12 @@ private:
     bool _visible = true;
     int  _choice  = -1;
     unsigned _lastButtons = 0;
+    int _optionsOffsetAdjust = 0;
+    int _minVisibleRows = 0;
+    int _scroll = 0;
+    int _lastVisibleRows = 0;
+    bool _allowTriangleDelete = false;
+    bool _deleteRequested = false;
 };
 // --------------------------------------------------------------------------
 
@@ -1624,6 +1982,8 @@ private:
 
     int selectedIndex = 0;
     int scrollOffset  = 0;
+    bool scanAnimActive = false;
+    unsigned long long scanAnimNextUs = 0;
 
     // Paths currently checked
     std::unordered_set<std::string> checked;
@@ -2133,11 +2493,13 @@ private:
     OptionListMenu* optMenu = nullptr;   // ← NEW: modal option picker
     std::vector<std::string> optMenuOwnedLabels; // keep dynamic labels alive for OptionListMenu
     static bool rootPickGcl;             // ← declaration only; no in-class initializer
+    static bool rootKeepGclSelection;    // keep selection on "Game Categories:" after toggle
     bool inputWaitRelease = false;
 
     // Which Categories Lite setting is currently being edited
     enum GclSettingKey { GCL_SK_None = -1, GCL_SK_Mode = 0, GCL_SK_Prefix = 1, GCL_SK_Uncat = 2, GCL_SK_Sort = 3, GCL_SK_Blacklist = 4 };
     static GclSettingKey gclPending;
+    bool gclBlacklistDirty = false;
 
     // Track which kind of menu is open (content vs categories)
     enum MenuContext { MC_ContentOps, MC_CategoryOps };
@@ -2154,10 +2516,48 @@ private:
     bool isCategoryRowLocked(int row) const {
         if (row < 0 || row >= (int)entries.size()) return true;
         // Top row is Category Settings
-        if (!strcasecmp(entries[row].d_name, "Category Settings")) return true;
+        if (!strcasecmp(entries[row].d_name, kCatSettingsLabel)) return true;
         // Bottom row is Uncategorized (when present)
         if (!strcasecmp(entries[row].d_name, "Uncategorized"))     return true;
         return false;
+    }
+
+    static constexpr float CAT_ROW_H = 16.0f;
+    static constexpr float CAT_LIST_OFFSET_Y = 5.0f;
+    static constexpr float CAT_SETTINGS_GAP = 9.0f;
+    int categoryVisibleRows() const {
+        const float panelH = 226.0f;
+        float listH = panelH - 8.0f - CAT_LIST_OFFSET_Y;
+        if (listH < CAT_ROW_H) listH = CAT_ROW_H;
+        int visible = (int)(listH / CAT_ROW_H);
+        if (visible < 1) visible = 1;
+        return visible;
+    }
+    int gclSettingsVisibleRows() const {
+        const float panelH = 226.0f;
+        const float rowH = CAT_ROW_H + 3.0f;
+        float listH = panelH - 8.0f - CAT_LIST_OFFSET_Y;
+        if (listH < rowH) listH = rowH;
+        int visible = (int)(listH / rowH);
+        if (visible < 1) visible = 1;
+        return visible;
+    }
+    const char* currentDeviceHeaderName() const {
+        if (!currentDevice.empty()) {
+            if (!strncasecmp(currentDevice.c_str(), "ms0:", 4)) return "Memory Stick";
+            if (!strncasecmp(currentDevice.c_str(), "ef0:", 4)) return "Internal Storage";
+            return rootDisplayName(currentDevice.c_str());
+        }
+        return "Memory Stick";
+    }
+    int categoryDisplayCount() const {
+        int count = 0;
+        for (const auto& e : entries) {
+            if (!strcasecmp(e.d_name, kCatSettingsLabel)) continue;
+            if (!strcasecmp(e.d_name, "__GCL_SETTINGS__")) continue;
+            count++;
+        }
+        return count;
     }
 
 
@@ -2185,7 +2585,7 @@ private:
         orderedBases.reserve(entries.size());
         for (int i = 0; i < (int)entries.size(); ++i) {
             const char* nm = entries[i].d_name;
-            if (!strcasecmp(nm, "Category Settings")) continue;
+            if (!strcasecmp(nm, kCatSettingsLabel)) continue;
             if (!strcasecmp(nm, "Uncategorized"))     continue;
             orderedBases.push_back(stripCategoryPrefixes(nm));
         }
@@ -2207,8 +2607,9 @@ private:
         }
 
         // 4) Rename on disk (for devices that exist) to match the new wanted names
-        const char* isoRoots[]  = {"ISO/"};                // drop ISO/PSP/ as a root
-        const char* gameRoots[] = {"PSP/GAME/","PSP/GAME150/"}; // drop PSX/ and Utility/ as roots
+        //    Only touch category folders inside ISO/ and PSP/GAME*/ roots. Never touch root-level PSP/.
+        const char* isoRoots[]  = {"ISO/","ISO/PSP/"}; // both ISO roots
+        const char* gameRoots[] = {"PSP/GAME/","PSP/GAME150/","PSP/GAME/PSX/","PSP/GAME/Utility/"};
         auto doDevice = [&](const std::string& dev){
             if (dev.empty() || dev[3] != ':') return;
             for (auto& kv : baseToWant) {
@@ -2228,8 +2629,8 @@ private:
                         }
                     }
                 };
-                renameIn(isoRoots[0]); renameIn(isoRoots[1]);
-                renameIn(gameRoots[0]); renameIn(gameRoots[1]); renameIn(gameRoots[2]); renameIn(gameRoots[3]);
+                for (const char* r : isoRoots)  renameIn(r);
+                for (const char* r : gameRoots) renameIn(r);
             }
         };
 
@@ -2395,6 +2796,20 @@ private:
                 snap.hasCategories = hasCategories;
             }
         }
+
+        // 6) Update on-screen entry names in-place (keeps current order/selection)
+        if (!showRoots && view == View_Categories) {
+            for (int i = 0; i < (int)entries.size(); ++i) {
+                const char* nm = entries[i].d_name;
+            if (!strcasecmp(nm, kCatSettingsLabel) || !strcasecmp(nm, "Uncategorized")) continue;
+                std::string base = stripCategoryPrefixes(nm);
+                auto it = baseToWant.find(base);
+                if (it != baseToWant.end()) {
+                    strncpy(entries[i].d_name, it->second.c_str(), sizeof(entries[i].d_name) - 1);
+                    entries[i].d_name[sizeof(entries[i].d_name) - 1] = '\0';
+                }
+            }
+        }
     }
 
 
@@ -2451,6 +2866,56 @@ private:
     void markDeviceDirty(const std::string& devOrPath) {
         std::string key = rootPrefix(devOrPath);  // accepts "ms0:/", "ef0:/", or any full path
         if (!key.empty()) deviceCache[key].dirty = true;
+    }
+
+    void setCategorySortMode(bool enable, bool saveOnExit = false) {
+        if (!gclCfg.catsort) return;
+        if (enable == catSortMode) return;
+
+        if (enable) {
+            catSortMode   = true;
+            catPickActive = false;
+            catPickIndex  = -1;
+            return;
+        }
+
+        std::string keepBase;
+        if (selectedIndex >= 0 && selectedIndex < (int)entries.size()) {
+            const char* disp = entries[selectedIndex].d_name;
+            if (strcasecmp(disp, kCatSettingsLabel) != 0 && strcasecmp(disp, "Uncategorized") != 0) {
+                keepBase = stripCategoryPrefixes(disp);
+            }
+        }
+
+        catSortMode   = false;
+        catPickActive = false;
+        catPickIndex  = -1;
+
+        if (saveOnExit) {
+            applyCategoryOrderAndPersist();
+        }
+        buildCategoryRows();
+
+        int idx = -1;
+        if (!keepBase.empty()) {
+            for (int i = 0; i < (int)entries.size(); ++i) {
+                if (!strcasecmp(stripCategoryPrefixes(entries[i].d_name).c_str(), keepBase.c_str())) {
+                    idx = i; break;
+                }
+            }
+        }
+        if (idx < 0) {
+            idx = (selectedIndex >= 0 && selectedIndex < (int)entries.size())
+                ? selectedIndex
+                : (int)entries.size() - 1;
+            if (idx < 0) idx = 0;
+        }
+
+        selectedIndex = idx;
+        if (selectedIndex < scrollOffset) scrollOffset = selectedIndex;
+        const int visible = categoryVisibleRows();
+        const int lastVisible = scrollOffset + visible - 1;
+        if (selectedIndex > lastVisible) scrollOffset = selectedIndex - (visible - 1);
     }
 
 
@@ -2933,21 +3398,145 @@ private:
         sceGuDrawArray(GU_SPRITES, GU_COLOR_8888|GU_VERTEX_16BIT|GU_TRANSFORM_2D, 2, 0, v);
         sceGuEnable(GU_TEXTURE_2D);
     }
-    void drawText(float x,float y,const char* s,unsigned col) {
+    void drawHFadeLine(int x, int y, int w, int h, uint8_t midAlpha, int fadePx, uint32_t rgb) {
+        if (w <= 0 || h <= 0) return;
+        if (fadePx * 2 > w) fadePx = w / 2;
+        if (fadePx < 1) fadePx = 1;
+
+        const int steps = 6;
+        auto colWithAlpha = [&](uint8_t a)->unsigned { return (unsigned(a) << 24) | (rgb & 0x00FFFFFF); };
+
+        // Left fade
+        for (int i = 0; i < steps; ++i) {
+            int x0 = x + (fadePx * i) / steps;
+            int x1 = x + (fadePx * (i + 1)) / steps;
+            int segW = x1 - x0;
+            if (segW <= 0) continue;
+            uint8_t a = (uint8_t)((midAlpha * (i + 1)) / steps);
+            drawRect(x0, y, segW, h, colWithAlpha(a));
+        }
+
+        // Middle solid
+        int midW = w - (fadePx * 2);
+        if (midW > 0) drawRect(x + fadePx, y, midW, h, colWithAlpha(midAlpha));
+
+        // Right fade
+        for (int i = 0; i < steps; ++i) {
+            int x0 = x + w - fadePx + (fadePx * i) / steps;
+            int x1 = x + w - fadePx + (fadePx * (i + 1)) / steps;
+            int segW = x1 - x0;
+            if (segW <= 0) continue;
+            uint8_t a = (uint8_t)((midAlpha * (steps - i)) / steps);
+            drawRect(x0, y, segW, h, colWithAlpha(a));
+        }
+    }
+    void drawTextAligned(float x,float y,const char* s,unsigned col,int align) {
         if (font) {
-            intraFontSetStyle(font,0.5f,col,0,0.0f,INTRAFONT_ALIGN_LEFT);
+            intraFontSetStyle(font,0.5f,col,0,0.0f,align);
             intraFontPrint(font,x,y,s);
         } else {
-            pspDebugScreenSetXY(int(x/8), int(y/8));
+            int cx = int(x/8);
+            if (align == INTRAFONT_ALIGN_CENTER) {
+                cx -= (int)strlen(s) / 2;
+            } else if (align == INTRAFONT_ALIGN_RIGHT) {
+                cx -= (int)strlen(s);
+            }
+            if (cx < 0) cx = 0;
+            pspDebugScreenSetXY(cx, int(y/8));
             pspDebugScreenSetTextColor(col);
             pspDebugScreenPrintf("%s", s);
         }
     }
+    void drawText(float x,float y,const char* s,unsigned col) {
+        drawTextAligned(x, y, s, col, INTRAFONT_ALIGN_LEFT);
+    }
+    float measureTextWidth(float size, const char* s) {
+        if (!s) return 0.0f;
+        if (!font) return (float)(strlen(s) * 8) * size;
+        intraFontSetStyle(font, size, COLOR_WHITE, 0, 0.0f, INTRAFONT_ALIGN_LEFT);
+        return intraFontMeasureText(font, s);
+    }
+    void drawTextStyled(float x, float y, const char* s, float size, unsigned col, unsigned shadow,
+                        int align, bool bold) {
+        if (!s) return;
+        if (font) {
+            intraFontSetStyle(font, size, col, shadow, 0.0f, align);
+            intraFontPrint(font, x, y, s);
+            if (bold) intraFontPrint(font, x + 1.0f, y, s);
+        } else {
+            drawTextAligned(x, y, s, col, align);
+            if (bold) drawTextAligned(x + 1.0f, y, s, col, align);
+        }
+    }
+    void drawTextureScaled(Texture* t, float x, float y, float targetH, unsigned color) {
+        if (!t || !t->data || targetH <= 0.0f) return;
+        const int w = t->width;
+        const int h = t->height;
+        const int tbw = t->stride;
+        if (w <= 0 || h <= 0) return;
+        float s = targetH / (float)h;
+        float dw = (float)w * s;
+        float dh = targetH;
+
+        sceKernelDcacheWritebackRange(t->data, tbw * h * 4);
+        sceGuTexFlush();
+        sceGuTexMode(GU_PSM_8888, 0, 0, GU_FALSE);
+        sceGuTexFunc(GU_TFX_MODULATE, GU_TCC_RGBA);
+        sceGuTexImage(0, tbw, tbw, tbw, t->data);
+        sceGuTexFilter(GU_LINEAR, GU_LINEAR);
+        sceGuTexWrap(GU_CLAMP, GU_CLAMP);
+        sceGuEnable(GU_TEXTURE_2D);
+
+        struct V { float u,v; unsigned color; float x,y,z; };
+        V* vtx = (V*)sceGuGetMemory(2 * sizeof(V));
+        vtx[0] = { 0.0f,            0.0f,            color, x,      y,      0.0f };
+        vtx[1] = { (float)w, (float)h, color, x + dw, y + dh, 0.0f };
+        sceGuDrawArray(GU_SPRITES, GU_TEXTURE_32BITF | GU_COLOR_8888 |
+                                  GU_VERTEX_32BITF  | GU_TRANSFORM_2D, 2, nullptr, vtx);
+        sceGuDisable(GU_TEXTURE_2D);
+    }
     void drawHeader() {
-        char head[256];
-        snprintf(head, sizeof(head), "Kernel File Explorer - Timestamp Editor  |  Sort: Folder mtime  |  Debug: %s",
-                 showDebugTimes ? "ON" : "OFF");
-        drawText(10,10,head,COLOR_YELLOW);
+        const int bannerH = 15;
+        const float textY = (float)(bannerH - 4);
+        sceGuEnable(GU_BLEND);
+        sceGuBlendFunc(GU_ADD, GU_SRC_ALPHA, GU_ONE_MINUS_SRC_ALPHA, 0, 0);
+        drawRect(0, 0, SCREEN_WIDTH, bannerH, COLOR_BANNER);
+
+        const char* leftLabel = "HomeBrew Sorter Ultimate";
+        if (!showRoots && (view == View_Categories || view == View_GclSettings)) {
+            leftLabel = currentDeviceHeaderName();
+        }
+        drawTextAligned(5, textY, leftLabel, COLOR_WHITE, INTRAFONT_ALIGN_LEFT);
+
+        char mid[64];
+        float midX = 195.0f;
+        int midAlign = INTRAFONT_ALIGN_LEFT;
+        if (showRoots) {
+            snprintf(mid, sizeof(mid), "Main Menu");
+            midX = 215.0f;
+        } else if (view == View_Categories) {
+            snprintf(mid, sizeof(mid), "Categories: %d", categoryDisplayCount());
+            midX = SCREEN_WIDTH / 2.0f;
+            midAlign = INTRAFONT_ALIGN_CENTER;
+        } else if (view == View_GclSettings) {
+            snprintf(mid, sizeof(mid), "Categories settings");
+            midX = SCREEN_WIDTH / 2.0f;
+            midAlign = INTRAFONT_ALIGN_CENTER;
+        } else {
+            snprintf(mid, sizeof(mid), "Games found: %d", (int)flatAll.size());
+        }
+        drawTextAligned(midX, textY, mid, COLOR_WHITE, midAlign);
+
+        ScePspDateTime now{};
+        sceRtcGetCurrentClockLocalTime(&now);
+        char date[32];
+        unsigned hour12 = (unsigned)now.hour % 12;
+        if (hour12 == 0) hour12 = 12;
+        const char* ampm = ((unsigned)now.hour < 12) ? "AM" : "PM";
+        snprintf(date, sizeof(date), "%02u/%02u/%04u %02u:%02u %s",
+                 (unsigned)now.month, (unsigned)now.day, (unsigned)now.year,
+                 hour12, (unsigned)now.minute, ampm);
+        drawTextAligned(SCREEN_WIDTH - 5.0f, textY, date, COLOR_WHITE, INTRAFONT_ALIGN_RIGHT);
 
         if (showRoots) {
             if (actionMode != AM_None) {
@@ -2955,20 +3544,13 @@ private:
                 std::string msg = std::string("Select Destination Storage (") + v + " Mode)";
                 drawText(10, 25, msg.c_str(), COLOR_WHITE);
             }
-            else drawText(10,25,"Select Storage Device",COLOR_WHITE);
         } else {
             char buf[256];
             const char* lbl = showTitles ? "App Title" : "File/Folder";
-            if (view == View_Categories) {
-                if (actionMode != AM_None) {
-                    snprintf(buf, sizeof(buf), "Move: Pick Destination Category — %s", rootDisplayName(currentDevice.c_str()));
-                } else {
-                    snprintf(buf, sizeof(buf), "Categories — %s  | Label: %s", rootDisplayName(currentDevice.c_str()), lbl);
-                }
+            if (view == View_Categories || view == View_GclSettings) {
+                buf[0] = '\0'; // no secondary header text on Categories screen
             } else if (view == View_CategoryContents) {
                 snprintf(buf, sizeof(buf), "Category: %s — %s  | Label: %s", currentCategory.c_str(), rootDisplayName(currentDevice.c_str()), lbl);
-            } else if (view == View_GclSettings) {
-                snprintf(buf, sizeof(buf), "Category Settings");
             } else {
                 snprintf(buf, sizeof(buf), "%s — All content  | Label: %s", rootDisplayName(currentDevice.c_str()), lbl);
             }
@@ -3096,7 +3678,493 @@ private:
         sceGuDisable(GU_TEXTURE_2D);
     }
 
+    void drawRootMenu() {
+        if (entries.empty()) return;
+
+        intraFontActivate(font);
+        sceGuEnable(GU_BLEND);
+        sceGuBlendFunc(GU_ADD,GU_SRC_ALPHA,GU_ONE_MINUS_SRC_ALPHA,0,0);
+
+        const float panelX = 5.0f;
+        const float panelY = 22.0f;
+        const float panelW = 280.0f;
+        const float panelH = 226.0f;
+        drawRect((int)panelX, (int)panelY, (int)panelW, (int)panelH, COLOR_BANNER);
+
+        const float ctrlX = 290.0f;
+        const float ctrlY = 22.0f;
+        const float ctrlW = 185.0f;
+        const float ctrlH = 90.0f;
+        drawRect((int)ctrlX, (int)ctrlY, (int)ctrlW, (int)ctrlH, COLOR_BANNER);
+        const unsigned keyTextCol = 0xFFBBBBBB;
+        auto drawKeyRowLeft = [&](float baseX, float& y, Texture* icon, const char* label,
+                                  bool bumpRight, unsigned textCol){
+            float iconH = 15.0f;
+            if (icon == startIconTexture || icon == selectIconTexture) iconH = 18.0f;
+            float iconW = 0.0f;
+            if (icon && icon->data && icon->height > 0) {
+                iconW = (float)icon->width * (iconH / (float)icon->height);
+            }
+            const float gap = (iconW > 0.0f) ? (6.0f + (bumpRight ? 4.0f : 0.0f)) : 0.0f;
+            float x = baseX + (bumpRight ? 6.0f : 0.0f);
+            if (bumpRight) x += 4.0f;
+            if (icon && icon->data && icon->height > 0) {
+                drawTextureScaled(icon, x, y - 10.0f, iconH, 0xFFFFFFFF);
+                x += iconW + gap;
+            }
+            const float labelPad = bumpRight ? 6.0f : 0.0f;
+            drawTextStyled(x + labelPad, y + 2.0f, label, 0.7f, textCol, 0, INTRAFONT_ALIGN_LEFT, false);
+            y += 20.0f;
+        };
+
+        float keyY = ctrlY + 17.0f;
+        const float keyX = ctrlX + 5.0f;
+        drawKeyRowLeft(keyX, keyY, okIconTexture, "Select", true, keyTextCol);
+
+        const int rowCount = (int)entries.size();
+        const float top = panelY + 4.0f;
+        const float bottom = panelY + panelH - 4.0f;
+        const float rowH = (rowCount > 0) ? ((bottom - top) / (float)rowCount) : 0.0f;
+        const float textCenterX = panelX + (panelW * 0.5f);
+        const float iconGap = 10.0f;
+        const float iconYOffsetBase = -6.0f;
+
+        float internalCenterY = 0.0f;
+        float usbCenterY = 0.0f;
+        bool haveInternal = false;
+        bool haveUsb = false;
+
+        for (int i = 0; i < rowCount; ++i) {
+            const char* name = entries[i].d_name;
+
+            const char* lines[2] = { nullptr, nullptr };
+            int lineCount = 1;
+            float scale = 0.75f;
+            Texture* icon = nullptr;
+            float iconH = 0.0f;
+
+            if (!strcmp(name, "ms0:/")) {
+                lines[0] = "Memory"; lines[1] = "Stick"; lineCount = 2;
+                scale = 0.95f; icon = rootMemIcon; iconH = 40.0f;
+            } else if (!strcmp(name, "ef0:/")) {
+                lines[0] = "Internal"; lines[1] = "Storage"; lineCount = 2;
+                scale = 0.95f; icon = rootInternalIcon; iconH = 40.0f;
+            } else if (!strcmp(name, "__USB_MODE__")) {
+                lines[0] = "USB Mode";
+                scale = 0.7f; icon = rootUsbIcon; iconH = 21.0f;
+            } else if (!strcmp(name, "__GCL_TOGGLE__")) {
+                lines[0] = "Game Categories:";
+                scale = 0.7f; icon = rootCategoriesIcon; iconH = 25.0f;
+            } else {
+                lines[0] = rootDisplayName(name);
+                scale = 0.6f; icon = nullptr; iconH = 0.0f;
+            }
+
+            const bool sel = (i == selectedIndex);
+            const bool disabled = (i < (int)rowFlags.size() && (rowFlags[i] & ROW_DISABLED));
+            const unsigned baseCol = disabled ? COLOR_GRAY : COLOR_WHITE;
+            const unsigned textCol = sel ? COLOR_BLACK : baseCol;
+            const unsigned shadowCol = sel ? COLOR_WHITE : 0x40000000;
+            const unsigned iconCol = disabled ? 0x66FFFFFF : 0xFFFFFFFF;
+
+            float rowYOffset = 0.0f;
+            if (!strcmp(name, "ms0:/")) rowYOffset = 4.0f;
+            else if (!strcmp(name, "ef0:/")) rowYOffset = 5.0f;
+            else if (!strcmp(name, "__USB_MODE__")) rowYOffset = 7.0f;
+            else if (!strcmp(name, "__GCL_TOGGLE__")) rowYOffset = -8.0f;
+            float textYOffset = (!strcmp(name, "__GCL_TOGGLE__")) ? -2.0f : 0.0f;
+            float iconYOffset = iconYOffsetBase;
+            if (!strcmp(name, "ms0:/") || !strcmp(name, "ef0:/") || !strcmp(name, "__USB_MODE__")) {
+                iconYOffset += 5.0f;
+            }
+            const float centerY = top + rowH * (i + 0.5f) + rowYOffset;
+            const float lineH = 16.0f * scale;
+            const float blockH = lineH * (float)lineCount;
+            const float firstBaseline = centerY - (blockH * 0.5f) + (lineH * 0.75f);
+
+            if (!strcmp(name, "ef0:/")) { internalCenterY = centerY; haveInternal = true; }
+            if (!strcmp(name, "__USB_MODE__")) { usbCenterY = centerY; haveUsb = true; }
+
+            float maxW = 0.0f;
+            for (int l = 0; l < lineCount; ++l) {
+                float w = measureTextWidth(scale, lines[l]);
+                if (w > maxW) maxW = w;
+            }
+            const float textLeftX = textCenterX - (maxW * 0.5f);
+
+            if (icon && iconH > 0.0f && icon->height > 0) {
+                float iconW = (float)icon->width * (iconH / (float)icon->height);
+                float iconX = textLeftX - iconGap - iconW;
+                if (!strcmp(name, "ms0:/")) iconX -= 6.0f;
+                float iconY = centerY - (iconH * 0.5f) + iconYOffset;
+                drawTextureScaled(icon, iconX, iconY, iconH, iconCol);
+            }
+
+            const float lineGap = (!strcmp(name, "ms0:/") || !strcmp(name, "ef0:/")) ? 2.0f : 0.0f;
+            for (int l = 0; l < lineCount; ++l) {
+                drawTextStyled(textCenterX, firstBaseline + (lineH * l) + (lineGap * l) + textYOffset, lines[l],
+                               scale, textCol, shadowCol, INTRAFONT_ALIGN_CENTER, true);
+            }
+
+            if (!strcmp(name, "__GCL_TOGGLE__")) {
+                Texture* stateIcon = gclArkOn ? rootArk4Icon :
+                                     (gclProOn ? rootProMeIcon : rootOffBulbIcon);
+                const bool isOff = (!gclArkOn && !gclProOn);
+                const float stateH = 18.0f;
+                const float gap = 3.0f;
+                const float stateYOffset = -2.0f;
+                const float stateCenterY = firstBaseline + (lineH * lineCount) + gap + (stateH * 0.5f) + stateYOffset;
+
+                float stateIconW = 0.0f;
+                if (stateIcon && stateIcon->height > 0) {
+                    stateIconW = (float)stateIcon->width * (stateH / (float)stateIcon->height);
+                }
+
+                if (isOff) {
+                    const char* stateText = "Turned off";
+                    const float stateScale = 0.6f;
+                    const float stateLineH = 16.0f * stateScale;
+                    const float stateBaseline = stateCenterY - (stateLineH * 0.5f) + (stateLineH * 0.75f) - 5.0f;
+                    const unsigned stateCol = disabled ? COLOR_GRAY : COLOR_WHITE;
+
+                    const float stateTextW = measureTextWidth(stateScale, stateText);
+                    const float groupW = stateIconW + iconGap + stateTextW;
+                    const float groupLeftX = textCenterX - (groupW * 0.5f);
+
+                    if (stateIcon && stateH > 0.0f) {
+                        drawTextureScaled(stateIcon, groupLeftX,
+                                          stateCenterY - (stateH * 0.5f) + iconYOffset,
+                                          stateH, iconCol);
+                    }
+                    drawTextStyled(groupLeftX + stateIconW + iconGap - 2.0f, stateBaseline + 1.0f, stateText,
+                                   stateScale, stateCol, 0, INTRAFONT_ALIGN_LEFT, false);
+                } else if (stateIcon && stateH > 0.0f) {
+                    drawTextureScaled(stateIcon, textCenterX - (stateIconW * 0.5f),
+                                      stateCenterY - (stateH * 0.5f) + iconYOffset,
+                                      stateH, iconCol);
+                }
+            }
+        }
+
+        if (haveInternal && haveUsb) {
+            const int lineY = (int)((internalCenterY + usbCenterY) * 0.5f);
+            const int lineX = (int)(panelX + 24.0f);
+            const int lineW = (int)(panelW - 24.0f);
+            drawHFadeLine(lineX, lineY + 4, lineW - 30, 1, 0xA0, 20, 0x00C0C0C0);
+        }
+    }
+
+    void drawCategoryMenu() {
+        if (entries.empty()) return;
+
+        const float panelX = 5.0f;
+        const float panelY = 22.0f;
+        const float panelW = 280.0f;
+        const float panelH = 226.0f;
+        drawRect((int)panelX, (int)panelY, (int)panelW, (int)panelH, COLOR_BANNER);
+
+        const float ctrlX = 290.0f;
+        const float ctrlY = 22.0f;
+        const float ctrlW = 185.0f;
+        const float ctrlH = 90.0f;
+        drawRect((int)ctrlX, (int)ctrlY, (int)ctrlW, (int)ctrlH, COLOR_BANNER);
+
+        // Mode switcher block (L/R)
+        const float modeY = ctrlY + ctrlH + 6.0f;
+        const float modeH = 42.0f;
+        drawRect((int)ctrlX, (int)modeY, (int)ctrlW, (int)modeH, COLOR_BANNER);
+
+        // Mode switcher labels (L top-left, R top-right)
+        const float modePadY = modeY + 3.0f;
+        const float modeScale = 0.7f;
+        const float modeIconH = 14.0f;
+        unsigned stdCol  = catSortMode ? COLOR_GRAY : COLOR_WHITE;
+        unsigned sortCol = catSortMode ? COLOR_WHITE : COLOR_GRAY;
+        unsigned lIconCol = catSortMode ? 0xFFFFFFFF : 0x66FFFFFF; // dim L in Standard
+        unsigned rIconCol = catSortMode ? 0x66FFFFFF : 0xFFFFFFFF; // dim R in Sort
+        if (!gclCfg.catsort) {
+            lIconCol = 0x66FFFFFF;
+            rIconCol = 0x66FFFFFF;
+        }
+        const float lX = ctrlX + 5.0f;
+        if (lIconTexture && lIconTexture->data) {
+            drawTextureScaled(lIconTexture, lX, modePadY, modeIconH, lIconCol);
+        }
+        const float rX = ctrlX + ctrlW - modeIconH - 5.0f;
+        if (rIconTexture && rIconTexture->data) {
+            drawTextureScaled(rIconTexture, rX, modePadY, modeIconH, rIconCol);
+        }
+        drawTextStyled(ctrlX + ctrlW * 0.5f, modePadY + 12.0f, "Change Mode", modeScale, 0xFFBBBBBB, 0, INTRAFONT_ALIGN_CENTER, false);
+        drawTextStyled(ctrlX + ctrlW * 0.5f, modePadY + 32.0f, catSortMode ? "Sort" : "Standard",
+                       modeScale, catSortMode ? sortCol : stdCol, 0, INTRAFONT_ALIGN_CENTER, false);
+
+        const unsigned keyTextCol = 0xFFBBBBBB;
+        const unsigned saveTextCol = 0xFF17D0FD;
+        const unsigned pickedGlowCol = 0xFF8CE8FE;
+
+        // Controls box
+        auto drawKeyRowLeft = [&](float baseX, float& y, Texture* icon, const char* label,
+                                  bool bumpRight, unsigned textCol){
+            float iconH = 15.0f;
+            if (icon == startIconTexture || icon == selectIconTexture) iconH = 18.0f;
+            float iconW = 0.0f;
+            if (icon && icon->data && icon->height > 0) {
+                iconW = (float)icon->width * (iconH / (float)icon->height);
+            }
+            const float gap = (iconW > 0.0f) ? (6.0f + (bumpRight ? 4.0f : 0.0f)) : 0.0f;
+            float x = baseX + (bumpRight ? 6.0f : 0.0f);
+            if (bumpRight) x += 4.0f;
+            if (icon && icon->data && icon->height > 0) {
+                drawTextureScaled(icon, x, y - 10.0f, iconH, 0xFFFFFFFF);
+                x += iconW + gap;
+            }
+            const float labelPad = bumpRight ? 6.0f : 0.0f;
+            drawTextStyled(x + labelPad, y + 2.0f, label, 0.7f, textCol, 0, INTRAFONT_ALIGN_LEFT, false);
+            y += 20.0f;
+        };
+
+        float keyY = ctrlY + 17.0f;
+        const float keyX = ctrlX + 5.0f;
+        if (!catSortMode) {
+            drawKeyRowLeft(keyX, keyY, okIconTexture, "Select", true, keyTextCol);
+            drawKeyRowLeft(keyX, keyY, selectIconTexture, "Rename", false, keyTextCol);
+            drawKeyRowLeft(keyX, keyY, triangleIconTexture, "Add/Del. category", true, keyTextCol);
+            drawKeyRowLeft(keyX, keyY, circleIconTexture, "Back", true, keyTextCol);
+        } else {
+            drawKeyRowLeft(keyX, keyY, okIconTexture, "Pick up/Drop", true, keyTextCol);
+            drawKeyRowLeft(keyX, keyY, startIconTexture, "Save order", false, saveTextCol);
+            drawKeyRowLeft(keyX, keyY, circleIconTexture, "Back", true, keyTextCol);
+        }
+
+        // Categories list
+        const int rowCount = (int)entries.size();
+        const float top = panelY + 4.0f + CAT_LIST_OFFSET_Y;
+        const float rowH = CAT_ROW_H;
+        const int visibleRows = categoryVisibleRows();
+        int maxScroll = rowCount - visibleRows;
+        if (maxScroll < 0) maxScroll = 0;
+        if (scrollOffset > maxScroll) scrollOffset = maxScroll;
+        if (scrollOffset < 0) scrollOffset = 0;
+        const int startRow = scrollOffset;
+        const int endRow = std::min(rowCount, startRow + visibleRows);
+        const float iconGap = 10.0f;
+
+        const bool hasSettingsRow = (rowCount > 0 && !strcasecmp(entries[0].d_name, kCatSettingsLabel));
+        for (int i = startRow; i < endRow; ++i) {
+            const char* name = entries[i].d_name;
+            const bool sel = (i == selectedIndex);
+            const bool disabled = (actionMode!=AM_None && opPhase==OP_SelectCategory &&
+                                   opDisabledCategories.find(name) != opDisabledCategories.end());
+
+            const bool locked = isCategoryRowLocked(i);
+            const bool isPicked = (catSortMode && catPickActive && i == catPickIndex && !locked);
+
+            unsigned baseCol = disabled ? COLOR_GRAY : COLOR_WHITE;
+            unsigned textCol = sel ? COLOR_BLACK : baseCol;
+            unsigned shadowCol = sel ? COLOR_WHITE : 0x40000000;
+
+            (void)sel; // no row background highlight in categories list
+
+            const int rowIndex = i - startRow;
+            const float extraGap = (startRow == 0 && hasSettingsRow && rowIndex > 0) ? CAT_SETTINGS_GAP : 0.0f;
+            const float centerY = top + rowH * (rowIndex + 0.5f) + extraGap;
+            const float scale = 0.5f;
+            const float lineH = 16.0f * scale;
+            const float baseline = centerY + (lineH * 0.25f) - 2.0f;
+
+            std::string label = name;
+            if (isPicked) {
+                shadowCol = pickedGlowCol;
+            }
+
+            const float textLeftX = panelX + 32.0f; // left aligned
+
+            // Icon
+            const float iconHCat = 15.0f;
+            const bool isSettingsRow = (strcasecmp(name, kCatSettingsLabel) == 0);
+            if (isSettingsRow) {
+                if (catSettingsIcon && catSettingsIcon->data && catSettingsIcon->height > 0) {
+                    float iconW = (float)catSettingsIcon->width * (iconHCat / (float)catSettingsIcon->height);
+                    float iconX = textLeftX - iconGap - iconW + 3.0f;
+                    float iconY = centerY - (iconHCat * 0.5f) - 4.0f;
+                    drawTextureScaled(catSettingsIcon, iconX, iconY, iconHCat, 0xFFFFFFFF);
+                }
+            } else if (catFolderIcon && catFolderIcon->data && catFolderIcon->height > 0) {
+                float iconW = (float)catFolderIcon->width * (iconHCat / (float)catFolderIcon->height);
+                float iconX = textLeftX - iconGap - iconW + 5.0f;
+                float iconY = centerY - (iconHCat * 0.5f) - 4.0f;
+                drawTextureScaled(catFolderIcon, iconX, iconY, iconHCat, disabled ? 0x66FFFFFF : 0xFFFFFFFF);
+                // Overlay C
+                const float cX = (float)(int)(iconX + (iconW * 0.25f) - 4.0f + 0.5f);
+                const float cY = (float)(int)(iconY + 13.0f + 0.5f);
+                drawTextStyled(cX, cY, "C",
+                               0.5f, disabled ? COLOR_GRAY : COLOR_BLACK, 0, INTRAFONT_ALIGN_LEFT, false);
+            }
+
+            drawTextStyled(textLeftX, baseline, label.c_str(),
+                           scale, textCol, shadowCol, INTRAFONT_ALIGN_LEFT, false);
+            if (label.find('_') != std::string::npos) {
+                const float underscoreW = measureTextWidth(scale, "_");
+                const float underlineY = baseline + 2.0f;
+                std::string prefix;
+                prefix.reserve(label.size());
+                for (size_t ci = 0; ci < label.size(); ++ci) {
+                    if (label[ci] == '_') {
+                        float prefixW = measureTextWidth(scale, prefix.c_str());
+                        float ux = textLeftX + prefixW;
+                        int lineW = (int)(underscoreW + 1.0f);
+                        if (lineW < 1) lineW = 1;
+                        drawRect((int)(ux), (int)(underlineY - 1.0f), lineW, 1, textCol);
+                    }
+                    prefix.push_back(label[ci]);
+                }
+            }
+
+            if (isSettingsRow && rowIndex == 0) {
+                const int lineY = (int)(top + rowH + 0.0f);
+                const int lineX = (int)(panelX + 20.0f);
+                const int lineW = (int)(panelW - 40.0f);
+                drawHFadeLine(lineX, lineY, lineW, 1, 0xA0, 20, 0x00C0C0C0);
+            }
+        }
+
+        if (rowCount > visibleRows) {
+            const float trackX = panelX + panelW - 6.0f;
+            const float trackY = top;
+            const float trackH = rowH * visibleRows;
+            drawRect((int)trackX, (int)trackY, 2, (int)trackH, 0x40000000);
+            float thumbH = trackH * ((float)visibleRows / (float)rowCount);
+            if (thumbH < 6.0f) thumbH = 6.0f;
+            const float t = (maxScroll > 0) ? ((float)scrollOffset / (float)maxScroll) : 0.0f;
+            const float thumbY = trackY + t * (trackH - thumbH);
+            drawRect((int)trackX, (int)thumbY, 2, (int)thumbH, 0xFFBBBBBB);
+        }
+    }
+
+    void drawGclSettingsMenu() {
+        if (entries.empty()) return;
+
+        const float panelX = 5.0f;
+        const float panelY = 22.0f;
+        const float panelW = 280.0f;
+        const float panelH = 226.0f;
+        drawRect((int)panelX, (int)panelY, (int)panelW, (int)panelH, COLOR_BANNER);
+
+        const float ctrlX = 290.0f;
+        const float ctrlY = 22.0f;
+        const float ctrlW = 185.0f;
+        const float ctrlH = 90.0f;
+        drawRect((int)ctrlX, (int)ctrlY, (int)ctrlW, (int)ctrlH, COLOR_BANNER);
+
+        const unsigned keyTextCol = 0xFFBBBBBB;
+        auto drawKeyRowLeft = [&](float baseX, float& y, Texture* icon, const char* label,
+                                  bool bumpRight, unsigned textCol){
+            float iconH = 15.0f;
+            if (icon == startIconTexture || icon == selectIconTexture) iconH = 18.0f;
+            float iconW = 0.0f;
+            if (icon && icon->data && icon->height > 0) {
+                iconW = (float)icon->width * (iconH / (float)icon->height);
+            }
+            const float gap = (iconW > 0.0f) ? (6.0f + (bumpRight ? 4.0f : 0.0f)) : 0.0f;
+            float x = baseX + (bumpRight ? 6.0f : 0.0f);
+            if (bumpRight) x += 4.0f;
+            if (icon && icon->data && icon->height > 0) {
+                drawTextureScaled(icon, x, y - 10.0f, iconH, 0xFFFFFFFF);
+                x += iconW + gap;
+            }
+            const float labelPad = bumpRight ? 6.0f : 0.0f;
+            drawTextStyled(x + labelPad, y + 2.0f, label, 0.7f, textCol, 0, INTRAFONT_ALIGN_LEFT, false);
+            y += 20.0f;
+        };
+
+        float keyY = ctrlY + 17.0f;
+        const float keyX = ctrlX + 5.0f;
+        drawKeyRowLeft(keyX, keyY, okIconTexture, "Select", true, keyTextCol);
+        drawKeyRowLeft(keyX, keyY, circleIconTexture, "Back", true, keyTextCol);
+
+        const int rowCount = (int)entries.size();
+        const float top = panelY + 4.0f + CAT_LIST_OFFSET_Y;
+        const float rowH = CAT_ROW_H + 3.0f;
+        const int visibleRows = gclSettingsVisibleRows();
+        int maxScroll = rowCount - visibleRows;
+        if (maxScroll < 0) maxScroll = 0;
+        if (scrollOffset > maxScroll) scrollOffset = maxScroll;
+        if (scrollOffset < 0) scrollOffset = 0;
+        const int startRow = scrollOffset;
+        const int endRow = std::min(rowCount, startRow + visibleRows);
+        const float iconGap = 10.0f;
+
+        for (int i = startRow; i < endRow; ++i) {
+            const char* name = entries[i].d_name;
+            const bool sel = (i == selectedIndex);
+            const bool disabled = (i < (int)rowFlags.size() && (rowFlags[i] & ROW_DISABLED));
+
+            unsigned baseCol = disabled ? COLOR_GRAY : COLOR_WHITE;
+            unsigned textCol = sel ? COLOR_BLACK : baseCol;
+            unsigned shadowCol = sel ? COLOR_WHITE : 0x40000000;
+
+            const int rowIndex = i - startRow;
+            const float centerY = top + rowH * (rowIndex + 0.5f);
+            const float scale = 0.57f;
+            const float lineH = 16.0f * scale;
+            const float baseline = centerY + (lineH * 0.25f) - 2.0f;
+            const float textLeftX = panelX + 32.0f;
+            const float iconH = 15.0f;
+
+            const bool isBlacklistRow = (!strncasecmp(name, "Blacklist:", 10));
+            Texture* icon = catSettingsIcon;
+            if (isBlacklistRow) {
+                if (blacklistIcon) icon = blacklistIcon;
+            }
+            if (icon && icon->data && icon->height > 0) {
+                float iconW = (float)icon->width * (iconH / (float)icon->height);
+                float iconX = textLeftX - iconGap - iconW + 3.0f;
+                if (isBlacklistRow) iconX -= 2.0f;
+                float iconY = centerY - (iconH * 0.5f) - 4.0f;
+                drawTextureScaled(icon, iconX, iconY, iconH, disabled ? 0x66FFFFFF : 0xFFFFFFFF);
+            }
+
+            const char* colon = strchr(name, ':');
+            if (colon) {
+                std::string left(name, (size_t)(colon - name + 1));
+                std::string right(colon + 1);
+                const unsigned valueCol = disabled ? COLOR_GRAY : COLOR_WHITE;
+                drawTextStyled(textLeftX, baseline, left.c_str(),
+                               scale, textCol, shadowCol, INTRAFONT_ALIGN_LEFT, true);
+                const float leftW = measureTextWidth(scale, left.c_str());
+                drawTextStyled(textLeftX + leftW, baseline, right.c_str(),
+                               scale, valueCol, 0, INTRAFONT_ALIGN_LEFT, false);
+            } else {
+                drawTextStyled(textLeftX, baseline, name, scale, textCol, shadowCol, INTRAFONT_ALIGN_LEFT, false);
+            }
+        }
+
+        if (rowCount > visibleRows) {
+            const float trackX = panelX + panelW - 6.0f;
+            const float trackY = top;
+            const float trackH = rowH * visibleRows;
+            drawRect((int)trackX, (int)trackY, 2, (int)trackH, 0x40000000);
+            float thumbH = trackH * ((float)visibleRows / (float)rowCount);
+            if (thumbH < 6.0f) thumbH = 6.0f;
+            const float t = (maxScroll > 0) ? ((float)scrollOffset / (float)maxScroll) : 0.0f;
+            const float thumbY = trackY + t * (trackH - thumbH);
+            drawRect((int)trackX, (int)thumbY, 2, (int)thumbH, 0xFFBBBBBB);
+        }
+    }
+
     void drawFileList() {
+        if (!showRoots && view == View_GclSettings) {
+            drawGclSettingsMenu();
+            return;
+        }
+        if (!showRoots && view == View_Categories) {
+            drawCategoryMenu();
+            return;
+        }
+        if (showRoots && opPhase != OP_SelectDevice) {
+            drawRootMenu();
+            return;
+        }
         int y = LIST_START_Y;
         int end = std::min((int)entries.size(), scrollOffset+MAX_DISPLAY);
         intraFontActivate(font);
@@ -3249,12 +4317,16 @@ private:
         }
 
 
+        if (view == View_Categories) {
+            return; // custom UI block handles controls in Categories view
+        }
+
         if (showRoots) {
-            drawText(10,y,"X: Select Device",COLOR_WHITE);
-            } else if (view == View_Categories) {
-                if (!catSortMode) {
-                    std::string s = "X: Open Category | L: Rename CAT_ | ";
-                    if (gclCfg.catsort) s += "SELECT: Sort Mode | ";
+            return;
+        } else if (view == View_Categories) {
+            if (!catSortMode) {
+                std::string s = "X: Open Category | L: Rename CAT_ | ";
+                if (gclCfg.catsort) s += "SELECT: Sort Mode | ";
                     s += "O: Back to Devices | △: Label Title/Name";
                     drawText(10, y, s.c_str(), COLOR_WHITE);
                 } else {
@@ -3268,6 +4340,18 @@ private:
                 mode, mode);
             drawText(10,y, buf, COLOR_WHITE);
         }
+    }
+
+    void drawFooter() {
+        const int bannerH = 18;
+        const int bannerY = SCREEN_HEIGHT - bannerH;
+        const float textY = (float)(bannerY + bannerH - 5);
+        sceGuEnable(GU_BLEND);
+        sceGuBlendFunc(GU_ADD, GU_SRC_ALPHA, GU_ONE_MINUS_SRC_ALPHA, 0, 0);
+        drawRect(0, bannerY, SCREEN_WIDTH, bannerH, COLOR_BANNER);
+        drawTextAligned(SCREEN_WIDTH / 2.0f, textY,
+                        "Original by Sakya, Valentin, Suloku. Reimagined by wad11656.",
+                        COLOR_WHITE, INTRAFONT_ALIGN_CENTER);
     }
 
     void drawMessage(const char* m,unsigned c) {
@@ -3473,6 +4557,7 @@ private:
         if (view == View_Categories) {
             if (selectedIndex < 0 || selectedIndex >= (int)entries.size()) return;
             std::string oldDisplay = entries[selectedIndex].d_name;
+            if (!strcasecmp(oldDisplay.c_str(), kCatSettingsLabel) || !strcasecmp(oldDisplay.c_str(), "__GCL_SETTINGS__")) return;
             if (!strcasecmp(oldDisplay.c_str(), "Uncategorized")) return;
 
             std::string typed;
@@ -3536,7 +4621,8 @@ private:
             }
             if (idx >= 0) {
                 selectedIndex = idx;
-                scrollOffset  = (idx >= MAX_DISPLAY) ? (idx - MAX_DISPLAY + 1) : 0;
+                const int visible = categoryVisibleRows();
+                scrollOffset = (idx >= visible) ? (idx - visible + 1) : 0;
             }
 
             drawMessage(anyOk && !anyFail ? "Category renamed" : (anyOk ? "Some renamed" : "Rename failed"),
@@ -3688,6 +4774,7 @@ private:
         drawHeader();
         drawFileList();
         drawControls();
+        drawFooter();
 
         ensureSelectionIcon();
         drawSelectedIconLowerRight();
@@ -3704,7 +4791,9 @@ private:
         if (gUsbBox) {
             if (!gUsbBox->update()) {
                 UsbDeactivate();
+                UsbStopStacked();
                 gUsbActive = false;
+                gUsbShownConnected = false;
                 delete gUsbBox; gUsbBox = nullptr;
                 inputWaitRelease = true;
             }
@@ -3793,9 +4882,20 @@ private:
         return sceIoGetstat(p.c_str(), &out) >= 0;
     }
 
+    void maybeRenderPopulating() {
+        if (!scanAnimActive || !msgBox || gPopAnimFrames.empty()) return;
+        unsigned long long now = (unsigned long long)sceKernelGetSystemTimeWide();
+        if (scanAnimNextUs == 0 || now >= scanAnimNextUs) {
+            renderOneFrame();
+            unsigned long long delay = gPopAnimMinDelayUs ? gPopAnimMinDelayUs : 100000ULL;
+            scanAnimNextUs = now + delay;
+        }
+    }
+
     void scanIsoRootDir(const std::string& base){
         if (!dirExists(base)) return;
         forEachEntry(base, [&](const SceIoDirent &e){
+            maybeRenderPopulating();
             std::string name = e.d_name;
             if (FIO_S_ISDIR(e.d_stat.st_mode)) {
                 if (isBlacklistedCategoryFolder("ISO/", name, base)) return;
@@ -3806,6 +4906,7 @@ private:
 
                 std::string catDir = base + name;
                 forEachEntry(catDir, [&](const SceIoDirent &ee){
+                    maybeRenderPopulating();
                     if (!FIO_S_ISDIR(ee.d_stat.st_mode)){
                         std::string fn = ee.d_name;
                         if (isIsoLike(fn)){
@@ -3871,10 +4972,11 @@ private:
     void scanGameRootDir(const std::string& base){
         if (!dirExists(base)) return;
         forEachEntry(base, [&](const SceIoDirent &e){
+            maybeRenderPopulating();
             if (!FIO_S_ISDIR(e.d_stat.st_mode)) return;
             std::string name = e.d_name;
             std::string baseName = stripCategoryPrefixes(name);
-            bool isBlacklisted = isBlacklistedBaseNameFor(currentDevice, baseName);
+            bool isBlacklisted = isBlacklistedBaseNameFor(base, baseName);
             if (isBlacklisted && strcasecmp(name.c_str(), baseName.c_str()) != 0) {
                 renameIfExists(base, name, baseName);
                 name = baseName;
@@ -3909,6 +5011,7 @@ private:
 
             std::string catDir = base + name;
             forEachEntry(catDir, [&](const SceIoDirent &sub){
+                maybeRenderPopulating();
                 if (FIO_S_ISDIR(sub.d_stat.st_mode)){
                     std::string title = sub.d_name;
                     std::string folderNoSlash = joinDirFile(catDir, title.c_str());
@@ -4757,9 +5860,99 @@ private:
                 selectedIndex = firstEnabled;
             }
             if (selectedIndex < scrollOffset) scrollOffset = selectedIndex;
-            if (selectedIndex >= scrollOffset + MAX_DISPLAY) scrollOffset = selectedIndex - MAX_DISPLAY + 1;
+            const int visible = gclSettingsVisibleRows();
+            if (selectedIndex >= scrollOffset + visible) scrollOffset = selectedIndex - visible + 1;
         }
         showRoots = false; view = View_GclSettings;
+    }
+
+    void openBlacklistModal(int selectIndex = 0) {
+        optMenuOwnedLabels.clear();
+        gclLoadBlacklistFor(currentDevice);
+        const auto& blNow = gclBlacklistMap[blacklistRootKey(currentDevice)];
+        optMenuOwnedLabels.reserve(blNow.size() + 3);
+        std::vector<OptionItem> items;
+        optMenuOwnedLabels.push_back("Add new...");
+        items.push_back({optMenuOwnedLabels.back().c_str(), false});
+        if (blNow.empty()) {
+            optMenuOwnedLabels.push_back("(No entries)");
+            items.push_back({optMenuOwnedLabels.back().c_str(), true});
+        } else {
+            for (const auto& word : blNow) {
+                optMenuOwnedLabels.push_back(word);
+                items.push_back({optMenuOwnedLabels.back().c_str(), false});
+            }
+        }
+        optMenu = new OptionListMenu("Blacklist", "Folders ending with these strings skip CAT_ prefixes.", items, SCREEN_WIDTH, SCREEN_HEIGHT);
+        gclPending = GCL_SK_Blacklist;
+        if (selectIndex < 0) selectIndex = 0;
+        if (selectIndex >= (int)items.size()) selectIndex = (int)items.size() - 1;
+        optMenu->setSelected(selectIndex);
+        optMenu->setOptionsOffsetAdjust(-3);
+        optMenu->setMinVisibleRows(4);
+        optMenu->setAllowTriangleDelete(true);
+
+        SceCtrlData now{}; sceCtrlReadBufferPositive(&now, 1);
+        optMenu->primeButtons(now.Buttons);
+        inputWaitRelease = true;
+    }
+
+    bool deleteBlacklistAtIndex(int idx) {
+        auto& bl = gclBlacklistMap[blacklistRootKey(currentDevice)];
+        gclLoadBlacklistFor(currentDevice);
+        if (idx < 0 || idx >= (int)bl.size()) return false;
+        std::string removed = bl[idx];
+        gclPendingUnblacklistMap[blacklistRootKey(currentDevice)].push_back(removed);
+        bl.erase(bl.begin() + idx);
+        gclBlacklistDirty = true;
+        return true;
+    }
+
+    void rescanCurrentDeviceAfterBlacklist() {
+        gclLoadBlacklistFor(currentDevice);
+        gclSaveBlacklistFor(currentDevice);
+        gclPendingUnblacklistMap[blacklistRootKey(currentDevice)].clear();
+
+        const std::string root = rootPrefix(currentDevice);
+        if (!root.empty()) {
+            gclSchemeApplied.erase(root);
+            s_catNamingEnforced.erase(root);
+        }
+
+        const char* popText = "Populating...";
+        const float popScale = 1.0f;
+        const int popPadX = 10;
+        const int popPadY = 24;
+        const int popLineH = (int)(24.0f * popScale + 0.5f);
+        const float popTextW = measureTextWidth(popScale, popText);
+        const int popExtraW = 4;
+        const int popPanelW = (int)(popTextW + popPadX * 2 + popExtraW + 0.5f);
+        const int popBottom = 14;
+        const int popPanelH = popPadY + popLineH + popBottom - 24;
+        const int popWrapTweak = 32;
+        const int popForcedPxPerChar = 8;
+        msgBox = new MessageBox(popText, nullptr, SCREEN_WIDTH, SCREEN_HEIGHT,
+                                popScale, 0, "", popPadX, popPadY, popWrapTweak, popForcedPxPerChar,
+                                popPanelW, popPanelH);
+        renderOneFrame();
+        renderOneFrame();  // Double render to clear both buffers and prevent text artifacting
+
+        scanDevice(currentDevice);
+        {
+            std::string key = rootPrefix(currentDevice);
+            snapshotCurrentScan(deviceCache[key].snap);
+            deviceCache[key].dirty = false;
+        }
+
+        freeSelectionIcon();
+        if (iconCarryTex) {
+            texFree(iconCarryTex);
+            iconCarryTex = nullptr;
+            iconCarryForPath.clear();
+        }
+        noIconPaths.clear();
+
+        delete msgBox; msgBox = nullptr;
     }
 
 
@@ -4794,7 +5987,7 @@ private:
         if (idx == 0) {
             // Category mode
             std::vector<OptionItem> items = { {"Multi MS", false}, {"Contextual menu", false}, {"Folders", false} };
-            optMenu = new OptionListMenu("Category mode", "Selects the display mode for the Games/Homebrew.", items, SCREEN_WIDTH, SCREEN_HEIGHT);
+            optMenu = new OptionListMenu("Category mode", "Choose how you want your categories to be presented in the XMB.", items, SCREEN_WIDTH, SCREEN_HEIGHT);
             gclPending = GCL_SK_Mode;
             optMenu->setSelected((int)gclCfg.mode);
 
@@ -4807,7 +6000,7 @@ private:
             std::vector<OptionItem> items = {
                 {"None", false}, {"Use CAT prefix", false}
             };
-            optMenu = new OptionListMenu("Category prefix", "Use the \"CAT_\" prefix to recognize the categories.", items, SCREEN_WIDTH, SCREEN_HEIGHT);
+            optMenu = new OptionListMenu("Category prefix", "Require the \"CAT_\" prefix on folders meant to act as categories.", items, SCREEN_WIDTH, SCREEN_HEIGHT);
             gclPending = GCL_SK_Prefix;
             optMenu->setSelected((int)gclCfg.prefix);
 
@@ -4820,9 +6013,11 @@ private:
             std::vector<OptionItem> items = {
                 {"No", false}, {"Only Memory Stick", false}, {"Only Internal Storage", !go}, {"Both", !go}
             };
-            optMenu = new OptionListMenu("Show uncategorized", "Allows hiding the uncategorized content.", items, SCREEN_WIDTH, SCREEN_HEIGHT);
+            optMenu = new OptionListMenu("Show uncategorized", "Enable the \"Uncategorized\" category for games not placed in a category subfolder.", items, SCREEN_WIDTH, SCREEN_HEIGHT);
             gclPending = GCL_SK_Uncat;
             optMenu->setSelected((int)gclCfg.uncategorized);
+            optMenu->setOptionsOffsetAdjust(-3);
+            optMenu->setMinVisibleRows(4);
 
             // NEW: Prime & debounce so held X/O won't auto-activate the choice
             SceCtrlData now{}; sceCtrlReadBufferPositive(&now, 1);
@@ -4831,7 +6026,7 @@ private:
         } else if (idx == 3) {
             // Sort categories
             std::vector<OptionItem> items = { {"No", false}, {"Yes", false} };
-            optMenu = new OptionListMenu("Sort categories", "Allows sorting categories using CAT_XX or XXhomebrew.", items, SCREEN_WIDTH, SCREEN_HEIGHT);
+            optMenu = new OptionListMenu("Sort categories", "Sort categories by using a \"##\" prefix. E.g.: \"01MyCategory\", \"CAT_02MyCategory\"", items, SCREEN_WIDTH, SCREEN_HEIGHT);
             gclPending = GCL_SK_Sort;
             optMenu->setSelected((int)gclCfg.catsort);
 
@@ -4840,29 +6035,8 @@ private:
             optMenu->primeButtons(now.Buttons);
             inputWaitRelease = true;
         } else if (idx == 4) {
-            optMenuOwnedLabels.clear();
-            gclLoadBlacklistFor(currentDevice);
-            const auto& blNow = gclBlacklistMap[blacklistRootKey(currentDevice)];
-            optMenuOwnedLabels.reserve(blNow.size() + 3);
-            std::vector<OptionItem> items;
-            optMenuOwnedLabels.push_back("Add new...");
-            items.push_back({optMenuOwnedLabels.back().c_str(), false});
-            if (blNow.empty()) {
-                optMenuOwnedLabels.push_back("(No entries)");
-                items.push_back({optMenuOwnedLabels.back().c_str(), true});
-            } else {
-                for (const auto& word : blNow) {
-                    optMenuOwnedLabels.push_back(word);
-                    items.push_back({optMenuOwnedLabels.back().c_str(), false});
-                }
-            }
-            optMenu = new OptionListMenu("Blacklist", "Folders ending with these strings skip CAT_ prefixes.", items, SCREEN_WIDTH, SCREEN_HEIGHT);
-            gclPending = GCL_SK_Blacklist;
-            optMenu->setSelected(0);
-
-            SceCtrlData now{}; sceCtrlReadBufferPositive(&now, 1);
-            optMenu->primeButtons(now.Buttons);
-            inputWaitRelease = true;
+            gclBlacklistDirty = false;
+            openBlacklistModal(0);
         }
     }
 
@@ -4919,40 +6093,27 @@ private:
         int preselect = -1;
         const uint64_t HEADROOM = (4ull << 20); // keep ~4 MiB headroom
 
-        // Add synthetic rows only when NOT picking a device (Move/Copy)
-        // buildRootRows()
-        if (opPhase != OP_SelectDevice) {
-            // Make sure toggle state is current
-            gclLoadConfig();
-            gclComputeInitial();
-
-            // Master toggles on the root/device screen
-            // Master toggle (single picker) on the root/device screen
-            {
-                SceIoDirent t{}; t.d_stat.st_mode = FIO_S_IFDIR;
-                const char* state = (!gclArkOn && !gclProOn) ? "Off" : (gclArkOn ? "ARK-4" : "PRO/ME");
-                std::string l = std::string("Game Categories Lite: ") + state;
-                strncpy(t.d_name, l.c_str(), sizeof(t.d_name)-1);
-                entries.push_back(t);
-                entryPaths.emplace_back("");
-                entryKinds.push_back(GameItem::ISO_FILE);
-                rowFlags.push_back(0); rowFreeBytes.push_back(0); rowReason.push_back(RD_NONE); rowNeedBytes.push_back(0);
-            }
-
-
-            // USB Mode (unchanged)
-            {
-                SceIoDirent ue{}; strncpy(ue.d_name, "__USB_MODE__", sizeof(ue.d_name) - 1);
-                ue.d_stat.st_mode = FIO_S_IFDIR;
-                entries.push_back(ue);
-                entryPaths.emplace_back("");
-                entryKinds.push_back(GameItem::ISO_FILE);
-                rowFlags.push_back(0); rowFreeBytes.push_back(0); rowReason.push_back(RD_NONE); rowNeedBytes.push_back(0);
-            }
+        bool hasMs = false, hasEf = false;
+        for (auto &r : roots) {
+            if (r == "ms0:/") hasMs = true;
+            if (r == "ef0:/") hasEf = true;
         }
 
+        if (opPhase != OP_SelectDevice) {
+            gclLoadConfig();
+            gclComputeInitial();
+        }
 
-        for (auto &r : roots){
+        auto addSimpleRow = [&](const char* name){
+            SceIoDirent e{}; strncpy(e.d_name, name, sizeof(e.d_name)-1);
+            e.d_stat.st_mode = FIO_S_IFDIR;
+            entries.push_back(e);
+            entryPaths.emplace_back("");
+            entryKinds.push_back(GameItem::ISO_FILE);
+            rowFlags.push_back(0); rowFreeBytes.push_back(0); rowReason.push_back(RD_NONE); rowNeedBytes.push_back(0);
+        };
+
+        auto addDeviceRow = [&](const std::string& r, bool present){
             SceIoDirent e{}; strncpy(e.d_name, r.c_str(), sizeof(e.d_name)-1);
             e.d_stat.st_mode = FIO_S_IFDIR;
             entries.push_back(e);
@@ -4963,32 +6124,35 @@ private:
             RowDisableReason reason = RD_NONE;
             uint64_t needB = 0, freeB = 0;
 
-            needB = 0;
-            // Existing rule: running from ef0 → ms0 disabled
-            if (runningFromEf0 && r == "ms0:/") {
+            if (!present) {
                 flags |= ROW_DISABLED;
-                reason = RD_RUNNING_FROM_EF0;
-            }
+            } else {
+                // Existing rule: running from ef0 → ms0 disabled
+                if (runningFromEf0 && r == "ms0:/") {
+                    flags |= ROW_DISABLED;
+                    reason = RD_RUNNING_FROM_EF0;
+                }
 
-            // NEW: don't probe or show yellow text for same-device MOVE row
-            const bool sameDeviceMoveRow =
-                (opPhase == OP_SelectDevice) &&
-                (actionMode == AM_Move) &&
-                !preOpDevice.empty() &&
-                (r == preOpDevice);
+                // NEW: don't probe or show yellow text for same-device MOVE row
+                const bool sameDeviceMoveRow =
+                    (opPhase == OP_SelectDevice) &&
+                    (actionMode == AM_Move) &&
+                    !preOpDevice.empty() &&
+                    (r == preOpDevice);
 
-            // For other rows (or Copy), compute free/need and possibly disable
-            if (!sameDeviceMoveRow &&
-                opPhase == OP_SelectDevice &&
-                (actionMode == AM_Move || actionMode == AM_Copy)) {
-                needB = bytesNeededForOp(opSrcPaths, opSrcKinds, r, /*isCopy=*/(actionMode == AM_Copy));
-                if (getFreeBytesCMF(r.c_str(), freeB)) {
-                    if (needB > 0 && freeB + HEADROOM < needB) {
-                        flags |= ROW_DISABLED;
-                        reason = RD_NO_SPACE;
+                // For other rows (or Copy), compute free/need and possibly disable
+                if (!sameDeviceMoveRow &&
+                    opPhase == OP_SelectDevice &&
+                    (actionMode == AM_Move || actionMode == AM_Copy)) {
+                    needB = bytesNeededForOp(opSrcPaths, opSrcKinds, r, /*isCopy=*/(actionMode == AM_Copy));
+                    if (getFreeBytesCMF(r.c_str(), freeB)) {
+                        if (needB > 0 && freeB + HEADROOM < needB) {
+                            flags |= ROW_DISABLED;
+                            reason = RD_NO_SPACE;
+                        }
+                    } else {
+                        freeB = 0; // unknown; UI will say "probing"
                     }
-                } else {
-                    freeB = 0; // unknown; UI will say "probing"
                 }
             }
 
@@ -4997,7 +6161,17 @@ private:
             rowReason.push_back(reason);
             rowNeedBytes.push_back(needB);
 
-            if (r == currentDevice) preselect = (int)entries.size() - 1;
+            if (present && r == currentDevice) preselect = (int)entries.size() - 1;
+        };
+
+        if (opPhase != OP_SelectDevice) {
+            addDeviceRow("ms0:/", hasMs);
+            addDeviceRow("ef0:/", hasEf);
+            addSimpleRow("__USB_MODE__");
+            addSimpleRow("__GCL_TOGGLE__");
+        } else {
+            if (hasMs) addDeviceRow("ms0:/", true);
+            if (hasEf) addDeviceRow("ef0:/", true);
         }
 
         showRoots = true; moving = false;
@@ -5008,6 +6182,19 @@ private:
         } else {
             for (int i = 0; i < (int)entries.size(); ++i)
                 if ((rowFlags[i] & ROW_DISABLED) == 0) { selectedIndex = i; break; }
+        }
+
+        if (rootKeepGclSelection) {
+            for (int i = 0; i < (int)entries.size(); ++i) {
+                if (!strcmp(entries[i].d_name, "__GCL_TOGGLE__")) {
+                    selectedIndex = i;
+                    if (selectedIndex < scrollOffset) scrollOffset = selectedIndex;
+                    if (selectedIndex >= scrollOffset + MAX_DISPLAY)
+                        scrollOffset = selectedIndex - MAX_DISPLAY + 1;
+                    break;
+                }
+            }
+            rootKeepGclSelection = false;
         }
     }
 
@@ -5020,6 +6207,9 @@ private:
 
     void buildCategoryRows(){
         clearUI(); moving = false;
+        catSortMode = false;
+        catPickActive = false;
+        catPickIndex = -1;
 
         // Enforce on-disk names to match current settings only when needed (run-once per root until settings change).
         {
@@ -5046,7 +6236,7 @@ private:
 
         // Add an entry to open the plugin settings here
         {
-            SceIoDirent z{}; strncpy(z.d_name, "Category Settings", sizeof(z.d_name)-1);
+            SceIoDirent z{}; strncpy(z.d_name, kCatSettingsLabel, sizeof(z.d_name)-1);
             z.d_stat.st_mode = FIO_S_IFDIR;
             entries.push_back(z);
         }
@@ -5065,7 +6255,10 @@ private:
 
         // Default to the settings row if nothing specific is selected
         selectedIndex = (preselect >= 0) ? preselect : 0;
-        scrollOffset  = (selectedIndex >= MAX_DISPLAY) ? (selectedIndex - MAX_DISPLAY + 1) : 0;
+        {
+            const int visible = categoryVisibleRows();
+            scrollOffset = (selectedIndex >= visible) ? (selectedIndex - visible + 1) : 0;
+        }
     }
 
 
@@ -5134,8 +6327,11 @@ private:
 
         // Clamp scroll to show the selected row
         if (selectedIndex < scrollOffset) scrollOffset = selectedIndex;
-        if (selectedIndex >= scrollOffset + MAX_DISPLAY)
-            scrollOffset = selectedIndex - (MAX_DISPLAY - 1);
+        {
+            const int visible = categoryVisibleRows();
+            if (selectedIndex >= scrollOffset + visible)
+                scrollOffset = selectedIndex - (visible - 1);
+        }
 
 
         // Select the first NON-disabled category
@@ -5151,6 +6347,8 @@ private:
 
     void openDevice(const std::string& dev){
         currentDevice = dev;
+        scanAnimActive = false;
+        scanAnimNextUs = 0;
 
         // Decide based on cache dirtiness AND presence of a real snapshot
         std::string key = rootPrefix(currentDevice);
@@ -5167,14 +6365,42 @@ private:
         const bool needsScan = dc.dirty || !hasSnap;   // first time OR explicitly dirtied
 
         if (needsScan) {
-            msgBox = new MessageBox("Populating...", nullptr, SCREEN_WIDTH, SCREEN_HEIGHT, 1.0f, 0, "", 16, 18, 8, 14);
+            const char* popText = "Populating...";
+            const float popScale = 1.0f;
+            const int popPadX = 10;
+            const int popPadY = 24;
+            const int popLineH = (int)(24.0f * popScale + 0.5f);
+            const float popTextW = measureTextWidth(popScale, popText);
+            const int popExtraW = 4;
+            const int popPanelW = (int)(popTextW + popPadX * 2 + popExtraW + 0.5f);
+            const int popBottom = 14;
+            const int popPanelH = popPadY + popLineH + popBottom - 24;
+            const int popWrapTweak = 32;
+            const int popForcedPxPerChar = 8;
+            msgBox = new MessageBox(popText, nullptr, SCREEN_WIDTH, SCREEN_HEIGHT,
+                                    popScale, 0, "", popPadX, popPadY, popWrapTweak, popForcedPxPerChar,
+                                    popPanelW, popPanelH);
+            if (gEnablePopAnimations && !gPopAnimDirs.empty()) {
+                const std::string* animDir = nextPopAnimDir();
+                if (animDir && ensurePopAnimLoaded(*animDir)) {
+                    msgBox->setAnimation(gPopAnimFrames.data(), gPopAnimFrames.size(), POP_ANIM_TARGET_H);
+                    scanAnimActive = true;
+                }
+            }
             renderOneFrame();
+            renderOneFrame();  // Double render to clear both buffers and prevent text artifacting
+            if (scanAnimActive) {
+                unsigned long long delay = gPopAnimMinDelayUs ? gPopAnimMinDelayUs : 100000ULL;
+                scanAnimNextUs = (unsigned long long)sceKernelGetSystemTimeWide() + delay;
+            }
 
             scanDevice(currentDevice);                  // real, slow scan
             snapshotCurrentScan(dc.snap);               // cache the fresh results
             dc.dirty = false;
 
             moving = false;
+            scanAnimActive = false;
+            scanAnimNextUs = 0;
             delete msgBox; msgBox = nullptr;
         } else {
             // Instant reuse of cached snapshot (no message box)
@@ -5263,7 +6489,21 @@ private:
     // Quick overlay used when backing out of screens to avoid abrupt jumps.
     MessageBox* pushReturningModal(const char* text = "Returning...") {
         if (msgBox) { delete msgBox; msgBox = nullptr; }
-        msgBox = new MessageBox(text, nullptr, SCREEN_WIDTH, SCREEN_HEIGHT, 1.0f, 0, "", 16, 18, 8, 14);
+        const float popScale = 1.0f;
+        const int popPadX = 10;
+        const int popPadY = 24;
+        const int popLineH = (int)(24.0f * popScale + 0.5f);
+        const float popTextW = measureTextWidth(popScale, text);
+        const int popExtraW = 4;
+        int popPanelW = (int)(popTextW + popPadX * 2 + popExtraW + 0.5f);
+        popPanelW -= 6;
+        const int popBottom = 14;
+        const int popPanelH = popPadY + popLineH + popBottom - 24;
+        const int popWrapTweak = 32;
+        const int popForcedPxPerChar = 8;
+        msgBox = new MessageBox(text, nullptr, SCREEN_WIDTH, SCREEN_HEIGHT,
+                                popScale, 0, "", popPadX, popPadY, popWrapTweak, popForcedPxPerChar,
+                                popPanelW, popPanelH);
         renderOneFrame();
         return msgBox;
     }
@@ -6398,6 +7638,27 @@ public:
         if (font) intraFontUnload(font);
         freeSelectionIcon();
         if (placeholderIconTexture) { texFree(placeholderIconTexture); placeholderIconTexture = nullptr; }
+        if (circleIconTexture) { texFree(circleIconTexture); circleIconTexture = nullptr; }
+        if (triangleIconTexture) { texFree(triangleIconTexture); triangleIconTexture = nullptr; }
+        if (selectIconTexture) { texFree(selectIconTexture); selectIconTexture = nullptr; }
+        if (startIconTexture) { texFree(startIconTexture); startIconTexture = nullptr; }
+        if (rootMemIcon) { texFree(rootMemIcon); rootMemIcon = nullptr; }
+        if (rootInternalIcon) { texFree(rootInternalIcon); rootInternalIcon = nullptr; }
+        if (rootUsbIcon) { texFree(rootUsbIcon); rootUsbIcon = nullptr; }
+        if (rootCategoriesIcon) { texFree(rootCategoriesIcon); rootCategoriesIcon = nullptr; }
+        if (rootArk4Icon) { texFree(rootArk4Icon); rootArk4Icon = nullptr; }
+        if (rootProMeIcon) { texFree(rootProMeIcon); rootProMeIcon = nullptr; }
+        if (rootOffBulbIcon) { texFree(rootOffBulbIcon); rootOffBulbIcon = nullptr; }
+        if (catFolderIcon) { texFree(catFolderIcon); catFolderIcon = nullptr; }
+        if (catSettingsIcon) { texFree(catSettingsIcon); catSettingsIcon = nullptr; }
+        if (blacklistIcon) { texFree(blacklistIcon); blacklistIcon = nullptr; }
+        if (lIconTexture) { texFree(lIconTexture); lIconTexture = nullptr; }
+        if (rIconTexture) { texFree(rIconTexture); rIconTexture = nullptr; }
+        if (!gPopAnimFrames.empty()) { freeAnimationFrames(gPopAnimFrames); gPopAnimMinDelayUs = 0; }
+        gPopAnimLoadedDir.clear();
+        gPopAnimDirs.clear();
+        gPopAnimOrder.clear();
+        gPopAnimOrderIndex = 0;
         if (fileMenu) { delete fileMenu; fileMenu = nullptr; }
     }
 
@@ -6430,16 +7691,20 @@ public:
         font = intraFontLoad("flash0:/font/ltn0.pgf", INTRAFONT_CACHE_MED);
         if (!font) pspDebugScreenInit();
 
+        // Prime font cache by rendering dummy text to eliminate artifacting
+        if (font) {
+            sceGuStart(GU_DIRECT, list);
+            intraFontActivate(font);
+            intraFontSetStyle(font, 1.0f, 0x00000000, 0, 0.0f, INTRAFONT_ALIGN_LEFT);
+            intraFontPrint(font, -100.0f, -100.0f, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.,!? ");
+            sceGuFinish();
+            sceGuSync(0, 0);
+        }
+
         sceCtrlSetSamplingCycle(0);
         sceCtrlSetSamplingMode(PSP_CTRL_MODE_ANALOG);
 
-        // Prepare USB bus + mass-storage once at boot
-        sceUsbStart(PSP_USBBUS_DRIVERNAME, 0, 0);
-        sceUsbStart(PSP_USBSTOR_DRIVERNAME, 0, 0);
-
-
-        // Prepare USB drivers (faster activate later)
-        UsbStartStacked();
+        // USB drivers are started on demand when USB Mode is entered.
 
     }
 
@@ -6464,34 +7729,24 @@ public:
             const bool connected = (s & PSP_USB_CONNECTION_ESTABLISHED);
             if (connected != gUsbShownConnected) {
                 if (gUsbBox) { delete gUsbBox; gUsbBox = nullptr; }
+                const char* usbMsg = connected
+                    ? "Connected to PC\nOn PSP Go, sometimes both devices don't mount to the PC immediately. It may take 30sec-1min."
+                    : "Connect to PC...\nOn PSP Go, Bluetooth must be turned off in the System Settings.";
+                const int usbPanelH = 110;
                 gUsbBox = new MessageBox(
-                    connected ? "Connected to PC...\nPress \xE2\x97\xAF to disconnect."
-                            : "Connect to PC...\nPress \xE2\x97\xAF to disconnect.",
-                    nullptr, SCREEN_WIDTH, SCREEN_HEIGHT, 1.0f, 0, "", 16, 18, 8, 14, PSP_CTRL_CIRCLE);
+                    usbMsg,
+                    circleIconTexture, SCREEN_WIDTH, SCREEN_HEIGHT, 1.0f, 15, "Disconnect",
+                    10, 18, 60, 9, 280, usbPanelH, PSP_CTRL_CIRCLE);
+                gUsbBox->setOkAlignLeft(true);
+                gUsbBox->setOkPosition(10, 7);
+                gUsbBox->setOkStyle(0.7f, 0xFFBBBBBB);
+                gUsbBox->setOkTextOffset(-2, -1);
+                gUsbBox->setSubtitleStyle(0.7f, 0xFFBBBBBB);
+                gUsbBox->setSubtitleGapAdjust(-8);
                 gUsbShownConnected = connected;
             }
         }
-
-
-
-        
-// While USB Mode is active, drive the connection and UI
-if (gUsbActive) {
-    int s = sceUsbGetState();
-    if ((s & PSP_USB_CABLE_CONNECTED) && !(s & PSP_USB_ACTIVATED)) {
-        sceUsbActivate(0x1c8);
-    }
-    const bool connected = (s & PSP_USB_CONNECTION_ESTABLISHED);
-    if (connected != gUsbShownConnected) {
-        if (gUsbBox) { delete gUsbBox; gUsbBox = nullptr; }
-        gUsbBox = new MessageBox(
-            connected ? "Connected to PC...\nPress \xE2\x97\xAF to disconnect."
-                      : "Connect to PC...\nPress \xE2\x97\xAF to disconnect.",
-            nullptr, SCREEN_WIDTH, SCREEN_HEIGHT, 1.0f, 0, "", 16, 18, 8, 14);
-        gUsbShownConnected = connected;
-    }
-}
-bool analogUpNow = (pad.Ly <= 30);
+        bool analogUpNow = (pad.Ly <= 30);
         if (analogUpNow && !analogUpHeld) {
             showDebugTimes = !showDebugTimes;
         }
@@ -6613,7 +7868,11 @@ bool analogUpNow = (pad.Ly <= 30);
                     }
                     if (j < (int)entries.size()) {
                         selectedIndex = j;
-                        if (selectedIndex >= scrollOffset + MAX_DISPLAY) scrollOffset = selectedIndex - MAX_DISPLAY + 1;
+                        const int visible = (!showRoots && opPhase == OP_SelectCategory)
+                            ? categoryVisibleRows()
+                            : MAX_DISPLAY;
+                        if (selectedIndex >= scrollOffset + visible)
+                            scrollOffset = selectedIndex - visible + 1;
                     }
                 }
             }
@@ -6740,7 +7999,7 @@ bool analogUpNow = (pad.Ly <= 30);
             FreeSpacePauseNow();
             if (selectedIndex >= 0 && selectedIndex < (int)entries.size()) {
                 std::string nm = entries[selectedIndex].d_name;
-                if (nm == "Category Settings" || nm == "__GCL_SETTINGS__") {
+                if (nm == kCatSettingsLabel || nm == "__GCL_SETTINGS__") {
                     openGclSettingsScreen();
                 } else {
                     openCategory(nm.c_str());
@@ -6753,9 +8012,27 @@ bool analogUpNow = (pad.Ly <= 30);
 
 
 
-        // L trigger: rename
+        // R trigger: toggle Sort mode on Categories; rename elsewhere
         if (pressed & PSP_CTRL_RTRIGGER) {
-            beginRenameSelected();
+            if (!showRoots && view == View_Categories) {
+                if (!gclCfg.catsort) {
+                    msgBox = new MessageBox(
+                        "Sorting not enabled\n"
+                        "To enter Sort mode, select \"Game Categories settings\" at the top of the list, then turn on the \"Sort categories\" option.",
+                        okIconTexture, SCREEN_WIDTH, SCREEN_HEIGHT, 1.0f, 15, "OK",
+                        10, 18, 80, 9, 280, 120, PSP_CTRL_CROSS);
+                    msgBox->setOkAlignLeft(true);
+                    msgBox->setOkPosition(10, 7);
+                    msgBox->setOkStyle(0.7f, 0xFFBBBBBB);
+                    msgBox->setOkTextOffset(-2, -1);
+                    msgBox->setSubtitleStyle(0.7f, 0xFFBBBBBB);
+                    msgBox->setSubtitleGapAdjust(-8);
+                } else {
+                    setCategorySortMode(true);
+                }
+            } else {
+                beginRenameSelected();
+            }
             return;
         }
 
@@ -6773,6 +8050,10 @@ bool analogUpNow = (pad.Ly <= 30);
 
         // START: save
         if (pressed & PSP_CTRL_START) {
+            if (!showRoots && view == View_Categories && catSortMode) {
+                applyCategoryOrderAndPersist();
+                return;
+            }
             if (!showRoots && (view == View_AllFlat || view == View_CategoryContents)) {
                 commitOrderTimestamps();
             }
@@ -6781,62 +8062,40 @@ bool analogUpNow = (pad.Ly <= 30);
 
         // Toggle label mode (Triangle → previously LTRIGGER; keep as-is)
         if (pressed & PSP_CTRL_LTRIGGER) {
-            showTitles = !showTitles;
-            if (!showRoots && (view==View_AllFlat || view==View_CategoryContents))
-                refillRowsFromWorkingPreserveSel();
+            if (!showRoots && view == View_Categories) {
+                if (!gclCfg.catsort) {
+                    msgBox = new MessageBox(
+                        "Sorting not enabled\n"
+                        "To enter Sort mode, select \"Game Categories settings\" at the top of the list, then turn on the \"Sort categories\" option.",
+                        okIconTexture, SCREEN_WIDTH, SCREEN_HEIGHT, 1.0f, 15, "OK",
+                        10, 18, 80, 9, 280, 120, PSP_CTRL_CROSS);
+                    msgBox->setOkAlignLeft(true);
+                    msgBox->setOkPosition(10, 7);
+                    msgBox->setOkStyle(0.7f, 0xFFBBBBBB);
+                    msgBox->setOkTextOffset(-2, -1);
+                    msgBox->setSubtitleStyle(0.7f, 0xFFBBBBBB);
+                    msgBox->setSubtitleGapAdjust(-8);
+                } else {
+                    setCategorySortMode(false);
+                }
+            } else {
+                showTitles = !showTitles;
+                if (!showRoots && (view==View_AllFlat || view==View_CategoryContents))
+                    refillRowsFromWorkingPreserveSel();
+            }
             return;
         }
 
-        // SELECT: Categories → toggle Sort Mode (only if enabled); Content views → A→Z
+        // SELECT: Categories → Rename; Content views → A→Z
         if (pressed & PSP_CTRL_SELECT) {
             if (!showRoots && view == View_Categories) {
-                // If "Sort categories" is OFF, ignore SELECT on Categories
-                if (!gclCfg.catsort) {
-                    return; // setting disabled → do nothing
-                }
-
-                // Toggle Category Sort Mode
-                catSortMode   = !catSortMode;
-                catPickActive = false;
-                catPickIndex  = -1;
-
                 if (!catSortMode) {
-                    // Remember which category (by BASE, ignoring prefixes) was focused
-                    std::string keepBase;
-                    if (selectedIndex >= 0 && selectedIndex < (int)entries.size()) {
-                        const char* disp = entries[selectedIndex].d_name;
-                        // Skip synthetic/locked rows
-                        if (strcasecmp(disp, "Category Settings") != 0 && strcasecmp(disp, "Uncategorized") != 0) {
-                            keepBase = stripCategoryPrefixes(disp);
-                        }
-                    }
-
-                    applyCategoryOrderAndPersist();
-                    buildCategoryRows();
-
-                    // Reselect the same category by BASE and ensure it’s visible
-                    int idx = -1;
-                    if (!keepBase.empty()) {
-                        for (int i = 0; i < (int)entries.size(); ++i) {
-                            if (!strcasecmp(stripCategoryPrefixes(entries[i].d_name).c_str(), keepBase.c_str())) {
-                                idx = i; break;
-                            }
-                        }
-                    }
-                    if (idx < 0) {
-                        // Fallback: clamp to previous index if still valid, else to a safe row
-                        idx = (selectedIndex >= 0 && selectedIndex < (int)entries.size())
-                            ? selectedIndex
-                            : (int)entries.size() - 1;
-                        if (idx < 0) idx = 0;
-                    }
-
-                    selectedIndex = idx;
-                    if (selectedIndex < scrollOffset) scrollOffset = selectedIndex;
-                    const int lastVisible = scrollOffset + MAX_DISPLAY - 1;
-                    if (selectedIndex > lastVisible) scrollOffset = selectedIndex - (MAX_DISPLAY - 1);
+                    if (selectedIndex < 0 || selectedIndex >= (int)entries.size()) return;
+                    const char* nm = entries[selectedIndex].d_name;
+                    if (!strcasecmp(nm, kCatSettingsLabel) || !strcasecmp(nm, "__GCL_SETTINGS__")) return;
+                    beginRenameSelected();
                 }
-                return; // swallow SELECT on Categories
+                return;
             }
 
             // Content views: quick A→Z
@@ -6970,11 +8229,32 @@ bool analogUpNow = (pad.Ly <= 30);
                     }
                 } else {
                     if (view == View_GclSettings) {
+                        if (selectedIndex + 1 < (int)entries.size()) {
+                            const char* cur = entries[selectedIndex].d_name;
+                            if (!strncasecmp(cur, "Sort categories:", 16) && gclCfg.prefix == 0) {
+                                int next = selectedIndex + 1;
+                                if (next < (int)rowFlags.size() && (rowFlags[next] & ROW_DISABLED)) {
+                                    msgBox = new MessageBox(
+                                        "Prefixes not enabled\n"
+                                        "Enable the \"Category prefix\" setting to blacklist certain folders from auto-converting/auto-renaming as category folders.",
+                                        okIconTexture, SCREEN_WIDTH, SCREEN_HEIGHT, 1.0f, 15, "OK",
+                                        10, 18, 80, 9, 280, 120, PSP_CTRL_CROSS);
+                                    msgBox->setOkAlignLeft(true);
+                                    msgBox->setOkPosition(10, 7);
+                                    msgBox->setOkStyle(0.7f, 0xFFBBBBBB);
+                                    msgBox->setOkTextOffset(-2, -1);
+                                    msgBox->setSubtitleStyle(0.7f, 0xFFBBBBBB);
+                                    msgBox->setSubtitleGapAdjust(-8);
+                                    return;
+                                }
+                            }
+                        }
                         int j = selectedIndex + 1;
                         while (j < (int)entries.size() && (rowFlags[j] & ROW_DISABLED)) j++;
                         if (j < (int)entries.size()) {
                             selectedIndex = j;
-                            if (selectedIndex >= scrollOffset + MAX_DISPLAY) scrollOffset = selectedIndex - MAX_DISPLAY + 1;
+                            const int visible = gclSettingsVisibleRows();
+                            if (selectedIndex >= scrollOffset + visible) scrollOffset = selectedIndex - visible + 1;
                         }
                     } else
                     // NEW: while sorting categories and a row is picked, move the picked category instead of just moving selection
@@ -6987,13 +8267,15 @@ bool analogUpNow = (pad.Ly <= 30);
                             std::swap(entries[i], entries[j]);
                             selectedIndex = j;
                             catPickIndex  = j; // keep [MOVE] on the row you're carrying
-                            const int lastVisible = scrollOffset + MAX_DISPLAY - 1;
-                            if (selectedIndex > lastVisible) scrollOffset = selectedIndex - (MAX_DISPLAY - 1);
+                            const int visible = categoryVisibleRows();
+                            const int lastVisible = scrollOffset + visible - 1;
+                            if (selectedIndex > lastVisible) scrollOffset = selectedIndex - (visible - 1);
                         }
                     } else {
                         if (selectedIndex + 1 < (int)entries.size()){
                             selectedIndex++;
-                            if (selectedIndex >= scrollOffset + MAX_DISPLAY) scrollOffset = selectedIndex - MAX_DISPLAY + 1;
+                            const int visible = (!showRoots && view == View_Categories) ? categoryVisibleRows() : MAX_DISPLAY;
+                            if (selectedIndex >= scrollOffset + visible) scrollOffset = selectedIndex - visible + 1;
                         }
                     }
                 }
@@ -7016,7 +8298,7 @@ bool analogUpNow = (pad.Ly <= 30);
 
                 std::string dev = entries[selectedIndex].d_name;
                 // Root-level master toggles
-                if (dev.rfind("Game Categories Lite:", 0) == 0) {
+                if (dev == "__GCL_TOGGLE__") {
                     // Show a 3-option picker: Off / ARK-4 / PRO/ME
                     std::vector<OptionItem> items = {
                         { "Off",   false },
@@ -7024,8 +8306,8 @@ bool analogUpNow = (pad.Ly <= 30);
                         { "PRO/ME",false }
                     };
                     optMenu = new OptionListMenu(
-                        "Game Categories Lite",
-                        "Pick which implementation to use (or turn it off).",
+                        "Game Categories",
+                        "Pick your installed CFW version to activate category folders to organize your games.",
                         items, SCREEN_WIDTH, SCREEN_HEIGHT
                     );
                     // Preselect current state
@@ -7042,7 +8324,26 @@ bool analogUpNow = (pad.Ly <= 30);
                 }
 
 
-                if (dev == "__USB_MODE__") { /* ... */ return; }
+                if (dev == "__USB_MODE__") {
+                    if (!gUsbActive) {
+                        // Start drivers and activate mass storage when entering USB Mode.
+                        UsbStartStacked();
+                        UsbActivate();
+                        gUsbActive = true;
+                        gUsbShownConnected = false;
+                        gUsbBox = new MessageBox(
+                            "Connect to PC...\nOn PSP Go, Bluetooth must be turned off in the System Settings.",
+                            circleIconTexture, SCREEN_WIDTH, SCREEN_HEIGHT, 1.0f, 15, "Disconnect",
+                            10, 18, 60, 9, 280, 110, PSP_CTRL_CIRCLE);
+                        gUsbBox->setOkAlignLeft(true);
+                        gUsbBox->setOkPosition(10, 7);
+                        gUsbBox->setOkStyle(0.7f, 0xFFBBBBBB);
+                        gUsbBox->setOkTextOffset(-2, -1);
+                        gUsbBox->setSubtitleStyle(0.7f, 0xFFBBBBBB);
+                        gUsbBox->setSubtitleGapAdjust(-8);
+                    }
+                    return; // don’t fall through to openDevice()
+                }
 
                 openDevice(dev);
                 return;
@@ -7055,7 +8356,7 @@ bool analogUpNow = (pad.Ly <= 30);
                 std::string nm = entries[selectedIndex].d_name;
 
                 // Block "Category Settings" row
-                if (nm == "__GCL_SETTINGS__") {
+                if (nm == kCatSettingsLabel || nm == "__GCL_SETTINGS__") {
                     openGclSettingsScreen();
                     return;
                 }
@@ -7078,9 +8379,6 @@ bool analogUpNow = (pad.Ly <= 30);
                                 std::swap(entries[catPickIndex], entries[selectedIndex]);
                                 std::swap(entryPaths[catPickIndex], entryPaths[selectedIndex]);
                                 std::swap(entryKinds[catPickIndex], entryKinds[selectedIndex]);
-
-                                // Immediately reflect numbering (visible & on disk) after each drop
-                                applyCategoryOrderAndPersist();
                             }
                             // End pick/drop cycle; stay in sort mode until SELECT
                             catPickActive = false;
@@ -7108,7 +8406,12 @@ bool analogUpNow = (pad.Ly <= 30);
                 // nothing
             } else if (view == View_GclSettings) {
                 MessageBox* retBox = pushReturningModal();
-                patchCategoryCacheFromSettings();
+                if (gclBlacklistDirty) {
+                    rescanCurrentDeviceAfterBlacklist();
+                    gclBlacklistDirty = false;
+                } else {
+                    patchCategoryCacheFromSettings();
+                }
                 buildCategoryRows();      // Back to categories
                 selectedIndex = 0;        // highlight "Category Settings"
                 scrollOffset  = 0;        // ensure it's visible at the top
@@ -7134,8 +8437,9 @@ bool analogUpNow = (pad.Ly <= 30);
 
                     // Ensure visible
                     if (selectedIndex < scrollOffset) scrollOffset = selectedIndex;
-                    const int lastVisible = scrollOffset + MAX_DISPLAY - 1;
-                    if (selectedIndex > lastVisible) scrollOffset = selectedIndex - (MAX_DISPLAY - 1);
+                    const int visible = categoryVisibleRows();
+                    const int lastVisible = scrollOffset + visible - 1;
+                    if (selectedIndex > lastVisible) scrollOffset = selectedIndex - (visible - 1);
                 }
             } else if (view == View_AllFlat) {
                 if (moving) {
@@ -7147,6 +8451,9 @@ bool analogUpNow = (pad.Ly <= 30);
             } else if (view == View_Categories) {
                 if (moving) moving = false;
                 else {
+                    catSortMode = false;
+                    catPickActive = false;
+                    catPickIndex = -1;
                     MessageBox* retBox = pushReturningModal();
                     buildRootRows();
                     popModal(retBox);
@@ -7224,12 +8531,22 @@ bool analogUpNow = (pad.Ly <= 30);
             else if (optMenu) {
                 if (!optMenu->update()) {
                     const int pick = optMenu->choice();   // -1 if canceled
+                    const bool deleteReq = optMenu->deleteRequested();
                     const GclSettingKey pending = gclPending;  // capture BEFORE clearing
                     const bool wasRootPick = rootPickGcl;       // capture BEFORE clearing
                     delete optMenu; optMenu = nullptr;
                     optMenuOwnedLabels.clear();
                     gclPending = GCL_SK_None;
                     if (wasRootPick) rootPickGcl = false;
+
+                if (pending == GCL_SK_Blacklist && pick < 0) {
+                    if (gclBlacklistDirty) {
+                        // leave dirty flag set; will trigger full rescan when exiting settings
+                    }
+                    buildGclSettingsRowsFromState();
+                    inputWaitRelease = true;
+                    continue;
+                    }
 
                     if (pick >= 0) {
                         if (wasRootPick) {
@@ -7256,6 +8573,7 @@ bool analogUpNow = (pad.Ly <= 30);
                                 gclWriteEnableToFile(vsh,     wantPro, /*arkPluginsTxt=*/false);
                                 gclArkOn = wantArk;
                                 gclProOn = wantPro;
+                                rootKeepGclSelection = true;
                                 buildRootRows();   // reflect new state immediately
                             }
                         } else {
@@ -7266,14 +8584,22 @@ bool analogUpNow = (pad.Ly <= 30);
                                 case GCL_SK_Uncat:  gclCfg.uncategorized = (uint32_t)pick; break;
                                 case GCL_SK_Sort:   gclCfg.catsort = (uint32_t)pick; break;
                                 case GCL_SK_Blacklist: {
+                                    if (deleteReq || pick > 0) {
+                                        deleteBlacklistAtIndex(pick - 1);
+                                        openBlacklistModal(pick);
+                                        continue;
+                                    }
+
                                     if (pick == 0) {
                                         std::string typed;
-                                        if (!promptTextOSK("Add blacklist item", "", 64, typed)) break;
+                                        if (!promptTextOSK("Add blacklist item", "", 64, typed)) {
+                                            openBlacklistModal(0);
+                                            continue;
+                                        }
                                         typed = normalizeBlacklistInput(typed);
                                         if (typed.empty()) {
-                                            drawMessage("Name is empty", COLOR_RED);
-                                            sceKernelDelayThread(600*1000);
-                                            break;
+                                            openBlacklistModal(0);
+                                            continue;
                                         }
                                         gclLoadBlacklistFor(currentDevice);
                                         auto& blDup = gclBlacklistMap[blacklistRootKey(currentDevice)];
@@ -7282,30 +8608,17 @@ bool analogUpNow = (pad.Ly <= 30);
                                             if (!strcasecmp(w.c_str(), typed.c_str())) { dup = true; break; }
                                         }
                                         if (dup) {
-                                            drawMessage("Already listed", COLOR_RED);
-                                            sceKernelDelayThread(600*1000);
-                                            break;
+                                            openBlacklistModal(0);
+                                            continue;
                                         }
-            auto& bl = gclBlacklistMap[blacklistRootKey(currentDevice)];
-            gclLoadBlacklistFor(currentDevice);
-            bl.push_back(typed);
-            applyBlacklistChanges();
-            drawMessage("Added to blacklist", COLOR_GREEN);
-            sceKernelDelayThread(600*1000);
-        } else {
-            auto& bl = gclBlacklistMap[blacklistRootKey(currentDevice)];
-            gclLoadBlacklistFor(currentDevice);
-            if (bl.empty()) break;
-            int idx = pick - 1;
-            if (idx >= 0 && idx < (int)bl.size()) {
-                std::string removed = bl[idx];
-                gclPendingUnblacklistMap[blacklistRootKey(currentDevice)].push_back(removed);
-                bl.erase(bl.begin() + idx);
-                applyBlacklistChanges();
-                drawMessage("Removed from blacklist", COLOR_GREEN);
-                sceKernelDelayThread(600*1000);
-            }
-        }
+
+                                        auto& bl = gclBlacklistMap[blacklistRootKey(currentDevice)];
+                                        gclLoadBlacklistFor(currentDevice);
+                                        bl.push_back(typed);
+                                        gclBlacklistDirty = true;
+                                        openBlacklistModal(0);
+                                        continue;
+                                    }
                                     break;
                                 }
                                 default: break;
@@ -7448,7 +8761,8 @@ bool analogUpNow = (pad.Ly <= 30);
                                 }
                                 if (idx >= 0) {
                                     selectedIndex = idx;
-                                    scrollOffset  = (idx >= MAX_DISPLAY) ? (idx - MAX_DISPLAY + 1) : 0;
+                                    const int visible = categoryVisibleRows();
+                                    scrollOffset = (idx >= visible) ? (idx - visible + 1) : 0;
                                 }
                                 drawMessage("Category created", COLOR_GREEN);
                                 sceKernelDelayThread(600*1000);
@@ -7504,6 +8818,7 @@ std::unordered_map<std::string, bool> KernelFileExplorer::gclBlacklistLoadedMap;
 std::unordered_map<std::string, std::vector<std::string>> KernelFileExplorer::gclPendingUnblacklistMap;
 KernelFileExplorer::GclSettingKey KernelFileExplorer::gclPending = KernelFileExplorer::GCL_SK_None;
 bool KernelFileExplorer::rootPickGcl = false;   // ← add this definition
+bool KernelFileExplorer::rootKeepGclSelection = false;
 
 
 // Load & start fs_driver.prx
@@ -7521,15 +8836,69 @@ int main(int argc, char* argv[]) {
     std::string baseDir  = getBaseDir(argv[0]);
     std::string pngPath  = baseDir + "resources/bkg.png";
     std::string crossPath= baseDir + "resources/cross.png";
+    std::string circlePath= baseDir + "resources/circle.png";
+    std::string trianglePath= baseDir + "resources/triangle.png";
+    std::string selectPath  = baseDir + "resources/select.png";   // used for SELECT icon
+    std::string startPath   = baseDir + "resources/start.png";
     std::string icon0Path= baseDir + "resources/icon0.png";
     std::string boxOffPath = baseDir + "resources/unchecked.png";
     std::string boxOnPath  = baseDir + "resources/checked.png";
+    std::string memPath    = baseDir + "resources/memcard_40h.png";
+    std::string intPath    = baseDir + "resources/internal_40h.png";
+    std::string usbPath    = baseDir + "resources/usb_21h.png";
+    std::string catPath    = baseDir + "resources/categories_25h.png";
+    std::string ark4Path   = baseDir + "resources/ark4_small_border_18h.png";
+    std::string proPath    = baseDir + "resources/pro_me_18h.png";
+    std::string offPath    = baseDir + "resources/off_bulb_18h.png";
+    std::string folderPath = baseDir + "resources/folder.png";
+    std::string catSettingsPath = baseDir + "resources/categoriessettings_15h.png";
+    std::string blacklistPath = baseDir + "resources/blacklist.png";
+    std::string lPath      = baseDir + "resources/L.png";
+    std::string rPath      = baseDir + "resources/R.png";
 
     backgroundTexture      = texLoadPNG(pngPath.c_str());
     okIconTexture          = texLoadPNG(crossPath.c_str());
+    circleIconTexture      = texLoadPNG(circlePath.c_str());
+    triangleIconTexture    = texLoadPNG(trianglePath.c_str());
+    selectIconTexture      = texLoadPNG(selectPath.c_str());
+    startIconTexture       = texLoadPNG(startPath.c_str());
     placeholderIconTexture = texLoadPNG(icon0Path.c_str());
     checkTexUnchecked = texLoadPNG(boxOffPath.c_str());
     checkTexChecked   = texLoadPNG(boxOnPath.c_str());
+    rootMemIcon       = texLoadPNG(memPath.c_str());
+    rootInternalIcon  = texLoadPNG(intPath.c_str());
+    rootUsbIcon       = texLoadPNG(usbPath.c_str());
+    rootCategoriesIcon= texLoadPNG(catPath.c_str());
+    rootArk4Icon      = texLoadPNG(ark4Path.c_str());
+    rootProMeIcon     = texLoadPNG(proPath.c_str());
+    rootOffBulbIcon   = texLoadPNG(offPath.c_str());
+    catFolderIcon     = texLoadPNG(folderPath.c_str());
+    catSettingsIcon   = texLoadPNG(catSettingsPath.c_str());
+    blacklistIcon     = texLoadPNG(blacklistPath.c_str());
+    lIconTexture      = texLoadPNG(lPath.c_str());
+    rIconTexture      = texLoadPNG(rPath.c_str());
+
+    if (gEnablePopAnimations) {
+        std::string animRoot = baseDir + "resources/animations";
+        if (dirExists(animRoot)) {
+            bool prefUsed = false;
+            if (POP_ANIM_PREF && POP_ANIM_PREF[0]) {
+                std::string animDir = joinDirFile(animRoot, POP_ANIM_PREF);
+                if (dirExists(animDir)) {
+                    gPopAnimDirs.push_back(animDir);
+                    prefUsed = true;
+                }
+            }
+            if (!prefUsed) {
+                forEachEntry(animRoot, [&](const SceIoDirent& e){
+                    if (FIO_S_ISDIR(e.d_stat.st_mode)) {
+                        gPopAnimDirs.push_back(joinDirFile(animRoot, e.d_name));
+                    }
+                });
+            }
+            if (!gPopAnimDirs.empty()) shufflePopAnimOrder();
+        }
+    }
 
     if (backgroundTexture && backgroundTexture->data) {
         gOskBgColorABGR = computeDominantColorABGRFromTexture(backgroundTexture);

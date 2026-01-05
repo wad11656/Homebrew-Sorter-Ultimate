@@ -5,7 +5,13 @@
 #include <pspctrl.h>
 #include <intraFont.h>
 #include <string>
+#include <cstddef>
 #include "Texture.h"
+
+struct MBAnimFrame {
+    Texture* tex;
+    uint32_t delayMs;
+};
 
 class MessageBox {
     public:
@@ -19,10 +25,18 @@ class MessageBox {
                 int padX = 16, int padY = 26,
                 int wrapTweakPx = 40,
                 int forcedPxPerChar = -1,
+                int panelW = 380, int panelH = 140,
                 unsigned closeButton = PSP_CTRL_CROSS);
 
         void render(intraFont* font);
         bool update();
+        void setAnimation(const MBAnimFrame* frames, size_t count, int targetH);
+        void setOkStyle(float scale, unsigned color);
+        void setOkAlignLeft(bool left);
+        void setOkPosition(int leftPadPx, int bottomPadPx);
+        void setOkTextOffset(int dx, int dy);
+        void setSubtitleStyle(float scale, unsigned color);
+        void setSubtitleGapAdjust(int px);
 
         bool isVisible() const { return _visible; }
         void forceClose() { _visible = false; }
@@ -58,6 +72,25 @@ private:
     uint64_t    _progOffset = 0;
     uint64_t    _progSize   = 1; // never 0 to avoid div-by-zero
     unsigned _closeButton;      // NEW: which button dismisses the box
+    float _okScale = -1.0f;
+    unsigned _okColor = 0xFFFFFFFF;
+    bool _okAlignLeft = false;
+    int _okLeftPad = -1;
+    int _okBottomPad = 14;
+    int _okTextOffsetX = 0;
+    int _okTextOffsetY = 0;
+
+    float _subtitleScale = -1.0f;
+    unsigned _subtitleColor = 0xFFFFFFFF;
+    bool _useSubtitleStyle = false;
+    int _subtitleGapAdjust = 0;
+
+    // ---- Animation state ----
+    const MBAnimFrame* _animFrames = nullptr;
+    size_t _animCount = 0;
+    size_t _animIndex = 0;
+    unsigned long long _animNextUs = 0;
+    int _animTargetH = 0;
 
 
 };
