@@ -1,0 +1,21 @@
+Modo Categoría
+Selecciona el tipo de vista para los Juegos/Homebrew.
+Múltiples MS
+Menú Contextual
+Carpetas
+Prefijo Categorías
+Usa el prefijo "_CAT" para reconocer las categorias.
+Ninguno
+Usar prefijo CAT
+Mostrar sin categoría
+Permite ocultar el contenido sin categorizar.
+No
+Solo Memory Stick™
+Solo memoria interna
+Ambos
+Ordenar categorias
+Permite organizar categorias usando CAT_XX o XXhomebrew.
+No
+Si
+Sin categorizar
+Por categorias

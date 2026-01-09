@@ -293,6 +293,7 @@ static Texture* backgroundTexture = nullptr;
 static Texture* okIconTexture = nullptr;
 static Texture* circleIconTexture = nullptr;
 static Texture* triangleIconTexture = nullptr;
+static Texture* squareIconTexture = nullptr;
 static Texture* selectIconTexture = nullptr;
 static Texture* startIconTexture = nullptr;
 static Texture* placeholderIconTexture = nullptr;
@@ -309,6 +310,7 @@ static Texture* rootProMeIcon = nullptr;
 static Texture* rootOffBulbIcon = nullptr;
 // Categories/menu icons
 static Texture* catFolderIcon = nullptr;
+static Texture* catFolderIconGray = nullptr;
 static Texture* catSettingsIcon = nullptr;
 static Texture* blacklistIcon = nullptr;
 static Texture* lIconTexture = nullptr;
@@ -2007,6 +2009,8 @@ private:
     static std::unordered_map<std::string, std::vector<std::string>> gclBlacklistMap;        // key: root ("ms0:/", "ef0:/")
     static std::unordered_map<std::string, bool> gclBlacklistLoadedMap;
     static std::unordered_map<std::string, std::vector<std::string>> gclPendingUnblacklistMap;
+    static std::unordered_map<std::string, std::vector<std::string>> gclFilterMap;           // key: filter root ("ms0:/", "ef0:/")
+    static std::unordered_map<std::string, bool> gclFilterLoadedMap;
     static inline bool blacklistActive() { return gclCfg.prefix != 0; }
 
     // ---- Lightweight cache patch: update in-memory categories without rescanning disk ----
@@ -2275,10 +2279,10 @@ private:
     // Strip CAT_, XX, or CAT_XX from a display/category folder name to its base.
     static std::string stripCategoryPrefixes(const std::string& in){
         std::string s = in;
-        if (startsWithCAT(s.c_str())) {
+        if (gclCfg.prefix && startsWithCAT(s.c_str())) {
             s.erase(0, 4); // remove "CAT_"
-            if (hasTwoDigitsAfter(s.c_str())) s.erase(0, 2);
-        } else if (hasTwoDigitsAfter(s.c_str())) {
+        }
+        if (gclCfg.catsort && hasTwoDigitsAfter(s.c_str())) {
             s.erase(0, 2);
         }
         return s;
@@ -2801,7 +2805,7 @@ private:
         if (!showRoots && view == View_Categories) {
             for (int i = 0; i < (int)entries.size(); ++i) {
                 const char* nm = entries[i].d_name;
-            if (!strcasecmp(nm, kCatSettingsLabel) || !strcasecmp(nm, "Uncategorized")) continue;
+                if (!strcasecmp(nm, kCatSettingsLabel) || !strcasecmp(nm, "Uncategorized")) continue;
                 std::string base = stripCategoryPrefixes(nm);
                 auto it = baseToWant.find(base);
                 if (it != baseToWant.end()) {
@@ -2810,6 +2814,8 @@ private:
                 }
             }
         }
+
+        refreshGclFilterFile();
     }
 
 
@@ -3694,7 +3700,7 @@ private:
         const float ctrlX = 290.0f;
         const float ctrlY = 22.0f;
         const float ctrlW = 185.0f;
-        const float ctrlH = 90.0f;
+        const float ctrlH = 95.0f;
         drawRect((int)ctrlX, (int)ctrlY, (int)ctrlW, (int)ctrlH, COLOR_BANNER);
         const unsigned keyTextCol = 0xFFBBBBBB;
         auto drawKeyRowLeft = [&](float baseX, float& y, Texture* icon, const char* label,
@@ -3714,10 +3720,10 @@ private:
             }
             const float labelPad = bumpRight ? 6.0f : 0.0f;
             drawTextStyled(x + labelPad, y + 2.0f, label, 0.7f, textCol, 0, INTRAFONT_ALIGN_LEFT, false);
-            y += 20.0f;
+            y += 17.0f;
         };
 
-        float keyY = ctrlY + 17.0f;
+        float keyY = ctrlY + 16.0f;
         const float keyX = ctrlX + 5.0f;
         drawKeyRowLeft(keyX, keyY, okIconTexture, "Select", true, keyTextCol);
 
@@ -3866,7 +3872,7 @@ private:
         const float ctrlX = 290.0f;
         const float ctrlY = 22.0f;
         const float ctrlW = 185.0f;
-        const float ctrlH = 90.0f;
+        const float ctrlH = 95.0f;
         drawRect((int)ctrlX, (int)ctrlY, (int)ctrlW, (int)ctrlH, COLOR_BANNER);
 
         // Mode switcher block (L/R)
@@ -3920,19 +3926,21 @@ private:
             }
             const float labelPad = bumpRight ? 6.0f : 0.0f;
             drawTextStyled(x + labelPad, y + 2.0f, label, 0.7f, textCol, 0, INTRAFONT_ALIGN_LEFT, false);
-            y += 20.0f;
+            y += 17.0f;
         };
 
-        float keyY = ctrlY + 17.0f;
+        float keyY = ctrlY + 16.0f;
         const float keyX = ctrlX + 5.0f;
         if (!catSortMode) {
             drawKeyRowLeft(keyX, keyY, okIconTexture, "Select", true, keyTextCol);
             drawKeyRowLeft(keyX, keyY, selectIconTexture, "Rename", false, keyTextCol);
             drawKeyRowLeft(keyX, keyY, triangleIconTexture, "Add/Del. category", true, keyTextCol);
+            drawKeyRowLeft(keyX, keyY, squareIconTexture, "(Un)Hide in XMB", true, keyTextCol);
             drawKeyRowLeft(keyX, keyY, circleIconTexture, "Back", true, keyTextCol);
         } else {
             drawKeyRowLeft(keyX, keyY, okIconTexture, "Pick up/Drop", true, keyTextCol);
             drawKeyRowLeft(keyX, keyY, startIconTexture, "Save order", false, saveTextCol);
+            drawKeyRowLeft(keyX, keyY, squareIconTexture, "(Un)Hide in XMB", true, keyTextCol);
             drawKeyRowLeft(keyX, keyY, circleIconTexture, "Back", true, keyTextCol);
         }
 
@@ -3989,16 +3997,21 @@ private:
                     float iconY = centerY - (iconHCat * 0.5f) - 4.0f;
                     drawTextureScaled(catSettingsIcon, iconX, iconY, iconHCat, 0xFFFFFFFF);
                 }
-            } else if (catFolderIcon && catFolderIcon->data && catFolderIcon->height > 0) {
-                float iconW = (float)catFolderIcon->width * (iconHCat / (float)catFolderIcon->height);
-                float iconX = textLeftX - iconGap - iconW + 5.0f;
-                float iconY = centerY - (iconHCat * 0.5f) - 4.0f;
-                drawTextureScaled(catFolderIcon, iconX, iconY, iconHCat, disabled ? 0x66FFFFFF : 0xFFFFFFFF);
-                // Overlay C
-                const float cX = (float)(int)(iconX + (iconW * 0.25f) - 4.0f + 0.5f);
-                const float cY = (float)(int)(iconY + 13.0f + 0.5f);
-                drawTextStyled(cX, cY, "C",
-                               0.5f, disabled ? COLOR_GRAY : COLOR_BLACK, 0, INTRAFONT_ALIGN_LEFT, false);
+            } else {
+                const bool isUncRow = (strcasecmp(name, "Uncategorized") == 0);
+                const bool isFiltered = (!isUncRow && isFilteredBaseName(stripCategoryPrefixes(name)));
+                Texture* folderIcon = (isFiltered && catFolderIconGray) ? catFolderIconGray : catFolderIcon;
+                if (folderIcon && folderIcon->data && folderIcon->height > 0) {
+                    float iconW = (float)folderIcon->width * (iconHCat / (float)folderIcon->height);
+                    float iconX = textLeftX - iconGap - iconW + 5.0f;
+                    float iconY = centerY - (iconHCat * 0.5f) - 4.0f;
+                    drawTextureScaled(folderIcon, iconX, iconY, iconHCat, disabled ? 0x66FFFFFF : 0xFFFFFFFF);
+                    // Overlay C
+                    const float cX = (float)(int)(iconX + (iconW * 0.25f) - 4.0f + 0.5f);
+                    const float cY = (float)(int)(iconY + 13.0f + 0.5f);
+                    drawTextStyled(cX, cY, "C",
+                                   0.5f, disabled ? COLOR_GRAY : COLOR_BLACK, 0, INTRAFONT_ALIGN_LEFT, false);
+                }
             }
 
             drawTextStyled(textLeftX, baseline, label.c_str(),
@@ -4053,7 +4066,7 @@ private:
         const float ctrlX = 290.0f;
         const float ctrlY = 22.0f;
         const float ctrlW = 185.0f;
-        const float ctrlH = 90.0f;
+        const float ctrlH = 95.0f;
         drawRect((int)ctrlX, (int)ctrlY, (int)ctrlW, (int)ctrlH, COLOR_BANNER);
 
         const unsigned keyTextCol = 0xFFBBBBBB;
@@ -4074,10 +4087,10 @@ private:
             }
             const float labelPad = bumpRight ? 6.0f : 0.0f;
             drawTextStyled(x + labelPad, y + 2.0f, label, 0.7f, textCol, 0, INTRAFONT_ALIGN_LEFT, false);
-            y += 20.0f;
+            y += 17.0f;
         };
 
-        float keyY = ctrlY + 17.0f;
+        float keyY = ctrlY + 16.0f;
         const float keyX = ctrlX + 5.0f;
         drawKeyRowLeft(keyX, keyY, okIconTexture, "Select", true, keyTextCol);
         drawKeyRowLeft(keyX, keyY, circleIconTexture, "Back", true, keyTextCol);
@@ -4099,9 +4112,9 @@ private:
             const bool sel = (i == selectedIndex);
             const bool disabled = (i < (int)rowFlags.size() && (rowFlags[i] & ROW_DISABLED));
 
-            unsigned baseCol = disabled ? COLOR_GRAY : COLOR_WHITE;
-            unsigned textCol = sel ? COLOR_BLACK : baseCol;
+            (void)disabled;
             unsigned shadowCol = sel ? COLOR_WHITE : 0x40000000;
+            const unsigned labelCol = sel ? COLOR_BLACK : (disabled ? COLOR_GRAY : keyTextCol);
 
             const int rowIndex = i - startRow;
             const float centerY = top + rowH * (rowIndex + 0.5f);
@@ -4130,12 +4143,12 @@ private:
                 std::string right(colon + 1);
                 const unsigned valueCol = disabled ? COLOR_GRAY : COLOR_WHITE;
                 drawTextStyled(textLeftX, baseline, left.c_str(),
-                               scale, textCol, shadowCol, INTRAFONT_ALIGN_LEFT, true);
+                               scale, labelCol, shadowCol, INTRAFONT_ALIGN_LEFT, true);
                 const float leftW = measureTextWidth(scale, left.c_str());
                 drawTextStyled(textLeftX + leftW, baseline, right.c_str(),
                                scale, valueCol, 0, INTRAFONT_ALIGN_LEFT, false);
             } else {
-                drawTextStyled(textLeftX, baseline, name, scale, textCol, shadowCol, INTRAFONT_ALIGN_LEFT, false);
+                drawTextStyled(textLeftX, baseline, name, scale, labelCol, shadowCol, INTRAFONT_ALIGN_LEFT, false);
             }
         }
 
@@ -4573,7 +4586,25 @@ private:
                 return;
             }
 
-            msgBox = new MessageBox("Renaming...", nullptr, SCREEN_WIDTH, SCREEN_HEIGHT, 1.0f, 0, "", 16, 18, 8, 14);
+            const char* renameText = "Renaming...";
+            const char* returnText = "Returning...";
+            const float popScale = 1.0f;
+            const int popPadX = 10;
+            const int popPadY = 24;
+            const int popLineH = (int)(24.0f * popScale + 0.5f);
+            const float popTextW = measureTextWidth(popScale, returnText);
+            const int popExtraW = 4;
+            int popPanelW = (int)(popTextW + popPadX * 2 + popExtraW + 0.5f);
+            popPanelW -= 6;
+            const int popBottom = 14;
+            const int popPanelH = popPadY + popLineH + popBottom - 24;
+            const int popWrapTweak = 32;
+            const int popForcedPxPerChar = 8;
+            const int renamePanelW = popPanelW + 4;
+            const int renamePanelH = popPanelH;
+            msgBox = new MessageBox(renameText, nullptr, SCREEN_WIDTH, SCREEN_HEIGHT,
+                                    popScale, 0, "", popPadX, popPadY, popWrapTweak, popForcedPxPerChar,
+                                    renamePanelW, renamePanelH);
             renderOneFrame();
 
             const char* isoRoots[]  = {"ISO/","ISO/PSP/"};
@@ -4608,16 +4639,22 @@ private:
 
             // Patch in-memory caches (icon paths, no-icon memo set, selection key) to follow the rename
             cachePatchRenameCategory(oldDisplay, newDisplay);
+            updateFilterOnCategoryRename(oldDisplay, newDisplay);
             buildCategoryRows();
 
 
-            // Select the renamed category by BASE and make it visible
-            auto sameBase = [&](const char* disp){
-                return !strcasecmp(stripCategoryPrefixes(disp).c_str(), typed.c_str());
-            };
+            // Select the renamed category and keep it highlighted
             int idx = -1;
             for (int i = 0; i < (int)entries.size(); ++i) {
-                if (sameBase(entries[i].d_name)) { idx = i; break; }
+                if (!strcasecmp(entries[i].d_name, newDisplay.c_str())) { idx = i; break; }
+            }
+            if (idx < 0) {
+                auto sameBase = [&](const char* disp){
+                    return !strcasecmp(stripCategoryPrefixes(disp).c_str(), typed.c_str());
+                };
+                for (int i = 0; i < (int)entries.size(); ++i) {
+                    if (sameBase(entries[i].d_name)) { idx = i; break; }
+                }
             }
             if (idx >= 0) {
                 selectedIndex = idx;
@@ -4686,7 +4723,25 @@ private:
 
             bool wasChecked = (checked.find(gi.path) != checked.end());
 
-            msgBox = new MessageBox("Renaming...", nullptr, SCREEN_WIDTH, SCREEN_HEIGHT, 1.0f, 0, "", 16, 18, 8, 14);
+            const char* renameText = "Renaming...";
+            const char* returnText = "Returning...";
+            const float popScale = 1.0f;
+            const int popPadX = 10;
+            const int popPadY = 24;
+            const int popLineH = (int)(24.0f * popScale + 0.5f);
+            const float popTextW = measureTextWidth(popScale, returnText);
+            const int popExtraW = 4;
+            int popPanelW = (int)(popTextW + popPadX * 2 + popExtraW + 0.5f);
+            popPanelW -= 6;
+            const int popBottom = 14;
+            const int popPanelH = popPadY + popLineH + popBottom - 24;
+            const int popWrapTweak = 32;
+            const int popForcedPxPerChar = 8;
+            const int renamePanelW = popPanelW - 4;
+            const int renamePanelH = popPanelH - 4;
+            msgBox = new MessageBox(renameText, nullptr, SCREEN_WIDTH, SCREEN_HEIGHT,
+                                    popScale, 0, "", popPadX, popPadY, popWrapTweak, popForcedPxPerChar,
+                                    renamePanelW, renamePanelH);
             renderOneFrame();
 
                 int rc = sceIoRename(gi.path.c_str(), newPath.c_str());
@@ -5656,6 +5711,71 @@ private:
         return in.substr(a, b - a);
     }
 
+    static std::string gclFilterRootKeyFor(const std::string& dev) {
+        std::string key = rootPrefix(dev);
+        if (!key.empty()) return key;
+        if (DeviceExists("ms0:/")) return "ms0:/";
+        if (DeviceExists("ef0:/")) return "ef0:/";
+        return "ms0:/";
+    }
+
+    static std::string gclFilterPathFor(const std::string& root) {
+        return root + "seplugins/gclite_filter.txt";
+    }
+
+    static void gclLoadFilterFor(const std::string& dev) {
+        std::string root = gclFilterRootKeyFor(dev);
+        if (root.empty()) return;
+        if (gclFilterLoadedMap[root]) return;
+
+        gclFilterLoadedMap[root] = true;
+        std::vector<std::string> items;
+
+        std::string txt;
+        if (gclReadWholeText(gclFilterPathFor(root), txt)) {
+            size_t pos = 0, start = 0;
+            while (pos <= txt.size()) {
+                if (pos == txt.size() || txt[pos] == '\n' || txt[pos] == '\r') {
+                    std::string line = trimSpaces(txt.substr(start, pos - start));
+                    line = stripCategoryPrefixes(line);
+                    if (!line.empty()) {
+                        bool dup = false;
+                        for (const auto& w : items) {
+                            if (!strcasecmp(w.c_str(), line.c_str())) { dup = true; break; }
+                        }
+                        if (!dup) items.push_back(line);
+                    }
+                    if (pos + 1 < txt.size() && txt[pos] == '\r' && txt[pos+1] == '\n') ++pos;
+                    start = pos + 1;
+                }
+                ++pos;
+            }
+        }
+        gclFilterMap[root] = std::move(items);
+    }
+
+    static bool gclSaveFilterFor(const std::string& dev,
+                                 const std::unordered_map<std::string, std::string>& baseToDisplay) {
+        std::string root = gclFilterRootKeyFor(dev);
+        if (root.empty()) return false;
+        gclFilterLoadedMap[root] = true;
+        std::vector<std::string>& fl = gclFilterMap[root];
+
+        std::string dir = root + "seplugins";
+        sceIoMkdir(dir.c_str(), 0777);
+
+        std::string out;
+        for (size_t i = 0; i < fl.size(); ++i) {
+            const std::string& base = fl[i];
+            auto it = baseToDisplay.find(base);
+            const std::string& line = (it != baseToDisplay.end()) ? it->second : base;
+            out += line;
+            if (i + 1 < fl.size()) out += "\r\n";
+        }
+        if (!out.empty()) out += "\r\n";
+        return gclWriteWholeText(gclFilterPathFor(root), out);
+    }
+
     static void gclLoadBlacklistFor(const std::string& dev) {
         std::string root = blacklistRootKey(dev);
         if (root.empty()) return;
@@ -5710,7 +5830,7 @@ private:
         const auto& bl = gclBlacklistMap[blacklistRootKey(root)];
         for (const auto& w : bl) {
             if (w.empty()) continue;
-            if (endsWithNoCase(base, w.c_str())) return true;
+            if (!strcasecmp(base.c_str(), w.c_str())) return true;
         }
         return false;
     }
@@ -5725,6 +5845,75 @@ private:
         t = stripCategoryPrefixes(sanitizeFilename(t));
         if (t.empty()) return {};
         return t;
+    }
+
+    std::unordered_map<std::string, std::string> buildCategoryBaseToDisplayMap() const {
+        std::unordered_map<std::string, std::string> out;
+        out.reserve(categories.size());
+        for (const auto& kv : categories) {
+            if (!strcasecmp(kv.first.c_str(), "Uncategorized")) continue;
+            std::string base = stripCategoryPrefixes(kv.first);
+            if (base.empty()) continue;
+            if (out.find(base) == out.end()) out.emplace(base, kv.first);
+        }
+        return out;
+    }
+
+    bool isFilteredBaseName(const std::string& base) {
+        if (base.empty()) return false;
+        gclLoadFilterFor(currentDevice);
+        const std::string root = gclFilterRootKeyFor(currentDevice);
+        const auto& fl = gclFilterMap[root];
+        for (const auto& w : fl) {
+            if (!strcasecmp(w.c_str(), base.c_str())) return true;
+        }
+        return false;
+    }
+
+    void refreshGclFilterFile() {
+        gclLoadFilterFor(currentDevice);
+        gclSaveFilterFor(currentDevice, buildCategoryBaseToDisplayMap());
+    }
+
+    void toggleGclFilterForCategory(const std::string& displayName) {
+        std::string base = stripCategoryPrefixes(displayName);
+        if (base.empty()) return;
+        gclLoadFilterFor(currentDevice);
+        const std::string root = gclFilterRootKeyFor(currentDevice);
+        auto& fl = gclFilterMap[root];
+        for (auto it = fl.begin(); it != fl.end(); ++it) {
+            if (!strcasecmp(it->c_str(), base.c_str())) {
+                fl.erase(it);
+                refreshGclFilterFile();
+                return;
+            }
+        }
+        fl.push_back(base);
+        refreshGclFilterFile();
+    }
+
+    void updateFilterOnCategoryRename(const std::string& oldDisplay, const std::string& newDisplay) {
+        std::string oldBase = stripCategoryPrefixes(oldDisplay);
+        std::string newBase = stripCategoryPrefixes(newDisplay);
+        if (oldBase.empty() || newBase.empty()) return;
+        gclLoadFilterFor(currentDevice);
+        const std::string root = gclFilterRootKeyFor(currentDevice);
+        auto& fl = gclFilterMap[root];
+        bool had = false;
+        for (auto it = fl.begin(); it != fl.end(); ++it) {
+            if (!strcasecmp(it->c_str(), oldBase.c_str())) {
+                fl.erase(it);
+                had = true;
+                break;
+            }
+        }
+        if (!had) return;
+        bool dup = false;
+        for (const auto& w : fl) {
+            if (!strcasecmp(w.c_str(), newBase.c_str())) { dup = true; break; }
+        }
+        if (!dup) fl.push_back(newBase);
+        refreshGclFilterFile();
     }
 
     void applyBlacklistChanges() {
@@ -6210,6 +6399,11 @@ private:
         catSortMode = false;
         catPickActive = false;
         catPickIndex = -1;
+        {
+            const std::string filterRoot = gclFilterRootKeyFor(currentDevice);
+            if (!filterRoot.empty()) gclFilterLoadedMap[filterRoot] = false;
+            gclLoadFilterFor(currentDevice);
+        }
 
         // Enforce on-disk names to match current settings only when needed (run-once per root until settings change).
         {
@@ -7640,6 +7834,7 @@ public:
         if (placeholderIconTexture) { texFree(placeholderIconTexture); placeholderIconTexture = nullptr; }
         if (circleIconTexture) { texFree(circleIconTexture); circleIconTexture = nullptr; }
         if (triangleIconTexture) { texFree(triangleIconTexture); triangleIconTexture = nullptr; }
+        if (squareIconTexture) { texFree(squareIconTexture); squareIconTexture = nullptr; }
         if (selectIconTexture) { texFree(selectIconTexture); selectIconTexture = nullptr; }
         if (startIconTexture) { texFree(startIconTexture); startIconTexture = nullptr; }
         if (rootMemIcon) { texFree(rootMemIcon); rootMemIcon = nullptr; }
@@ -7650,6 +7845,7 @@ public:
         if (rootProMeIcon) { texFree(rootProMeIcon); rootProMeIcon = nullptr; }
         if (rootOffBulbIcon) { texFree(rootOffBulbIcon); rootOffBulbIcon = nullptr; }
         if (catFolderIcon) { texFree(catFolderIcon); catFolderIcon = nullptr; }
+        if (catFolderIconGray) { texFree(catFolderIconGray); catFolderIconGray = nullptr; }
         if (catSettingsIcon) { texFree(catSettingsIcon); catSettingsIcon = nullptr; }
         if (blacklistIcon) { texFree(blacklistIcon); blacklistIcon = nullptr; }
         if (lIconTexture) { texFree(lIconTexture); lIconTexture = nullptr; }
@@ -8038,6 +8234,14 @@ public:
 
         // □ toggle checkmark on current item
         if (pressed & PSP_CTRL_SQUARE) {
+            if (!showRoots && view == View_Categories) {
+                if (selectedIndex < 0 || selectedIndex >= (int)entries.size()) return;
+                const char* nm = entries[selectedIndex].d_name;
+                if (!strcasecmp(nm, kCatSettingsLabel) || !strcasecmp(nm, "__GCL_SETTINGS__")) return;
+                if (!strcasecmp(nm, "Uncategorized")) return;
+                toggleGclFilterForCategory(nm);
+                return;
+            }
             if (!showRoots && (view == View_AllFlat || view == View_CategoryContents) &&
                 selectedIndex >= 0 && selectedIndex < (int)workingList.size()) {
                 const std::string& p = workingList[selectedIndex].path;
@@ -8655,6 +8859,7 @@ public:
 
                                     // Keep in-memory cache consistent with on-disk names, preserving ICON0 paths
                                     patchCategoryCacheFromSettings();
+                                    refreshGclFilterFile();
                                 }
                             }
 
@@ -8816,6 +9021,8 @@ bool KernelFileExplorer::gclCfgLoaded = false;
 std::unordered_map<std::string, std::vector<std::string>> KernelFileExplorer::gclBlacklistMap;
 std::unordered_map<std::string, bool> KernelFileExplorer::gclBlacklistLoadedMap;
 std::unordered_map<std::string, std::vector<std::string>> KernelFileExplorer::gclPendingUnblacklistMap;
+std::unordered_map<std::string, std::vector<std::string>> KernelFileExplorer::gclFilterMap;
+std::unordered_map<std::string, bool> KernelFileExplorer::gclFilterLoadedMap;
 KernelFileExplorer::GclSettingKey KernelFileExplorer::gclPending = KernelFileExplorer::GCL_SK_None;
 bool KernelFileExplorer::rootPickGcl = false;   // ← add this definition
 bool KernelFileExplorer::rootKeepGclSelection = false;
@@ -8838,6 +9045,7 @@ int main(int argc, char* argv[]) {
     std::string crossPath= baseDir + "resources/cross.png";
     std::string circlePath= baseDir + "resources/circle.png";
     std::string trianglePath= baseDir + "resources/triangle.png";
+    std::string squarePath= baseDir + "resources/square.png";
     std::string selectPath  = baseDir + "resources/select.png";   // used for SELECT icon
     std::string startPath   = baseDir + "resources/start.png";
     std::string icon0Path= baseDir + "resources/icon0.png";
@@ -8851,6 +9059,7 @@ int main(int argc, char* argv[]) {
     std::string proPath    = baseDir + "resources/pro_me_18h.png";
     std::string offPath    = baseDir + "resources/off_bulb_18h.png";
     std::string folderPath = baseDir + "resources/folder.png";
+    std::string folderGrayPath = baseDir + "resources/folder_grayscale.png";
     std::string catSettingsPath = baseDir + "resources/categoriessettings_15h.png";
     std::string blacklistPath = baseDir + "resources/blacklist.png";
     std::string lPath      = baseDir + "resources/L.png";
@@ -8860,6 +9069,7 @@ int main(int argc, char* argv[]) {
     okIconTexture          = texLoadPNG(crossPath.c_str());
     circleIconTexture      = texLoadPNG(circlePath.c_str());
     triangleIconTexture    = texLoadPNG(trianglePath.c_str());
+    squareIconTexture      = texLoadPNG(squarePath.c_str());
     selectIconTexture      = texLoadPNG(selectPath.c_str());
     startIconTexture       = texLoadPNG(startPath.c_str());
     placeholderIconTexture = texLoadPNG(icon0Path.c_str());
@@ -8873,6 +9083,7 @@ int main(int argc, char* argv[]) {
     rootProMeIcon     = texLoadPNG(proPath.c_str());
     rootOffBulbIcon   = texLoadPNG(offPath.c_str());
     catFolderIcon     = texLoadPNG(folderPath.c_str());
+    catFolderIconGray = texLoadPNG(folderGrayPath.c_str());
     catSettingsIcon   = texLoadPNG(catSettingsPath.c_str());
     blacklistIcon     = texLoadPNG(blacklistPath.c_str());
     lIconTexture      = texLoadPNG(lPath.c_str());
