@@ -44,8 +44,22 @@ static int count_filters(char *buf, SceSize size) {
     return count;
 }
 
+// Compare strings ignoring trailing spaces
+static int strcmp_trim(const char *a, const char *b) {
+    int len_a = sce_paf_private_strlen(a);
+    int len_b = sce_paf_private_strlen(b);
+    // Trim trailing spaces from a
+    while(len_a > 0 && a[len_a - 1] == ' ') len_a--;
+    // Trim trailing spaces from b
+    while(len_b > 0 && b[len_b - 1] == ' ') len_b--;
+    // Compare lengths first
+    if(len_a != len_b) return 1;
+    // Compare content
+    return sce_paf_private_strncmp(a, b, len_a);
+}
+
 static int names_match(const char *filter, const char *name) {
-    if(sce_paf_private_strcmp(filter, name) == 0) return 1;
+    if(strcmp_trim(filter, name) == 0) return 1;
     // normalize CAT_ and/or NN prefixes for both strings
     const char *a = filter;
     const char *b = name;
@@ -57,7 +71,7 @@ static int names_match(const char *filter, const char *name) {
         if(a[0] >= '0' && a[0] <= '9' && a[1] >= '0' && a[1] <= '9') a += 2;
         if(b[0] >= '0' && b[0] <= '9' && b[1] >= '0' && b[1] <= '9') b += 2;
     }
-    return sce_paf_private_strcmp(a, b) == 0;
+    return strcmp_trim(a, b) == 0;
 }
 
 int check_filter_for(const char *str, int location) {
