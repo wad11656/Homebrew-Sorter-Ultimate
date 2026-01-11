@@ -197,6 +197,10 @@ extern "C" {
                     void* outdata, int outlen);
 }
 
+static SceUID kfeIoOpenDir(const char* path);
+static int kfeIoReadDir(SceUID dir, SceIoDirent* ent);
+static int kfeIoCloseDir(SceUID dir);
+
 // Path split helpers
 static std::string dirnameOf(const std::string& p) {
     size_t s = p.find_last_of("/\\");
@@ -212,8 +216,8 @@ static std::string fileExtOf(const std::string& name) {
     return (d == std::string::npos) ? "" : name.substr(d);
 }
 static bool dirExists(const std::string& path){
-    SceUID d = pspIoOpenDir(path.c_str());
-    if (d >= 0){ pspIoCloseDir(d); return true; }
+    SceUID d = kfeIoOpenDir(path.c_str());
+    if (d >= 0){ kfeIoCloseDir(d); return true; }
     return false;
 }
 static std::string joinDirFile(const std::string& dir, const char* fname){
@@ -362,6 +366,7 @@ static void SetupCallbacks() {
 }
 
 static SceUID gLogFd = -1;
+static inline void trimTrailingSpaces(char* s);
 static void logInit() {
     if (gLogFd >= 0) return;
     gLogFd = sceIoOpen("ms0:/KFE_move.log", PSP_O_WRONLY | PSP_O_CREAT | PSP_O_APPEND, 0666);
@@ -376,6 +381,55 @@ static void logf(const char* fmt, ...) {
     logWrite(buf); logWrite("\r\n");
 }
 static void logClose(){ if (gLogFd >= 0) { sceIoClose(gLogFd); gLogFd = -1; } }
+
+// Fallback to user-mode dir I/O if kernel bridge fails on some CFWs (LME).
+static std::unordered_set<SceUID> gUserDirHandles;
+static SceUID kfeIoOpenDir(const char* path) {
+    SceUID d = pspIoOpenDir(path);
+    if (d >= 0) return d;
+    SceUID ud = sceIoDopen(path);
+    if (ud >= 0) gUserDirHandles.insert(ud);
+    return ud;
+}
+static int kfeIoReadDir(SceUID dir, SceIoDirent* ent) {
+    if (gUserDirHandles.find(dir) != gUserDirHandles.end())
+        return sceIoDread(dir, ent);
+    return pspIoReadDir(dir, ent);
+}
+static int kfeIoCloseDir(SceUID dir) {
+    if (gUserDirHandles.erase(dir))
+        return sceIoDclose(dir);
+    return pspIoCloseDir(dir);
+}
+
+// Debug: log a short directory listing when a scan comes back empty.
+static void logDirSample(const std::string& path, int maxEntries = 20) {
+    SceUID d = kfeIoOpenDir(path.c_str());
+    if (d < 0) { logf("scanlog: open %s failed %d", path.c_str(), d); return; }
+    logf("scanlog: listing %s", path.c_str());
+    SceIoDirent ent; memset(&ent, 0, sizeof(ent));
+    int count = 0;
+    while (kfeIoReadDir(d, &ent) > 0 && count < maxEntries) {
+        trimTrailingSpaces(ent.d_name);
+        const int len = (int)strlen(ent.d_name);
+        logf("  [%d] mode=0x%X len=%d name='%s'", count,
+             (unsigned)ent.d_stat.st_mode, len, ent.d_name);
+        memset(&ent, 0, sizeof(ent));
+        ++count;
+    }
+    if (count == 0) logf("  (no entries)");
+    kfeIoCloseDir(d);
+}
+
+static void logEmptyScanOnce(const std::string& root) {
+    static std::unordered_set<std::string> seen;
+    if (!seen.insert(root).second) return;
+    logInit();
+    logf("scanlog: empty scan for %s", root.c_str());
+    logDirSample(root + "PSP/GAME/");
+    logDirSample(root + "ISO/");
+    logClose();
+}
 
 
 // --- path/device helpers ---
@@ -419,24 +473,24 @@ static bool ensureDirRecursive(const std::string& fullDir) {
 
 // --- dir empty? ---
 static bool __attribute__((unused)) isDirEmpty(const std::string& dir) {
-    SceUID d = pspIoOpenDir(dir.c_str());
+    SceUID d = kfeIoOpenDir(dir.c_str());
     if (d < 0) return true;
     bool empty = true;
     SceIoDirent ent; memset(&ent, 0, sizeof(ent));
-    while (pspIoReadDir(d, &ent) > 0) {
+    while (kfeIoReadDir(d, &ent) > 0) {
         if (strcmp(ent.d_name, ".") && strcmp(ent.d_name, "..")) { empty = false; break; }
         memset(&ent, 0, sizeof(ent));
     }
-    pspIoCloseDir(d);
+    kfeIoCloseDir(d);
     return empty;
 }
 
 // --- remove recursively (you already have a version; keep one) ---
 static bool removeDirRecursive(const std::string& dir) {
-    SceUID d = pspIoOpenDir(dir.c_str());
+    SceUID d = kfeIoOpenDir(dir.c_str());
     if (d < 0) return sceIoRmdir(dir.c_str()) >= 0;
     SceIoDirent ent; memset(&ent, 0, sizeof(ent));
-    while (pspIoReadDir(d, &ent) > 0) {
+    while (kfeIoReadDir(d, &ent) > 0) {
         if (!strcmp(ent.d_name, ".") || !strcmp(ent.d_name, "..")) { memset(&ent,0,sizeof(ent)); continue; }
         std::string child = joinDirFile(dir, ent.d_name);
         if (FIO_S_ISDIR(ent.d_stat.st_mode)) removeDirRecursive(child);
@@ -444,7 +498,7 @@ static bool removeDirRecursive(const std::string& dir) {
         memset(&ent, 0, sizeof(ent));
         sceKernelDelayThread(0);
     }
-    pspIoCloseDir(d);
+    kfeIoCloseDir(d);
     return sceIoRmdir(dir.c_str()) >= 0;
 }
 
@@ -453,12 +507,12 @@ static bool fastMoveDirByRenames(const std::string& srcDir, const std::string& d
     logf("fastMoveDirByRenames: %s -> %s", srcDir.c_str(), dstDir.c_str());
     if (!ensureDirRecursive(dstDir)) { logf("  ensureDirRecursive(dst) FAILED"); return false; }
 
-    SceUID d = pspIoOpenDir(srcDir.c_str());
+    SceUID d = kfeIoOpenDir(srcDir.c_str());
     if (d < 0) { logf("  open src failed %d", d); return false; }
 
     bool ok = true;
     SceIoDirent ent; memset(&ent, 0, sizeof(ent));
-    while (ok && pspIoReadDir(d, &ent) > 0) {
+    while (ok && kfeIoReadDir(d, &ent) > 0) {
         if (!strcmp(ent.d_name, ".") || !strcmp(ent.d_name, "..")) { memset(&ent,0,sizeof(ent)); continue; }
         std::string s = joinDirFile(srcDir, ent.d_name);
         std::string t = joinDirFile(dstDir, ent.d_name);
@@ -500,7 +554,7 @@ static bool fastMoveDirByRenames(const std::string& srcDir, const std::string& d
         memset(&ent, 0, sizeof(ent));
         sceKernelDelayThread(0);
     }
-    pspIoCloseDir(d);
+    kfeIoCloseDir(d);
     logf("fastMoveDirByRenames: %s", ok ? "OK" : "FAIL");
     return ok;
 }
@@ -508,16 +562,16 @@ static bool fastMoveDirByRenames(const std::string& srcDir, const std::string& d
 // --- size calculators (for preflight) ---
 static bool sumDirBytes(const std::string& dir, uint64_t& out) {
     logf("sumDirBytes: enter %s (start=%llu)", dir.c_str(), (unsigned long long)out);
-    SceUID d = pspIoOpenDir(dir.c_str()); if (d < 0) return false;
+    SceUID d = kfeIoOpenDir(dir.c_str()); if (d < 0) return false;
     SceIoDirent ent; memset(&ent, 0, sizeof(ent));
-    while (pspIoReadDir(d, &ent) > 0) {
+    while (kfeIoReadDir(d, &ent) > 0) {
         if (!strcmp(ent.d_name,".") || !strcmp(ent.d_name,"..")) { memset(&ent,0,sizeof(ent)); continue; }
         std::string p = joinDirFile(dir, ent.d_name);
-        if (FIO_S_ISDIR(ent.d_stat.st_mode)) { if (!sumDirBytes(p, out)) { pspIoCloseDir(d); return false; } }
+        if (FIO_S_ISDIR(ent.d_stat.st_mode)) { if (!sumDirBytes(p, out)) { kfeIoCloseDir(d); return false; } }
         else out += (uint64_t)ent.d_stat.st_size;
         memset(&ent, 0, sizeof(ent));
     }
-    pspIoCloseDir(d);
+    kfeIoCloseDir(d);
     logf("sumDirBytes: leave %s (now=%llu)", dir.c_str(), (unsigned long long)out);
     return true;
 }
@@ -814,6 +868,13 @@ static std::string sanitizeFilename(const std::string& in) {
     return out;
 }
 
+// Some firmwares pad dirent names with trailing spaces; trim so path lookups work.
+static inline void trimTrailingSpaces(char* s) {
+    if (!s) return;
+    size_t n = strlen(s);
+    while (n > 0 && s[n - 1] == ' ') { s[--n] = '\0'; }
+}
+
 static bool isJunkHidden(const char* n) {
     if (!n || !*n) return false;
     if (n[0] == '.') {
@@ -833,16 +894,17 @@ static bool isJunkHidden(const char* n) {
 static std::string findEbootCaseInsensitive(const std::string& dirMaybeSlash){
     std::string dpath = dirMaybeSlash;
     if (!dpath.empty() && dpath[dpath.size()-1]=='/') dpath.erase(dpath.size()-1);
-    SceUID d = pspIoOpenDir(dpath.c_str());
+    SceUID d = kfeIoOpenDir(dpath.c_str());
     if (d < 0) return {};
     SceIoDirent ent; memset(&ent, 0, sizeof(ent));
-    while (pspIoReadDir(d, &ent) > 0) {
+    while (kfeIoReadDir(d, &ent) > 0) {
+        trimTrailingSpaces(ent.d_name);
         if (!FIO_S_ISDIR(ent.d_stat.st_mode) && strcasecmp(ent.d_name, "EBOOT.PBP") == 0) {
-            std::string full = joinDirFile(dpath, ent.d_name); pspIoCloseDir(d); return full;
+            std::string full = joinDirFile(dpath, ent.d_name); kfeIoCloseDir(d); return full;
         }
         memset(&ent, 0, sizeof(ent));
     }
-    pspIoCloseDir(d);
+    kfeIoCloseDir(d);
     return {};
 }
 
@@ -875,16 +937,17 @@ template<typename F>
 static void forEachEntry(const std::string& dir, F f){
     std::string dpath = dir;
     if (!dpath.empty() && dpath[dpath.size()-1]=='/') dpath.erase(dpath.size()-1);
-    SceUID d = pspIoOpenDir(dpath.c_str());
+    SceUID d = kfeIoOpenDir(dpath.c_str());
     if (d < 0) return;
     SceIoDirent ent; memset(&ent, 0, sizeof(ent));
-    while (pspIoReadDir(d, &ent) > 0) {
+    while (kfeIoReadDir(d, &ent) > 0) {
+        trimTrailingSpaces(ent.d_name);
         if (!strcmp(ent.d_name, ".") || !strcmp(ent.d_name, "..")) { memset(&ent,0,sizeof(ent)); continue; }
         if (isJunkHidden(ent.d_name))                                 { memset(&ent,0,sizeof(ent)); continue; }
         f(ent);
         memset(&ent, 0, sizeof(ent));
     }
-    pspIoCloseDir(d);
+    kfeIoCloseDir(d);
 }
 
 struct AnimFileInfo {
@@ -1133,18 +1196,19 @@ bool sfoExtractTitle(const uint8_t* data, size_t size, std::string& outTitle) {
 static std::string findFileCaseInsensitive(const std::string& dirNoSlash, const char* wantName) {
     std::string dpath = dirNoSlash;
     if (!dpath.empty() && dpath.back() == '/') dpath.pop_back();
-    SceUID d = pspIoOpenDir(dpath.c_str());
+    SceUID d = kfeIoOpenDir(dpath.c_str());
     if (d < 0) return {};
     SceIoDirent ent; memset(&ent, 0, sizeof(ent));
     std::string out;
-    while (pspIoReadDir(d, &ent) > 0) {
+    while (kfeIoReadDir(d, &ent) > 0) {
+        trimTrailingSpaces(ent.d_name);
         if (!FIO_S_ISDIR(ent.d_stat.st_mode) && strcasecmp(ent.d_name, wantName) == 0) {
             out = joinDirFile(dpath, ent.d_name);
             break;
         }
         memset(&ent, 0, sizeof(ent));
     }
-    pspIoCloseDir(d);
+    kfeIoCloseDir(d);
     return out;
 }
 
@@ -2248,7 +2312,9 @@ private:
 
 
     static bool isPspGo() {
-        SceUID d = pspIoOpenDir("ef0:/"); if (d >= 0) { pspIoCloseDir(d); return true; }
+        int model = kuKernelGetModel();
+        if (model >= 0) return model == 4;
+        SceUID d = kfeIoOpenDir("ef0:/"); if (d >= 0) { kfeIoCloseDir(d); return true; }
         return false;
     }
 
@@ -2290,7 +2356,7 @@ private:
 
     // Find the enforced on-disk folder name for a base (e.g., base "ARPG" -> "CAT_03ARPG" or "03ARPG")
     static std::string findDisplayNameForCategoryBase(const std::string& dev, const std::string& base) {
-        const char* roots[] = { "ISO/","ISO/PSP/","PSP/GAME/","PSP/GAME/PSX/","PSP/GAME/Utility/","PSP/GAME150/" };
+        const char* roots[] = { "ISO/","PSP/GAME/","PSP/GAME/PSX/","PSP/GAME/Utility/","PSP/GAME150/" };
         for (auto r : roots) {
             std::string absRoot = dev + std::string(r);
             std::vector<std::string> subs;
@@ -2331,7 +2397,7 @@ private:
 
     // Only blacklist ISO/VIDEO as a non-category (per plugin behavior) plus user-defined blacklist.
     static bool isBlacklistedCategoryFolder(const std::string& rootLabel, const std::string& sub, const std::string& absRoot){
-        // rootLabel is like "ISO/", "ISO/PSP/", "PSP/GAME/", etc.
+        // rootLabel is like "ISO/", "PSP/GAME/", etc.
         if (!strcasecmp(rootLabel.c_str(), "ISO/") && !strcasecmp(sub.c_str(), "VIDEO")) return true;
         if (!blacklistActive()) return false;
 
@@ -2612,7 +2678,7 @@ private:
 
         // 4) Rename on disk (for devices that exist) to match the new wanted names
         //    Only touch category folders inside ISO/ and PSP/GAME*/ roots. Never touch root-level PSP/.
-        const char* isoRoots[]  = {"ISO/","ISO/PSP/"}; // both ISO roots
+        const char* isoRoots[]  = {"ISO/"};
         const char* gameRoots[] = {"PSP/GAME/","PSP/GAME150/","PSP/GAME/PSX/","PSP/GAME/Utility/"};
         auto doDevice = [&](const std::string& dev){
             if (dev.empty() || dev[3] != ':') return;
@@ -2647,9 +2713,9 @@ private:
             const std::string other = (!strcasecmp(cur.c_str(), "ms0:/")) ? "ef0:/" : "ms0:/";
 
             // Only touch the other root if it exists / is mounted.
-            SceUID d = pspIoOpenDir(other.c_str());
+            SceUID d = kfeIoOpenDir(other.c_str());
             if (d >= 0) {
-                pspIoCloseDir(d);
+                kfeIoCloseDir(d);
                 doDevice(other);          // perform the same rename enforcement on the other root
                 markDeviceDirty(other);   // if you already use a “dirty” flag in your cache
             }
@@ -4607,7 +4673,7 @@ private:
                                     renamePanelW, renamePanelH);
             renderOneFrame();
 
-            const char* isoRoots[]  = {"ISO/","ISO/PSP/"};
+        const char* isoRoots[]  = {"ISO/"};
             const char* gameRoots[] = {"PSP/GAME/","PSP/GAME/PSX/","PSP/GAME/Utility/","PSP/GAME150/"};
             bool anyOk=false, anyFail=false;
 
@@ -4907,8 +4973,10 @@ private:
         roots.clear();
         runningFromEf0 = (gExecPath && strncmp(gExecPath, "ef0:", 4) == 0);
 
-        { SceUID d = pspIoOpenDir("ms0:/"); if (d >= 0) { pspIoCloseDir(d); roots.push_back("ms0:/"); } }
-        { SceUID d = pspIoOpenDir("ef0:/"); if (d >= 0) { pspIoCloseDir(d); roots.push_back("ef0:/"); } }
+        { SceUID d = kfeIoOpenDir("ms0:/"); if (d >= 0) { kfeIoCloseDir(d); roots.push_back("ms0:/"); } }
+        if (isPspGo()) {
+            SceUID d = kfeIoOpenDir("ef0:/"); if (d >= 0) { kfeIoCloseDir(d); roots.push_back("ef0:/"); }
+        }
 
         if (runningFromEf0) {
             bool alreadyListed = false;
@@ -5104,8 +5172,8 @@ private:
             resetLists();
             gclLoadBlacklistFor(dev);
 
-            const char* isoRoots[]  = {"ISO/"};                // drop ISO/PSP/ as a root
-            const char* gameRoots[] = {"PSP/GAME/","PSP/GAME150/"}; // drop PSX/ and Utility/ as roots
+        const char* isoRoots[]  = {"ISO/"};
+            const char* gameRoots[] = {"PSP/GAME/","PSP/GAME/PSX/","PSP/GAME/Utility/","PSP/GAME150/"};
 
             for (size_t i=0;i<sizeof(isoRoots)/sizeof(isoRoots[0]);++i)  scanIsoRootDir(dev + std::string(isoRoots[i]));
             for (size_t i=0;i<sizeof(gameRoots)/sizeof(gameRoots[0]);++i) scanGameRootDir(dev + std::string(gameRoots[i]));
@@ -5433,33 +5501,52 @@ private:
 
     // Pick ef0:/ on PSP Go if present; otherwise ms0:/
     std::string gclPickDeviceRoot() {
-        if (DeviceExists("ef0:/")) return "ef0:/";
+        if (isPspGo() && DeviceExists("ef0:/")) return "ef0:/";
         return "ms0:/";
+    }
+
+    void gclCollectSepluginsDirs(const std::string& root, std::vector<std::string>& out) {
+        out.clear();
+        std::string upper = joinDirFile(root, "SEPLUGINS");
+        std::string lower = joinDirFile(root, "seplugins");
+        const bool hasUpper = dirExists(upper);
+        const bool hasLower = dirExists(lower);
+
+        if (hasLower) out.push_back(lower);
+        if (hasUpper && (!hasLower || strcasecmp(upper.c_str(), lower.c_str()) != 0)) out.push_back(upper);
+        if (!hasLower && !hasUpper) out.push_back(lower); // prefer lowercase for create
+    }
+
+    std::string gclSepluginsDirForRoot(const std::string& root) {
+        std::vector<std::string> dirs;
+        gclCollectSepluginsDirs(root, dirs);
+        return dirs.empty() ? joinDirFile(root, "seplugins") : dirs.front();
     }
 
     // Recursive search under /SEPLUGINS for category_lite.prx
     std::string gclFindCategoryLitePrx(const std::string& sepluginsNoSlash) {
-        SceUID d = pspIoOpenDir(sepluginsNoSlash.c_str());
+        SceUID d = kfeIoOpenDir(sepluginsNoSlash.c_str());
         if (d < 0) return {};
         std::vector<std::string> stack{sepluginsNoSlash};
-        pspIoCloseDir(d);
+        kfeIoCloseDir(d);
 
         while (!stack.empty()) {
             std::string dpath = stack.back(); stack.pop_back();
-            SceUID dd = pspIoOpenDir(dpath.c_str()); if (dd < 0) continue;
+            SceUID dd = kfeIoOpenDir(dpath.c_str()); if (dd < 0) continue;
             SceIoDirent ent; memset(&ent, 0, sizeof(ent));
-            while (pspIoReadDir(dd, &ent) > 0) {
+            while (kfeIoReadDir(dd, &ent) > 0) {
+                trimTrailingSpaces(ent.d_name);
                 if (!strcmp(ent.d_name, ".") || !strcmp(ent.d_name, "..")) { memset(&ent,0,sizeof(ent)); continue; }
                 std::string child = joinDirFile(dpath, ent.d_name);
                 if (FIO_S_ISDIR(ent.d_stat.st_mode)) {
                     stack.push_back(child);
                 } else if (strcasecmp(ent.d_name, "category_lite.prx") == 0) {
-                    pspIoCloseDir(dd);
+                    kfeIoCloseDir(dd);
                     return child;
                 }
                 memset(&ent, 0, sizeof(ent));
             }
-            pspIoCloseDir(dd);
+            kfeIoCloseDir(dd);
         }
         return {};
     }
@@ -5467,6 +5554,45 @@ private:
     // Use the existing global helper to find VSH.txt / PLUGINS.txt (case-insensitive)
     std::string gclFindTxtInSeplugins(const std::string& seplugins, const char* wantUpperOrLower){
         return findFileCaseInsensitive(seplugins, wantUpperOrLower);
+    }
+
+    std::string gclFindCategoryLitePrxAny(const std::string& primaryRoot) {
+        std::vector<std::string> dirs;
+        gclCollectSepluginsDirs(primaryRoot, dirs);
+        for (const auto& dir : dirs) {
+            std::string found = gclFindCategoryLitePrx(dir);
+            if (!found.empty()) return found;
+        }
+
+        return {};
+    }
+
+    std::string gclFindArkPluginsFile(std::string& outSeplugins) {
+        std::string primaryRoot = gclPickDeviceRoot();
+        std::vector<std::string> dirs;
+        gclCollectSepluginsDirs(primaryRoot, dirs);
+
+        for (const auto& dir : dirs) {
+            std::string plugins = gclFindTxtInSeplugins(dir, "PLUGINS.TXT");
+            if (!plugins.empty()) { outSeplugins = dir; return plugins; }
+        }
+
+        outSeplugins = dirs.empty() ? joinDirFile(primaryRoot, "seplugins") : dirs.front();
+        return joinDirFile(outSeplugins, "PLUGINS.txt");
+    }
+
+    std::string gclFindProVshFile(std::string& outSeplugins) {
+        std::string primaryRoot = gclPickDeviceRoot();
+        std::vector<std::string> dirs;
+        gclCollectSepluginsDirs(primaryRoot, dirs);
+
+        for (const auto& dir : dirs) {
+            std::string vsh = gclFindTxtInSeplugins(dir, "VSH.TXT");
+            if (!vsh.empty()) { outSeplugins = dir; return vsh; }
+        }
+
+        outSeplugins = dirs.empty() ? joinDirFile(primaryRoot, "seplugins") : dirs.front();
+        return joinDirFile(outSeplugins, "VSH.txt");
     }
 
     static bool gclReadWholeText(const std::string& path, std::string& out){
@@ -5502,9 +5628,32 @@ private:
         };
 
         if (!arkPluginsTxt) {
-            // PRO/ME: space-separated
+            // PRO/ME (incl. LME): space-separated, but tolerate CSV-style lines too.
             std::string l = toLower(line);
+            std::string trimmed = trim(l);
+            if (trimmed.empty() || trimmed[0] == ';' || trimmed[0] == '#') return false;
             if (l.find("category_lite.prx") == std::string::npos) return false;
+
+            if (l.find(',') != std::string::npos) {
+                // Treat as CSV: "vsh, <path>, 1"
+                std::vector<std::string> cols;
+                size_t start=0;
+                while (start<=l.size()){
+                    size_t pos = l.find(',', start);
+                    if (pos == std::string::npos) pos = l.size();
+                    cols.push_back(trim(l.substr(start, pos - start)));
+                    start = pos + (pos < l.size() ? 1 : 0);
+                    if (pos == l.size()) break;
+                }
+                if (cols.size() >= 3 && cols[1].find("category_lite.prx") != std::string::npos) {
+                    const std::string& state = cols[2];
+                    if (state == "0") return false;
+                    if (state == "1" || state == "on" || state == "true" || state == "enabled") return true;
+                    return true; // missing/unknown flag -> treat as enabled
+                }
+                return false;
+            }
+
             std::vector<std::string> toks;
             size_t i=0; while (i<l.size()){
                 while (i<l.size() && (l[i]==' '||l[i]=='\t'||l[i]=='\r'||l[i]=='\n')) ++i;
@@ -5514,11 +5663,13 @@ private:
             }
             for (size_t k=0;k<toks.size();++k){
                 if (toks[k].find("category_lite.prx") != std::string::npos){
+                    bool sawZero = false;
                     for (size_t m=k+1; m<toks.size(); ++m){
                         const std::string& v = toks[m];
-                        if (v == "1") return true;
+                        if (v == "1" || v == "on" || v == "true" || v == "enabled") return true;
+                        if (v == "0") sawZero = true;
                     }
-                    break;
+                    return !sawZero; // treat missing flag as enabled
                 }
             }
             return false;
@@ -5543,14 +5694,17 @@ private:
 
 
     void gclComputeInitial() {
-        gclDevice = gclPickDeviceRoot();
-        std::string seplugins = joinDirFile(gclDevice, "SEPLUGINS");
-        gclPrxPath = gclFindCategoryLitePrx(seplugins);
+        std::string primaryRoot = gclPickDeviceRoot();
+        {
+            std::string found = gclFindCategoryLitePrxAny(primaryRoot);
+            if (!found.empty()) gclPrxPath = found;
+        }
         bool havePrx = !gclPrxPath.empty();
 
-        // ARK-4: PLUGINS.txt
+        // ARK-4: PLUGINS.txt (search both roots)
         bool arkEnabled = false;
-        std::string plugins = gclFindTxtInSeplugins(seplugins, "PLUGINS.TXT");
+        std::string arkSe;
+        std::string plugins = gclFindArkPluginsFile(arkSe);
         if (!plugins.empty()){
             std::string txt; if (gclReadWholeText(plugins, txt)) {
                 size_t pos=0, s=0;
@@ -5566,9 +5720,10 @@ private:
             }
         }
 
-        // PRO/ME: VSH.txt
+        // PRO/ME (incl. LME): VSH.txt (search both roots)
         bool proEnabled = false;
-        std::string vsh = gclFindTxtInSeplugins(seplugins, "VSH.TXT");
+        std::string proSe;
+        std::string vsh = gclFindProVshFile(proSe);
         if (!vsh.empty()){
             std::string txt; if (gclReadWholeText(vsh, txt)) {
                 size_t pos=0, s=0;
@@ -5584,8 +5739,19 @@ private:
             }
         }
 
-        gclArkOn = havePrx && arkEnabled;
-        gclProOn = havePrx && proEnabled;
+        // Don’t gate enablement on PRX discovery; VSH/PLUGINS are the source of truth.
+        gclArkOn = arkEnabled;
+        gclProOn = proEnabled;
+
+        if (havePrx) {
+            gclDevice = rootPrefix(gclPrxPath);
+        } else if (!proSe.empty()) {
+            gclDevice = rootPrefix(proSe);
+        } else if (!arkSe.empty()) {
+            gclDevice = rootPrefix(arkSe);
+        } else {
+            gclDevice = primaryRoot;
+        }
     }
 
     // Update/append a line enabling/disabling the PRX
@@ -6254,14 +6420,24 @@ private:
         return true;
     }
 
-    // Ensure category_lite.prx exists under <ef0|ms0>:/SEPLUGINS
+    // Ensure category_lite.prx exists under <root>/SEPLUGINS
     // If missing, copy it from "<app base>/resources/category_lite.prx"
-    bool gclEnsurePrxPresent() {
-        if (!gclPrxPath.empty()) return true;
+    bool gclEnsurePrxPresent(const std::string& sepluginsDir) {
+        std::string seplugins = sepluginsDir;
+        if (seplugins.empty()) {
+            gclDevice = gclPickDeviceRoot();
+            seplugins = gclSepluginsDirForRoot(gclDevice);
+        }
 
-        // Where we’re going to install
-        gclDevice = gclPickDeviceRoot();
-        std::string seplugins = joinDirFile(gclDevice, "SEPLUGINS");
+        const std::string targetRoot = rootPrefix(seplugins);
+        if (!gclPrxPath.empty()) {
+            const std::string prxRoot = rootPrefix(gclPrxPath);
+            if (!targetRoot.empty() && !strcasecmp(prxRoot.c_str(), targetRoot.c_str()) &&
+                pathExists(gclPrxPath)) {
+                return true;
+            }
+        }
+
         if (!dirExists(seplugins)) {
             sceIoMkdir(seplugins.c_str(), 0777);
         }
@@ -6274,6 +6450,7 @@ private:
         if (!copyFileBuffered(src, dst)) return false;
 
         gclPrxPath = dst;   // remember the exact installed path
+        if (!targetRoot.empty()) gclDevice = targetRoot;
         return true;
     }
 
@@ -6553,8 +6730,7 @@ private:
             (!dc.snap.flatAll.empty()) ||
             (!dc.snap.uncategorized.empty()) ||
             (!dc.snap.categories.empty()) ||
-            (!dc.snap.categoryNames.empty()) ||
-            (dc.snap.hasCategories); // flag alone isn’t enough, but counts as a hint
+            (!dc.snap.categoryNames.empty());
 
         const bool needsScan = dc.dirty || !hasSnap;   // first time OR explicitly dirtied
 
@@ -6589,6 +6765,9 @@ private:
             }
 
             scanDevice(currentDevice);                  // real, slow scan
+            if (categories.empty() && uncategorized.empty()) {
+                logEmptyScanOnce(currentDevice);
+            }
             snapshotCurrentScan(dc.snap);               // cache the fresh results
             dc.dirty = false;
 
@@ -6636,8 +6815,12 @@ private:
                     gclSchemeApplied.insert(rootKey);
                 }
             }
-
-            buildCategoryRows();
+            if (!hasCategories) {
+                // No category folders present; fall back to a flat list so games are visible.
+                rebuildFlatFromCache();
+            } else {
+                buildCategoryRows();
+            }
         } else {
             // Categories Lite is Off → bypass categories and list only "Uncategorized"
             workingList = uncategorized;
@@ -7024,10 +7207,10 @@ private:
 
 
     static bool removeDirRecursive(const std::string& dir) {
-        SceUID d = pspIoOpenDir(dir.c_str());
+        SceUID d = kfeIoOpenDir(dir.c_str());
         if (d < 0) { logf("removeDirRecursive: open %s failed %d", dir.c_str(), d); return false; }
         SceIoDirent ent; memset(&ent, 0, sizeof(ent));
-        while (pspIoReadDir(d, &ent) > 0) {
+        while (kfeIoReadDir(d, &ent) > 0) {
             if (!strcmp(ent.d_name, ".") || !strcmp(ent.d_name, "..")) { memset(&ent,0,sizeof(ent)); continue; }
             std::string child = joinDirFile(dir, ent.d_name);
             if (FIO_S_ISDIR(ent.d_stat.st_mode)) {
@@ -7039,18 +7222,18 @@ private:
             memset(&ent, 0, sizeof(ent));
             sceKernelDelayThread(0); // yield
         }
-        pspIoCloseDir(d);
+        kfeIoCloseDir(d);
         return sceIoRmdir(dir.c_str()) >= 0;
     }
     static bool copyDirRecursive(const std::string& src, const std::string& dst, KernelFileExplorer* self) {
         logf("copyDirRecursive: %s -> %s", src.c_str(), dst.c_str());
         if (!ensureDirRecursive(dst)) { logf("  ensureDirRecursive failed"); return false; }
-        SceUID d = pspIoOpenDir(src.c_str());
+        SceUID d = kfeIoOpenDir(src.c_str());
         if (d < 0) { logf("  open src failed %d", d); return false; }
 
         SceIoDirent ent; memset(&ent, 0, sizeof(ent));
         bool ok = true;
-        while (ok && pspIoReadDir(d, &ent) > 0) {
+        while (ok && kfeIoReadDir(d, &ent) > 0) {
             if (!strcmp(ent.d_name, ".") || !strcmp(ent.d_name, "..")) { memset(&ent,0,sizeof(ent)); continue; }
             std::string s = joinDirFile(src, ent.d_name);
             std::string t = joinDirFile(dst, ent.d_name);
@@ -7064,7 +7247,7 @@ private:
             memset(&ent, 0, sizeof(ent));
             sceKernelDelayThread(0); // yield
         }
-        pspIoCloseDir(d);
+        kfeIoCloseDir(d);
         logf("copyDirRecursive: %s", ok ? "OK" : "FAIL");
         return ok;
     }
@@ -7074,7 +7257,7 @@ private:
         // EBOOT trees to check
         const char* gameSubs[] = {"PSP/GAME/PSX/","PSP/GAME/Utility/","PSP/GAME150/","PSP/GAME/"};
         // ISO trees to check
-        const char* isoSubs[]  = {"ISO/PSP/","ISO/"};
+        const char* isoSubs[]  = {"ISO/"};
         size_t pos = 0;
         if (path.size() >= 5) pos = 5; // after "ms0:/" or "ef0:/"
         if (kind == GameItem::EBOOT_FOLDER) {
@@ -7238,7 +7421,7 @@ private:
 
     // Recursive folder delete that shows the current child name as we go
     static bool removeDirRecursiveProgress(const std::string& dir, KernelFileExplorer* self) {
-        SceUID d = pspIoOpenDir(dir.c_str());
+        SceUID d = kfeIoOpenDir(dir.c_str());
         if (d < 0) {
             // If open fails, try removing the directory itself (may already be empty/inaccessible)
             if (self && self->msgBox) {
@@ -7255,7 +7438,7 @@ private:
 
         bool ok = true;
         SceIoDirent ent; memset(&ent, 0, sizeof(ent));
-        while (ok && pspIoReadDir(d, &ent) > 0) {
+        while (ok && kfeIoReadDir(d, &ent) > 0) {
             if (!strcmp(ent.d_name, ".") || !strcmp(ent.d_name, "..")) {
                 memset(&ent, 0, sizeof(ent));
                 continue;
@@ -7285,7 +7468,7 @@ private:
             memset(&ent, 0, sizeof(ent));
             sceKernelDelayThread(0); // yield
         }
-        pspIoCloseDir(d);
+        kfeIoCloseDir(d);
 
         // Finally remove the now-empty parent directory itself (show its name as a cue)
         if (ok) {
@@ -8755,26 +8938,60 @@ public:
                     if (pick >= 0) {
                         if (wasRootPick) {
                             // Apply Off / ARK-4 / PRO/ME to the two back-end toggles
-                            gclDevice = gclPickDeviceRoot();
-                            std::string seplugins = joinDirFile(gclDevice, "SEPLUGINS");
-                            if (!dirExists(seplugins)) sceIoMkdir(seplugins.c_str(), 0777);
-
-                            std::string plugins = gclFindTxtInSeplugins(seplugins, "PLUGINS.TXT");
-                            if (plugins.empty()) plugins = joinDirFile(seplugins, "PLUGINS.txt");
-                            std::string vsh = gclFindTxtInSeplugins(seplugins, "VSH.TXT");
-                            if (vsh.empty()) vsh = joinDirFile(seplugins, "VSH.txt");
+                            std::string pluginsSe;
+                            std::string vshSe;
+                            std::string plugins = gclFindArkPluginsFile(pluginsSe);
+                            std::string vsh = gclFindProVshFile(vshSe);
 
                             const bool wantArk = (pick == 1);
                             const bool wantPro = (pick == 2);
 
+                            std::string targetSeplugins;
+                            bool needArkFile = false;
+                            bool needProFile = false;
+                            if (wantPro) {
+                                targetSeplugins = vshSe;
+                                needProFile = true;
+                            } else if (wantArk) {
+                                targetSeplugins = pluginsSe;
+                                needArkFile = true;
+                            }
+                            if (targetSeplugins.empty()) {
+                                gclDevice = gclPickDeviceRoot();
+                                targetSeplugins = gclSepluginsDirForRoot(gclDevice);
+                                if (wantPro) {
+                                    needProFile = true;
+                                    vsh = joinDirFile(targetSeplugins, "VSH.txt");
+                                } else if (wantArk) {
+                                    needArkFile = true;
+                                    plugins = joinDirFile(targetSeplugins, "PLUGINS.txt");
+                                }
+                            } else {
+                                gclDevice = rootPrefix(targetSeplugins);
+                            }
+                            if (!dirExists(targetSeplugins)) sceIoMkdir(targetSeplugins.c_str(), 0777);
+
                             // Ensure the PRX is present if enabling either mode
-                            if ((wantArk || wantPro) && gclPrxPath.empty() && !gclEnsurePrxPresent()) {
+                            if ((wantArk || wantPro) && !gclEnsurePrxPresent(targetSeplugins)) {
                                 msgBox = new MessageBox("Could not install category_lite.prx from /resources.\nMake sure resources/category_lite.prx exists.",
                                                         nullptr, SCREEN_WIDTH, SCREEN_HEIGHT, 1.0f, 0, "", 16, 18, 8, 14, PSP_CTRL_CIRCLE);
                             } else {
-                                // Simulate the two separate toggles
-                                gclWriteEnableToFile(plugins, wantArk, /*arkPluginsTxt=*/true);
-                                gclWriteEnableToFile(vsh,     wantPro, /*arkPluginsTxt=*/false);
+                                const bool pluginsExists = !plugins.empty() && pathExists(plugins);
+                                const bool vshExists = !vsh.empty() && pathExists(vsh);
+
+                                // Only touch the file we actually need for the chosen mode
+                                if (needArkFile) gclWriteEnableToFile(plugins, wantArk, /*arkPluginsTxt=*/true);
+                                if (needProFile) gclWriteEnableToFile(vsh,     wantPro, /*arkPluginsTxt=*/false);
+
+                                // Ensure the other backend is disabled without creating empty files
+                                if (wantPro) {
+                                    if (pluginsExists) gclWriteEnableToFile(plugins, false, /*arkPluginsTxt=*/true);
+                                } else if (wantArk) {
+                                    if (vshExists) gclWriteEnableToFile(vsh, false, /*arkPluginsTxt=*/false);
+                                } else {
+                                    if (pluginsExists) gclWriteEnableToFile(plugins, false, /*arkPluginsTxt=*/true);
+                                    if (vshExists)     gclWriteEnableToFile(vsh,     false, /*arkPluginsTxt=*/false);
+                                }
                                 gclArkOn = wantArk;
                                 gclProOn = wantPro;
                                 rootKeepGclSelection = true;
