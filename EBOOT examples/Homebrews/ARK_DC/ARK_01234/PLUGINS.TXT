@@ -1,0 +1,2 @@
+homebrew, leda.prx, on
+always, bsod.prx, off

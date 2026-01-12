@@ -319,6 +319,9 @@ static Texture* catSettingsIcon = nullptr;
 static Texture* blacklistIcon = nullptr;
 static Texture* lIconTexture = nullptr;
 static Texture* rIconTexture = nullptr;
+// Device icons for header (11px tall)
+static Texture* memcardSmallIcon = nullptr;
+static Texture* internalSmallIcon = nullptr;
 static bool gEnablePopAnimations = false; // Toggle Populating animation
 static std::vector<std::string> gPopAnimDirs;
 static std::vector<size_t> gPopAnimOrder;
@@ -1434,6 +1437,84 @@ static void deleteCategoryDirs(const std::string& device, const std::string& cat
 
 
 
+
+// ---------------------------------------------------------------
+// EBOOT.PBP Category Reader (for PS1 vs Homebrew detection)
+// ---------------------------------------------------------------
+static std::string readEbootCategory(const std::string& ebootPath) {
+    SceUID fd = sceIoOpen(ebootPath.c_str(), PSP_O_RDONLY, 0777);
+    if (fd < 0) return "";
+
+    // Read PBP header magic
+    char magic[4];
+    if (sceIoRead(fd, magic, 4) != 4 || memcmp(magic, "\x00PBP", 4) != 0) {
+        sceIoClose(fd);
+        return "";
+    }
+
+    // Read SFO offset at offset 8
+    sceIoLseek(fd, 8, PSP_SEEK_SET);
+    uint32_t sfoOffset;
+    if (sceIoRead(fd, &sfoOffset, 4) != 4) {
+        sceIoClose(fd);
+        return "";
+    }
+
+    // Go to SFO and check magic
+    sceIoLseek(fd, sfoOffset, PSP_SEEK_SET);
+    char sfoMagic[4];
+    if (sceIoRead(fd, sfoMagic, 4) != 4 || memcmp(sfoMagic, "\x00PSF", 4) != 0) {
+        sceIoClose(fd);
+        return "";
+    }
+
+    // Read SFO header
+    sceIoLseek(fd, sfoOffset + 8, PSP_SEEK_SET);
+    uint32_t keyTableOffset, dataTableOffset, numEntries;
+    sceIoRead(fd, &keyTableOffset, 4);
+    sceIoRead(fd, &dataTableOffset, 4);
+    sceIoRead(fd, &numEntries, 4);
+
+    // Read entries to find CATEGORY
+    for (uint32_t i = 0; i < numEntries; i++) {
+        sceIoLseek(fd, sfoOffset + 20 + i * 16, PSP_SEEK_SET);
+        uint16_t keyOffset;
+        uint16_t dataFmt;
+        uint32_t dataLen;
+        uint32_t dataMax;
+        uint32_t dataOffset;
+
+        sceIoRead(fd, &keyOffset, 2);
+        sceIoRead(fd, &dataFmt, 2);
+        sceIoRead(fd, &dataLen, 4);
+        sceIoRead(fd, &dataMax, 4);
+        sceIoRead(fd, &dataOffset, 4);
+
+        // Read key name
+        sceIoLseek(fd, sfoOffset + keyTableOffset + keyOffset, PSP_SEEK_SET);
+        char keyName[32] = {0};
+        for (int j = 0; j < 31; j++) {
+            char c;
+            if (sceIoRead(fd, &c, 1) != 1 || c == 0) break;
+            keyName[j] = c;
+        }
+
+        if (strcmp(keyName, "CATEGORY") == 0) {
+            // Read CATEGORY value
+            sceIoLseek(fd, sfoOffset + dataTableOffset + dataOffset, PSP_SEEK_SET);
+            char category[16] = {0};
+            sceIoRead(fd, category, std::min(dataLen, (uint32_t)15));
+            sceIoClose(fd);
+            return std::string(category);
+        }
+    }
+
+    sceIoClose(fd);
+    return "";
+}
+
+// Per-frame cache to avoid reading same EBOOT multiple times in one frame
+static std::map<std::string, std::string> categoryCache;
 
 // ---------------------------------------------------------------
 // Model types + label mode
@@ -3575,10 +3656,29 @@ private:
         drawRect(0, 0, SCREEN_WIDTH, bannerH, COLOR_BANNER);
 
         const char* leftLabel = "HomeBrew Sorter Ultimate";
+        Texture* deviceIcon = nullptr;
+
         if (!showRoots && (view == View_Categories || view == View_GclSettings)) {
             leftLabel = currentDeviceHeaderName();
+            // Determine which device icon to use
+            if (!strncasecmp(currentDevice.c_str(), "ms0:", 4)) {
+                deviceIcon = memcardSmallIcon;
+            } else if (!strncasecmp(currentDevice.c_str(), "ef0:", 4)) {
+                deviceIcon = internalSmallIcon;
+            }
         }
-        drawTextAligned(5, textY, leftLabel, COLOR_WHITE, INTRAFONT_ALIGN_LEFT);
+
+        float textX = 5.0f;
+        // Draw device icon if applicable (11px tall, positioned 2px from top)
+        if (deviceIcon && deviceIcon->data) {
+            const float iconH = 11.0f;
+            const float iconY = 2.0f;
+            const float iconW = (float)deviceIcon->width * (iconH / (float)deviceIcon->height);
+            drawTextureScaled(deviceIcon, textX, iconY, iconH, 0xFFFFFFFF);
+            textX += iconW + 3.0f;  // Icon width + 3px gap
+        }
+
+        drawTextAligned(textX, textY, leftLabel, COLOR_WHITE, INTRAFONT_ALIGN_LEFT);
 
         char mid[64];
         float midX = 195.0f;
@@ -4282,9 +4382,47 @@ private:
                 catPickActive && i == catPickIndex && !isCategoryRowLocked(i));
 
             uint32_t labelColor = labelCol;
-            const char* labelText =
-                isCatMoveRow ? "[MOVE]" :
-                (isDir ? "[DIR]" : (isMoveRow ? "[MOVE]" : "FILE"));
+            const char* labelText = "[FILE]";  // default
+
+            if (isCatMoveRow) {
+                labelText = "[MOVE]";
+            } else if (isDir) {
+                labelText = "[DIR]";
+            } else if (isMoveRow) {
+                labelText = "[MOVE]";
+            } else {
+                // Use CATEGORY to determine PS1 vs Homebrew (with per-frame cache)
+                if (!showRoots && (view == View_AllFlat || view == View_CategoryContents) &&
+                    !isDir && i >= 0 && i < (int)workingList.size()) {
+                    const GameItem& gi = workingList[i];
+                    if (gi.kind == GameItem::EBOOT_FOLDER) {
+                        std::string ebootPath = gi.path + "/EBOOT.PBP";
+                        std::string category;
+
+                        // Check cache first
+                        auto it = categoryCache.find(ebootPath);
+                        if (it != categoryCache.end()) {
+                            category = it->second;
+                        } else {
+                            // Read and cache
+                            category = readEbootCategory(ebootPath);
+                            categoryCache[ebootPath] = category;
+                        }
+
+                        if (category == "ME") {
+                            labelText = "[PS1]";
+                        } else if (category == "MG") {
+                            labelText = "[HB]";
+                        } else {
+                            labelText = "[FILE]";  // fallback for unknown CATEGORY
+                        }
+                    } else {
+                        labelText = "[FILE]";  // ISO files
+                    }
+                } else {
+                    labelText = "[FILE]";
+                }
+            }
 
             if (isCatMoveRow) labelColor = COLOR_YELLOW;
 
@@ -4863,6 +5001,13 @@ private:
     }
 
     void renderOneFrame() {
+        // Clear category cache every few frames to avoid stale data
+        static int frameCount = 0;
+        frameCount++;
+        if (frameCount % 60 == 0) {  // Clear every 60 frames (~1 second at 60fps)
+            categoryCache.clear();
+        }
+
         sceGuStart(GU_DIRECT, list);
         sceGuDisable(GU_DEPTH_TEST);
         sceGuDepthMask(GU_TRUE);
@@ -9281,6 +9426,8 @@ int main(int argc, char* argv[]) {
     std::string blacklistPath = baseDir + "resources/blacklist.png";
     std::string lPath      = baseDir + "resources/L.png";
     std::string rPath      = baseDir + "resources/R.png";
+    std::string memSmallPath = baseDir + "resources/memcard_small.png";
+    std::string intSmallPath = baseDir + "resources/internal_small.png";
 
     backgroundTexture      = texLoadPNG(pngPath.c_str());
     okIconTexture          = texLoadPNG(crossPath.c_str());
@@ -9305,6 +9452,8 @@ int main(int argc, char* argv[]) {
     blacklistIcon     = texLoadPNG(blacklistPath.c_str());
     lIconTexture      = texLoadPNG(lPath.c_str());
     rIconTexture      = texLoadPNG(rPath.c_str());
+    memcardSmallIcon  = texLoadPNG(memSmallPath.c_str());
+    internalSmallIcon = texLoadPNG(intSmallPath.c_str());
 
     if (gEnablePopAnimations) {
         std::string animRoot = baseDir + "resources/animations";
