@@ -331,6 +331,16 @@ static std::vector<MBAnimFrame> gPopAnimFrames;
 static unsigned long long gPopAnimMinDelayUs = 0;
 static const int POP_ANIM_TARGET_H = 60;
 static const char* POP_ANIM_PREF = ""; // Set to a folder name to force a specific animation
+struct HomeAnimEntry {
+    std::string dir;
+    std::string creditFile;
+};
+static std::vector<HomeAnimEntry> gHomeAnimEntries;
+static int gHomeAnimIndex = -1;
+static std::vector<MBAnimFrame> gHomeAnimFrames;
+static size_t gHomeAnimFrameIndex = 0;
+static unsigned long long gHomeAnimNextUs = 0;
+static unsigned long long gHomeAnimMinDelayUs = 0;
 static const int CHECKBOX_PX      = 11;
 
 // Reserve ~4–5 chars for sizes (e.g., "123M") so it clears the left tag.
@@ -988,6 +998,39 @@ static bool parseAnimFrameName(const char* name, int& outIndex, uint32_t& outDel
     return true;
 }
 
+static void bleedTextureAlpha(Texture* t) {
+    if (!t || !t->data || t->width <= 0 || t->height <= 0) return;
+    uint32_t* px = (uint32_t*)t->data;
+    const int w = t->width;
+    const int h = t->height;
+    const int s = t->stride;
+
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            uint32_t c = px[y * s + x];
+            if ((c >> 24) != 0) continue;
+
+            uint32_t neighbor = 0;
+            if (x > 0) {
+                neighbor = px[y * s + (x - 1)];
+                if ((neighbor >> 24) != 0) { px[y * s + x] = (c & 0xFF000000) | (neighbor & 0x00FFFFFF); continue; }
+            }
+            if (x + 1 < w) {
+                neighbor = px[y * s + (x + 1)];
+                if ((neighbor >> 24) != 0) { px[y * s + x] = (c & 0xFF000000) | (neighbor & 0x00FFFFFF); continue; }
+            }
+            if (y > 0) {
+                neighbor = px[(y - 1) * s + x];
+                if ((neighbor >> 24) != 0) { px[y * s + x] = (c & 0xFF000000) | (neighbor & 0x00FFFFFF); continue; }
+            }
+            if (y + 1 < h) {
+                neighbor = px[(y + 1) * s + x];
+                if ((neighbor >> 24) != 0) { px[y * s + x] = (c & 0xFF000000) | (neighbor & 0x00FFFFFF); continue; }
+            }
+        }
+    }
+}
+
 static bool loadAnimationFrames(const std::string& dir,
                                 std::vector<MBAnimFrame>& outFrames,
                                 unsigned long long& outMinDelayUs) {
@@ -1015,6 +1058,7 @@ static bool loadAnimationFrames(const std::string& dir,
     for (const auto& f : files) {
         Texture* tex = texLoadPNG(f.path.c_str());
         if (!tex || !tex->data) { if (tex) texFree(tex); continue; }
+        bleedTextureAlpha(tex);
         outFrames.push_back({tex, f.delayMs});
         if (minDelayMs == 0 || f.delayMs < minDelayMs) minDelayMs = f.delayMs;
     }
@@ -1075,6 +1119,121 @@ static bool ensurePopAnimLoaded(const std::string& dir) {
     }
     gPopAnimLoadedDir = dir;
     return true;
+}
+
+static unsigned long long frameDelayUs(const MBAnimFrame& f, unsigned long long fallbackUs) {
+    if (f.delayMs > 0) return (unsigned long long)f.delayMs * 1000ULL;
+    if (fallbackUs > 0) return fallbackUs;
+    return 100000ULL;
+}
+
+static void collectHomeAnimations(const std::string& animRoot) {
+    gHomeAnimEntries.clear();
+    if (!dirExists(animRoot)) return;
+
+    forEachEntry(animRoot, [&](const SceIoDirent& e){
+        if (!FIO_S_ISDIR(e.d_stat.st_mode)) return;
+        std::string dir = joinDirFile(animRoot, e.d_name);
+        bool hasFrame = false;
+        std::string credit;
+        forEachEntry(dir, [&](const SceIoDirent& f){
+            if (FIO_S_ISDIR(f.d_stat.st_mode)) return;
+            int idx = 0; uint32_t delayMs = 0;
+            if (parseAnimFrameName(f.d_name, idx, delayMs)) {
+                hasFrame = true;
+            } else if (credit.empty() && endsWithNoCase(f.d_name, ".txt")) {
+                credit = f.d_name;
+            }
+        });
+        if (hasFrame) gHomeAnimEntries.push_back({dir, credit});
+    });
+
+    std::sort(gHomeAnimEntries.begin(), gHomeAnimEntries.end(),
+              [](const HomeAnimEntry& a, const HomeAnimEntry& b){
+                  return strcasecmp(basenameOf(a.dir).c_str(), basenameOf(b.dir).c_str()) < 0;
+              });
+}
+
+static bool loadHomeAnimationAt(int index) {
+    if (index < 0 || index >= (int)gHomeAnimEntries.size()) return false;
+
+    std::vector<MBAnimFrame> frames;
+    unsigned long long minDelay = 0;
+    if (!loadAnimationFrames(gHomeAnimEntries[index].dir, frames, minDelay) || frames.empty()) {
+        freeAnimationFrames(frames);
+        return false;
+    }
+
+    freeAnimationFrames(gHomeAnimFrames);
+    gHomeAnimFrames.swap(frames);
+    gHomeAnimMinDelayUs = minDelay;
+    gHomeAnimFrameIndex = 0;
+    gHomeAnimIndex = index;
+
+    unsigned long long now = (unsigned long long)sceKernelGetSystemTimeWide();
+    gHomeAnimNextUs = now + frameDelayUs(gHomeAnimFrames[0], gHomeAnimMinDelayUs);
+    return true;
+}
+
+static void pickHomeAnimation(int preferredIndex) {
+    if (gHomeAnimEntries.empty()) return;
+    int count = (int)gHomeAnimEntries.size();
+    int start = preferredIndex % count;
+    if (start < 0) start += count;
+
+    for (int i = 0; i < count; ++i) {
+        int idx = (start + i) % count;
+        if (loadHomeAnimationAt(idx)) return;
+    }
+
+    gHomeAnimIndex = -1;
+    gHomeAnimFrameIndex = 0;
+    gHomeAnimNextUs = 0;
+    gHomeAnimMinDelayUs = 0;
+    freeAnimationFrames(gHomeAnimFrames);
+}
+
+static void initHomeAnimations(const std::string& animRoot) {
+    collectHomeAnimations(animRoot);
+    if (gHomeAnimEntries.empty()) return;
+    int start = (int)(popAnimRand() % gHomeAnimEntries.size());
+    pickHomeAnimation(start);
+}
+
+static void cycleHomeAnimation(int dir) {
+    if (gHomeAnimEntries.empty()) return;
+    if (gHomeAnimIndex < 0) {
+        pickHomeAnimation(0);
+        return;
+    }
+    int count = (int)gHomeAnimEntries.size();
+    int next = (gHomeAnimIndex + dir) % count;
+    if (next < 0) next += count;
+    pickHomeAnimation(next);
+}
+
+static void advanceHomeAnimationFrame() {
+    if (gHomeAnimFrames.empty()) return;
+    if (gHomeAnimFrameIndex >= gHomeAnimFrames.size()) gHomeAnimFrameIndex = 0;
+    unsigned long long now = (unsigned long long)sceKernelGetSystemTimeWide();
+    if (gHomeAnimNextUs == 0 || now >= gHomeAnimNextUs) {
+        gHomeAnimFrameIndex = (gHomeAnimFrameIndex + 1) % gHomeAnimFrames.size();
+        gHomeAnimNextUs = now + frameDelayUs(gHomeAnimFrames[gHomeAnimFrameIndex], gHomeAnimMinDelayUs);
+    }
+}
+
+static std::string currentHomeAnimCredit() {
+    if (gHomeAnimIndex >= 0 && gHomeAnimIndex < (int)gHomeAnimEntries.size()) {
+        std::string credit = gHomeAnimEntries[gHomeAnimIndex].creditFile;
+        if (!credit.empty()) {
+            if (endsWithNoCase(credit, ".txt")) {
+                credit.erase(credit.size() - 4);
+            }
+            return credit;
+        }
+        return basenameOf(gHomeAnimEntries[gHomeAnimIndex].dir);
+    }
+    return std::string("Unknown");
 }
 
 // Dominant icon color calc (unchanged)
@@ -2426,7 +2585,7 @@ private:
     // Strip CAT_, XX, or CAT_XX from a display/category folder name to its base.
     static std::string stripCategoryPrefixes(const std::string& in){
         std::string s = in;
-        if (gclCfg.prefix && startsWithCAT(s.c_str())) {
+        if (startsWithCAT(s.c_str())) {
             s.erase(0, 4); // remove "CAT_"
         }
         if (gclCfg.catsort && hasTwoDigitsAfter(s.c_str())) {
@@ -3648,6 +3807,33 @@ private:
                                   GU_VERTEX_32BITF  | GU_TRANSFORM_2D, 2, nullptr, vtx);
         sceGuDisable(GU_TEXTURE_2D);
     }
+    void drawTextureScaledTight(Texture* t, float x, float y, float targetH, unsigned color) {
+        if (!t || !t->data || targetH <= 0.0f) return;
+        const int w = t->width;
+        const int h = t->height;
+        const int tbw = t->stride;
+        if (w <= 0 || h <= 0) return;
+        float s = targetH / (float)h;
+        float dw = (float)w * s;
+        float dh = targetH;
+
+        sceKernelDcacheWritebackRange(t->data, tbw * h * 4);
+        sceGuTexFlush();
+        sceGuTexMode(GU_PSM_8888, 0, 0, GU_FALSE);
+        sceGuTexFunc(GU_TFX_MODULATE, GU_TCC_RGBA);
+        sceGuTexImage(0, tbw, tbw, tbw, t->data);
+        sceGuTexFilter(GU_LINEAR, GU_LINEAR);
+        sceGuTexWrap(GU_CLAMP, GU_CLAMP);
+        sceGuEnable(GU_TEXTURE_2D);
+
+        struct V { float u,v; unsigned color; float x,y,z; };
+        V* vtx = (V*)sceGuGetMemory(2 * sizeof(V));
+        vtx[0] = { 0.5f,           0.5f,           color, x,      y,      0.0f };
+        vtx[1] = { (float)w - 0.5f, (float)h - 0.5f, color, x + dw, y + dh, 0.0f };
+        sceGuDrawArray(GU_SPRITES, GU_TEXTURE_32BITF | GU_COLOR_8888 |
+                                  GU_VERTEX_32BITF  | GU_TRANSFORM_2D, 2, nullptr, vtx);
+        sceGuDisable(GU_TEXTURE_2D);
+    }
     void drawHeader() {
         const int bannerH = 15;
         const float textY = (float)(bannerH - 4);
@@ -3866,32 +4052,88 @@ private:
         const float ctrlX = 290.0f;
         const float ctrlY = 22.0f;
         const float ctrlW = 185.0f;
-        const float ctrlH = 95.0f;
-        drawRect((int)ctrlX, (int)ctrlY, (int)ctrlW, (int)ctrlH, COLOR_BANNER);
+        const float keyH = 20.0f;
+        drawRect((int)ctrlX, (int)ctrlY, (int)ctrlW, (int)keyH, COLOR_BANNER);
         const unsigned keyTextCol = 0xFFBBBBBB;
-        auto drawKeyRowLeft = [&](float baseX, float& y, Texture* icon, const char* label,
-                                  bool bumpRight, unsigned textCol){
-            float iconH = 15.0f;
-            if (icon == startIconTexture || icon == selectIconTexture) iconH = 18.0f;
-            float iconW = 0.0f;
-            if (icon && icon->data && icon->height > 0) {
-                iconW = (float)icon->width * (iconH / (float)icon->height);
-            }
-            const float gap = (iconW > 0.0f) ? (6.0f + (bumpRight ? 4.0f : 0.0f)) : 0.0f;
-            float x = baseX + (bumpRight ? 6.0f : 0.0f);
-            if (bumpRight) x += 4.0f;
-            if (icon && icon->data && icon->height > 0) {
-                drawTextureScaled(icon, x, y - 10.0f, iconH, 0xFFFFFFFF);
-                x += iconW + gap;
-            }
-            const float labelPad = bumpRight ? 6.0f : 0.0f;
-            drawTextStyled(x + labelPad, y + 2.0f, label, 0.7f, textCol, 0, INTRAFONT_ALIGN_LEFT, false);
-            y += 17.0f;
-        };
+        const float keyCenterY = ctrlY + keyH * 0.5f;
+        float keyIconH = 13.0f;
+        float keyIconW = 0.0f;
+        if (okIconTexture && okIconTexture->data && okIconTexture->height > 0) {
+            keyIconW = (float)okIconTexture->width * (keyIconH / (float)okIconTexture->height);
+        }
+        const float keyLabelScale = 0.62f;
+        const float keyLabelW = measureTextWidth(keyLabelScale, "Select");
+        const float keyGap = (keyIconW > 0.0f) ? 8.0f : 0.0f;
+        float keyContentW = keyIconW + keyGap + keyLabelW;
+        float keyStartX = ctrlX + (ctrlW - keyContentW) * 0.5f;
+        if (okIconTexture && okIconTexture->data && okIconTexture->height > 0) {
+            drawTextureScaled(okIconTexture, keyStartX, keyCenterY - (keyIconH * 0.5f), keyIconH, 0xFFFFFFFF);
+        }
+        float keyTextX = keyStartX + keyIconW + keyGap;
+        float keyTextBaseline = keyCenterY + 3.0f;
+        drawTextStyled(keyTextX, keyTextBaseline, "Select", keyLabelScale, keyTextCol, 0, INTRAFONT_ALIGN_LEFT, false);
 
-        float keyY = ctrlY + 16.0f;
-        const float keyX = ctrlX + 5.0f;
-        drawKeyRowLeft(keyX, keyY, okIconTexture, "Select", true, keyTextCol);
+        const float creditGap = 6.0f;
+        const float creditY = ctrlY + keyH + creditGap - 1.0f;
+        const float creditH = 39.0f;
+        drawRect((int)ctrlX, (int)creditY, (int)ctrlW, (int)creditH, COLOR_BANNER);
+        const float creditTopLineY = creditY + 14.0f;
+        const float creditBottomY = creditY + creditH - 6.0f;
+        std::string credit = gHomeAnimEntries.empty() ? "No animations" : currentHomeAnimCredit();
+        drawTextStyled(ctrlX + ctrlW * 0.5f, creditTopLineY, "Animation by:", 0.7f, keyTextCol, 0, INTRAFONT_ALIGN_CENTER, false);
+        drawTextStyled(ctrlX + ctrlW * 0.5f, creditBottomY, credit.c_str(), 0.65f, COLOR_WHITE, 0, INTRAFONT_ALIGN_CENTER, false);
+
+        const float switchGap = 5.0f;
+        const float switchY = creditY + creditH + switchGap;
+        const float switchH = 42.0f;
+        drawRect((int)ctrlX, (int)switchY, (int)ctrlW, (int)switchH, COLOR_BANNER);
+
+        const float switchPadY = switchY + 3.0f;
+        const float switchIconH = 14.0f;
+        const float switchMidX = ctrlX + ctrlW * 0.5f;
+        if (lIconTexture && lIconTexture->data) {
+            drawTextureScaled(lIconTexture, ctrlX + 5.0f, switchPadY, switchIconH, 0xFFFFFFFF);
+        }
+        if (rIconTexture && rIconTexture->data) {
+            drawTextureScaled(rIconTexture, ctrlX + ctrlW - switchIconH - 5.0f, switchPadY, switchIconH, 0xFFFFFFFF);
+        }
+        drawTextStyled(switchMidX, switchPadY + 12.0f, "Change Animation", 0.7f, keyTextCol, 0, INTRAFONT_ALIGN_CENTER, false);
+        char animBuf[32];
+        int animCount = (int)gHomeAnimEntries.size();
+        int animIdxOne = (gHomeAnimIndex >= 0 && gHomeAnimIndex < animCount) ? (gHomeAnimIndex + 1) : 0;
+        if (animCount > 0) snprintf(animBuf, sizeof(animBuf), "%d/%d", animIdxOne, animCount);
+        else snprintf(animBuf, sizeof(animBuf), "0/0");
+        drawTextStyled(switchMidX, switchPadY + 32.0f, animBuf, 0.7f, COLOR_WHITE, 0, INTRAFONT_ALIGN_CENTER, false);
+
+        const float animGap = 8.0f;
+        const float animH = 110.0f;
+        float animY = switchY + switchH + animGap - 3.0f;
+        const float footerMargin = 18.0f + 4.0f;
+        float maxAnimY = SCREEN_HEIGHT - footerMargin - animH;
+        if (animY > maxAnimY) animY = maxAnimY;
+        const float animX = ctrlX;
+        const float animW = ctrlW;
+        drawRect((int)animX, (int)animY, (int)animW, (int)animH, COLOR_BANNER);
+
+        advanceHomeAnimationFrame();
+        Texture* animTex = (gHomeAnimFrameIndex < gHomeAnimFrames.size()) ? gHomeAnimFrames[gHomeAnimFrameIndex].tex : nullptr;
+        if (animTex && animTex->data && animTex->width > 0 && animTex->height > 0) {
+            const float pad = 8.0f;
+            const float boxW = animW - pad * 2.0f;
+            const float boxH = animH - pad * 2.0f;
+            float sx = boxW / (float)animTex->width;
+            float sy = boxH / (float)animTex->height;
+            float s = (sx < sy) ? sx : sy;
+            float drawH = (float)animTex->height * s;
+            float drawW = (float)animTex->width * s;
+            float drawX = animX + (animW - drawW) * 0.5f;
+            float drawY = animY + (animH - drawH) * 0.5f;
+            drawTextureScaledTight(animTex, drawX, drawY, drawH, 0xFFFFFFFF);
+        } else {
+            const char* noAnim = gHomeAnimEntries.empty() ? "No animations" : "Loading...";
+            drawTextStyled(animX + animW * 0.5f, animY + animH * 0.5f, noAnim,
+                           0.7f, COLOR_GRAY, 0, INTRAFONT_ALIGN_CENTER, false);
+        }
 
         const int rowCount = (int)entries.size();
         const float top = panelY + 4.0f;
@@ -4290,7 +4532,7 @@ private:
             const float textLeftX = panelX + 32.0f;
             const float iconH = 15.0f;
 
-            const bool isBlacklistRow = (!strncasecmp(name, "Blacklist:", 10));
+            const bool isBlacklistRow = (!strncasecmp(name, "Folder Rename Blacklist:", 24));
             Texture* icon = catSettingsIcon;
             if (isBlacklistRow) {
                 if (blacklistIcon) icon = blacklistIcon;
@@ -4567,7 +4809,7 @@ private:
         sceGuBlendFunc(GU_ADD, GU_SRC_ALPHA, GU_ONE_MINUS_SRC_ALPHA, 0, 0);
         drawRect(0, bannerY, SCREEN_WIDTH, bannerH, COLOR_BANNER);
         drawTextAligned(SCREEN_WIDTH / 2.0f, textY,
-                        "Original by Sakya, Valentin, Suloku. Reimagined by wad11656.",
+                        "Original by Sakya, Valentin, & Suloku. Reimagined by wad11656. Thanks joel16.",
                         COLOR_WHITE, INTRAFONT_ALIGN_CENTER);
     }
 
@@ -6343,7 +6585,7 @@ private:
         add(std::string("Sort categories: ")    + gclSortLabel(gclCfg.catsort));
         {
             char buf[64];
-            snprintf(buf, sizeof(buf), "Blacklist: %d item%s", (int)blNow.size(),
+            snprintf(buf, sizeof(buf), "Folder Rename Blacklist: %d item%s", (int)blNow.size(),
                      blNow.size() == 1 ? "" : "s");
             add(buf, gclCfg.prefix == 0);
         }
@@ -6383,7 +6625,7 @@ private:
                 items.push_back({optMenuOwnedLabels.back().c_str(), false});
             }
         }
-        optMenu = new OptionListMenu("Blacklist", "Folders ending with these strings skip CAT_ prefixes.", items, SCREEN_WIDTH, SCREEN_HEIGHT);
+        optMenu = new OptionListMenu("Folder Rename Blacklist", "Block these folder names from auto-prefixing with \"CAT_\"/converting to categories.", items, SCREEN_WIDTH, SCREEN_HEIGHT);
         gclPending = GCL_SK_Blacklist;
         if (selectIndex < 0) selectIndex = 0;
         if (selectIndex >= (int)items.size()) selectIndex = (int)items.size() - 1;
@@ -8179,6 +8421,11 @@ public:
         if (lIconTexture) { texFree(lIconTexture); lIconTexture = nullptr; }
         if (rIconTexture) { texFree(rIconTexture); rIconTexture = nullptr; }
         if (!gPopAnimFrames.empty()) { freeAnimationFrames(gPopAnimFrames); gPopAnimMinDelayUs = 0; }
+        if (!gHomeAnimFrames.empty()) { freeAnimationFrames(gHomeAnimFrames); gHomeAnimMinDelayUs = 0; }
+        gHomeAnimEntries.clear();
+        gHomeAnimIndex = -1;
+        gHomeAnimFrameIndex = 0;
+        gHomeAnimNextUs = 0;
         gPopAnimLoadedDir.clear();
         gPopAnimDirs.clear();
         gPopAnimOrder.clear();
@@ -8538,6 +8785,10 @@ public:
 
         // R trigger: toggle Sort mode on Categories; rename elsewhere
         if (pressed & PSP_CTRL_RTRIGGER) {
+            if (showRoots) {
+                cycleHomeAnimation(+1);
+                return;
+            }
             if (!showRoots && view == View_Categories) {
                 if (!gclCfg.catsort) {
                     msgBox = new MessageBox(
@@ -8594,6 +8845,10 @@ public:
 
         // Toggle label mode (Triangle → previously LTRIGGER; keep as-is)
         if (pressed & PSP_CTRL_LTRIGGER) {
+            if (showRoots) {
+                cycleHomeAnimation(-1);
+                return;
+            }
             if (!showRoots && view == View_Categories) {
                 if (!gclCfg.catsort) {
                     msgBox = new MessageBox(
@@ -9428,6 +9683,7 @@ int main(int argc, char* argv[]) {
     std::string rPath      = baseDir + "resources/R.png";
     std::string memSmallPath = baseDir + "resources/memcard_small.png";
     std::string intSmallPath = baseDir + "resources/internal_small.png";
+    std::string animRoot   = baseDir + "resources/animations";
 
     backgroundTexture      = texLoadPNG(pngPath.c_str());
     okIconTexture          = texLoadPNG(crossPath.c_str());
@@ -9455,8 +9711,9 @@ int main(int argc, char* argv[]) {
     memcardSmallIcon  = texLoadPNG(memSmallPath.c_str());
     internalSmallIcon = texLoadPNG(intSmallPath.c_str());
 
+    initHomeAnimations(animRoot);
+
     if (gEnablePopAnimations) {
-        std::string animRoot = baseDir + "resources/animations";
         if (dirExists(animRoot)) {
             bool prefUsed = false;
             if (POP_ANIM_PREF && POP_ANIM_PREF[0]) {
