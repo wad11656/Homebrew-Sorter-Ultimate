@@ -2274,6 +2274,9 @@ private:
     // During rename we temporarily hold the current icon so refresh doesn't drop it.
     Texture* iconCarryTex = nullptr;
     std::string iconCarryForPath;
+    Texture* categoryIconTex = nullptr;
+    std::string categoryIconKey;
+    bool categoryIconMissing = false;
 
 
     // Per-row flags (roots view)
@@ -2821,6 +2824,8 @@ private:
 
     // ---- Categories sort mode (UI) ----
     bool catSortMode     = false;   // SELECT toggles this while in View_Categories
+    int catScrollIndex = -1;
+    unsigned long long catScrollStartUs = 0;
 
     // Helper: is a visible row non-movable (header/footer)?
     bool isCategoryRowLocked(int row) const {
@@ -3925,6 +3930,106 @@ private:
         selectionIconKey.clear();
     }
 
+    void freeCategoryIcon() {
+        if (categoryIconTex) {
+            texFree(categoryIconTex);
+        }
+        categoryIconTex = nullptr;
+        categoryIconKey.clear();
+        categoryIconMissing = false;
+    }
+
+    std::string findCategoryIconPath(const std::string& cat) const {
+        if (cat.empty()) return {};
+        if (!strcasecmp(cat.c_str(), kCatSettingsLabel)) return {};
+        if (!strcasecmp(cat.c_str(), "Uncategorized")) return {};
+        if (currentDevice.empty()) return {};
+
+        const char* roots[] = {"ISO/","PSP/GAME/","PSP/GAME150/","PSP/GAME/PSX/","PSP/GAME/Utility/"};
+        for (const char* r : roots) {
+            std::string dir = currentDevice + std::string(r) + cat;
+            if (!dirExists(dir)) continue;
+            std::string iconPath = findFileCaseInsensitive(dir, "ICON0.PNG");
+            if (!iconPath.empty()) return iconPath;
+        }
+        return {};
+    }
+
+    void ensureCategoryIcon() {
+        if (msgBox || showRoots || view != View_Categories || selectedIndex < 0 || selectedIndex >= (int)entries.size()) {
+            freeCategoryIcon();
+            return;
+        }
+        const char* name = entries[selectedIndex].d_name;
+        if (!name || !name[0]) { freeCategoryIcon(); return; }
+        const std::string key(name);
+        if (key == categoryIconKey && (categoryIconTex || categoryIconMissing)) return;
+
+        freeCategoryIcon();
+        std::string iconPath = findCategoryIconPath(key);
+        if (iconPath.empty()) {
+            categoryIconKey = key;
+            categoryIconMissing = true;
+            return;
+        }
+        Texture* t = texLoadPNG(iconPath.c_str());
+        if (!t || !t->data) {
+            if (t) texFree(t);
+            categoryIconKey = key;
+            categoryIconMissing = true;
+            return;
+        }
+        categoryIconTex = t;
+        categoryIconKey = key;
+        categoryIconMissing = false;
+    }
+
+    void drawCategoryIconLowerRight() {
+        if (!categoryIconTex || !categoryIconTex->data) return;
+
+        const int boxW = 144, boxH = 80;
+        const float ctrlX = 290.0f;
+        const float ctrlW = 185.0f;
+        const int controlsTop = SCREEN_HEIGHT - 30;
+
+        const int w   = categoryIconTex->width;
+        const int h   = categoryIconTex->height;
+        const int tbw = categoryIconTex->stride;
+
+        float sx = (float)boxW / (float)w;
+        float sy = (float)boxH / (float)h;
+        float s  = (sx < sy) ? sx : sy;
+        if (s > 1.0f) s = 1.0f;
+        int dw = (int)(w * s), dh = (int)(h * s);
+
+        const int boxX = (int)(ctrlX + (ctrlW - boxW) * 0.5f);
+        const int boxY = controlsTop - 6 - boxH + 12;
+        int x = boxX + (boxW - dw) / 2 + 1;
+        int y = boxY + (boxH - dh) / 2;
+
+        sceKernelDcacheWritebackRange(categoryIconTex->data, tbw * h * 4);
+        sceGuTexFlush();
+
+        sceGuTexMode(GU_PSM_8888, 0, 0, GU_FALSE);
+        sceGuTexFunc(GU_TFX_REPLACE, GU_TCC_RGBA);
+        sceGuTexImage(0, tbw, tbw, tbw, categoryIconTex->data);
+        sceGuTexFilter(GU_LINEAR, GU_LINEAR);
+        sceGuTexWrap(GU_CLAMP, GU_CLAMP);
+        sceGuEnable(GU_TEXTURE_2D);
+
+        const float u0 = 0.0f, v0 = 0.0f;
+        const float u1 = (float)w - 0.5f;
+        const float v1 = (float)h - 0.5f;
+
+        struct V { float u,v; unsigned color; float x,y,z; };
+        V* vtx = (V*)sceGuGetMemory(2 * sizeof(V));
+        vtx[0] = { u0, v0, 0xFFFFFFFF, (float)x,      (float)y,      0.0f };
+        vtx[1] = { u1, v1, 0xFFFFFFFF, (float)(x+dw), (float)(y+dh), 0.0f };
+        sceGuDrawArray(GU_SPRITES, GU_TEXTURE_32BITF | GU_COLOR_8888 |
+                                  GU_VERTEX_32BITF  | GU_TRANSFORM_2D, 2, nullptr, vtx);
+        sceGuDisable(GU_TEXTURE_2D);
+    }
+
     Texture* loadIconForGameItem(const GameItem& gi) {
         if (gi.kind == GameItem::EBOOT_FOLDER) {
             std::string iconPath = findFileCaseInsensitive(gi.path, "ICON0.PNG");
@@ -4052,25 +4157,27 @@ private:
         const float ctrlX = 290.0f;
         const float ctrlY = 22.0f;
         const float ctrlW = 185.0f;
-        const float keyH = 20.0f;
+        const float keyH = 27.0f;
         drawRect((int)ctrlX, (int)ctrlY, (int)ctrlW, (int)keyH, COLOR_BANNER);
         const unsigned keyTextCol = 0xFFBBBBBB;
-        const float keyCenterY = ctrlY + keyH * 0.5f;
-        float keyIconH = 13.0f;
+        float keyIconH = 15.0f;
         float keyIconW = 0.0f;
         if (okIconTexture && okIconTexture->data && okIconTexture->height > 0) {
             keyIconW = (float)okIconTexture->width * (keyIconH / (float)okIconTexture->height);
         }
-        const float keyLabelScale = 0.62f;
-        const float keyLabelW = measureTextWidth(keyLabelScale, "Select");
-        const float keyGap = (keyIconW > 0.0f) ? 8.0f : 0.0f;
-        float keyContentW = keyIconW + keyGap + keyLabelW;
-        float keyStartX = ctrlX + (ctrlW - keyContentW) * 0.5f;
+        const float keyLabelScale = 0.7f;
+        const float keyBaseX = ctrlX + 5.0f;
+        const float keyIconX = keyBaseX + 10.0f;
+        const float keyGap = (keyIconW > 0.0f) ? 10.0f : 0.0f;
+        const float keyLabelPad = 6.0f;
+        const float keyY = ctrlY + 16.0f;
         if (okIconTexture && okIconTexture->data && okIconTexture->height > 0) {
-            drawTextureScaled(okIconTexture, keyStartX, keyCenterY - (keyIconH * 0.5f), keyIconH, 0xFFFFFFFF);
+            drawTextureScaled(okIconTexture, keyIconX, keyY - 10.0f, keyIconH, 0xFFFFFFFF);
         }
-        float keyTextX = keyStartX + keyIconW + keyGap;
-        float keyTextBaseline = keyCenterY + 3.0f;
+        float keyTextX = (keyIconW > 0.0f)
+            ? (keyIconX + keyIconW + keyGap + keyLabelPad)
+            : (keyBaseX + keyLabelPad);
+        float keyTextBaseline = keyY + 2.0f;
         drawTextStyled(keyTextX, keyTextBaseline, "Select", keyLabelScale, keyTextCol, 0, INTRAFONT_ALIGN_LEFT, false);
 
         const float creditGap = 6.0f;
@@ -4081,7 +4188,7 @@ private:
         const float creditBottomY = creditY + creditH - 6.0f;
         std::string credit = gHomeAnimEntries.empty() ? "No animations" : currentHomeAnimCredit();
         drawTextStyled(ctrlX + ctrlW * 0.5f, creditTopLineY, "Animation by:", 0.7f, keyTextCol, 0, INTRAFONT_ALIGN_CENTER, false);
-        drawTextStyled(ctrlX + ctrlW * 0.5f, creditBottomY, credit.c_str(), 0.65f, COLOR_WHITE, 0, INTRAFONT_ALIGN_CENTER, false);
+        drawTextStyled(ctrlX + ctrlW * 0.5f, creditBottomY, credit.c_str(), 0.7f, COLOR_WHITE, 0, INTRAFONT_ALIGN_CENTER, false);
 
         const float switchGap = 5.0f;
         const float switchY = creditY + creditH + switchGap;
@@ -4106,7 +4213,7 @@ private:
         drawTextStyled(switchMidX, switchPadY + 32.0f, animBuf, 0.7f, COLOR_WHITE, 0, INTRAFONT_ALIGN_CENTER, false);
 
         const float animGap = 8.0f;
-        const float animH = 110.0f;
+        const float animH = 103.0f;
         float animY = switchY + switchH + animGap - 3.0f;
         const float footerMargin = 18.0f + 4.0f;
         float maxAnimY = SCREEN_HEIGHT - footerMargin - animH;
@@ -4280,11 +4387,12 @@ private:
         const float ctrlX = 290.0f;
         const float ctrlY = 22.0f;
         const float ctrlW = 185.0f;
-        const float ctrlH = 95.0f;
+        const float ctrlHFull = 94.0f;
+        const float ctrlH = catSortMode ? (ctrlHFull - 17.0f) : ctrlHFull;
         drawRect((int)ctrlX, (int)ctrlY, (int)ctrlW, (int)ctrlH, COLOR_BANNER);
 
         // Mode switcher block (L/R)
-        const float modeY = ctrlY + ctrlH + 6.0f;
+        const float modeY = ctrlY + ctrlHFull + 5.0f;
         const float modeH = 42.0f;
         drawRect((int)ctrlX, (int)modeY, (int)ctrlW, (int)modeH, COLOR_BANNER);
 
@@ -4366,6 +4474,11 @@ private:
         const float iconGap = 10.0f;
 
         const bool hasSettingsRow = (rowCount > 0 && !strcasecmp(entries[0].d_name, kCatSettingsLabel));
+        const unsigned long long nowUs = (unsigned long long)sceKernelGetSystemTimeWide();
+        if (catScrollIndex != selectedIndex) {
+            catScrollIndex = selectedIndex;
+            catScrollStartUs = nowUs;
+        }
         for (int i = startRow; i < endRow; ++i) {
             const char* name = entries[i].d_name;
             const bool sel = (i == selectedIndex);
@@ -4394,6 +4507,8 @@ private:
             }
 
             const float textLeftX = panelX + 32.0f; // left aligned
+            const float textRightX = panelX + panelW - 12.0f;
+            const float textAvailW = textRightX - textLeftX;
 
             // Icon
             const float iconHCat = 15.0f;
@@ -4422,22 +4537,62 @@ private:
                 }
             }
 
-            drawTextStyled(textLeftX, baseline, label.c_str(),
+            auto clipTextToWidth = [&](const std::string& s, float maxW, float offsetPx)->std::string {
+                if (s.empty() || maxW <= 0.0f) return std::string();
+                float skip = (offsetPx > 0.0f) ? offsetPx : 0.0f;
+                float used = 0.0f;
+                std::string out;
+                out.reserve(s.size());
+                for (size_t ci = 0; ci < s.size(); ++ci) {
+                    char buf[2] = { s[ci], '\0' };
+                    float cw = measureTextWidth(scale, buf);
+                    if (skip > 0.0f) {
+                        if (skip >= cw) { skip -= cw; continue; }
+                        skip = 0.0f;
+                        continue; // drop partially skipped char
+                    }
+                    if (used + cw > maxW) break;
+                    out.push_back(s[ci]);
+                    used += cw;
+                }
+                return out;
+            };
+
+            float textOffsetX = 0.0f;
+            float textOverflow = 0.0f;
+            if (textAvailW > 0.0f) {
+                const float textW = measureTextWidth(scale, label.c_str());
+                textOverflow = textW - textAvailW;
+            }
+            if (sel && textOverflow > 2.0f) {
+                const float speed = 120.0f; // px/sec
+                const double elapsed = (double)(nowUs - catScrollStartUs) / 1000000.0;
+                textOffsetX = (float)(elapsed * speed);
+                if (textOffsetX > textOverflow) textOffsetX = textOverflow;
+            }
+
+            std::string drawLabel = label;
+            if (textAvailW > 0.0f) {
+                const float clipOffset = (textOffsetX > 0.0f) ? textOffsetX : 0.0f;
+                drawLabel = clipTextToWidth(label, textAvailW, clipOffset);
+            }
+
+            drawTextStyled(textLeftX, baseline, drawLabel.c_str(),
                            scale, textCol, shadowCol, INTRAFONT_ALIGN_LEFT, false);
-            if (label.find('_') != std::string::npos) {
+            if (drawLabel.find('_') != std::string::npos) {
                 const float underscoreW = measureTextWidth(scale, "_");
                 const float underlineY = baseline + 2.0f;
                 std::string prefix;
-                prefix.reserve(label.size());
-                for (size_t ci = 0; ci < label.size(); ++ci) {
-                    if (label[ci] == '_') {
+                prefix.reserve(drawLabel.size());
+                for (size_t ci = 0; ci < drawLabel.size(); ++ci) {
+                    if (drawLabel[ci] == '_') {
                         float prefixW = measureTextWidth(scale, prefix.c_str());
                         float ux = textLeftX + prefixW;
                         int lineW = (int)(underscoreW + 1.0f);
                         if (lineW < 1) lineW = 1;
                         drawRect((int)(ux), (int)(underlineY - 1.0f), lineW, 1, textCol);
                     }
-                    prefix.push_back(label[ci]);
+                    prefix.push_back(drawLabel[ci]);
                 }
             }
 
@@ -5286,6 +5441,8 @@ private:
 
         ensureSelectionIcon();
         drawSelectedIconLowerRight();
+        ensureCategoryIcon();
+        drawCategoryIconLowerRight();
 
         if (msgBox)  msgBox->render(font);
         if (gUsbBox) gUsbBox->render(font);
@@ -6841,6 +6998,38 @@ private:
         return true;
     }
 
+    void gclMaybeUpdatePrx() {
+        if (!gclArkOn && !gclProOn) return;
+        if (gclPrxPath.empty()) return;
+
+        SceIoStat srcSt{}, curSt{};
+        std::string baseDir = getBaseDir(gExecPath);
+        std::string src = baseDir + "resources/category_lite.prx";
+        if (!pathExists(src, &srcSt) || !pathExists(gclPrxPath, &curSt)) return;
+        if (srcSt.st_size == curSt.st_size) return;
+
+        std::string dir = parentOf(gclPrxPath);
+        if (dir.empty()) return;
+        std::string tmp = joinDirFile(dir, "category_lite_new.prx");
+        std::string old = joinDirFile(dir, "category_lite_old.prx");
+
+        if (pathExists(tmp)) sceIoRemove(tmp.c_str());
+        if (!copyFileBuffered(src, tmp)) { if (pathExists(tmp)) sceIoRemove(tmp.c_str()); return; }
+
+        if (pathExists(old)) sceIoRemove(old.c_str());
+        if (sceIoRename(gclPrxPath.c_str(), old.c_str()) < 0) {
+            sceIoRemove(tmp.c_str());
+            return;
+        }
+
+        if (sceIoRename(tmp.c_str(), gclPrxPath.c_str()) < 0) {
+            copyFileBuffered(tmp, gclPrxPath);
+            if (!pathExists(gclPrxPath)) sceIoRename(old.c_str(), gclPrxPath.c_str());
+            if (pathExists(tmp)) sceIoRemove(tmp.c_str());
+            return;
+        }
+    }
+
     void buildRootRows(){
         clearUI();
         int preselect = -1;
@@ -6855,6 +7044,7 @@ private:
         if (opPhase != OP_SelectDevice) {
             gclLoadConfig();
             gclComputeInitial();
+            gclMaybeUpdatePrx();
         }
 
         auto addSimpleRow = [&](const char* name){
@@ -8401,6 +8591,7 @@ public:
     ~KernelFileExplorer(){
         if (font) intraFontUnload(font);
         freeSelectionIcon();
+        freeCategoryIcon();
         if (placeholderIconTexture) { texFree(placeholderIconTexture); placeholderIconTexture = nullptr; }
         if (circleIconTexture) { texFree(circleIconTexture); circleIconTexture = nullptr; }
         if (triangleIconTexture) { texFree(triangleIconTexture); triangleIconTexture = nullptr; }
