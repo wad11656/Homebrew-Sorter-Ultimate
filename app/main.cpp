@@ -322,6 +322,9 @@ static Texture* rIconTexture = nullptr;
 // Device icons for header (11px tall)
 static Texture* memcardSmallIcon = nullptr;
 static Texture* internalSmallIcon = nullptr;
+static Texture* ps1IconTexture = nullptr;
+static Texture* homebrewIconTexture = nullptr;
+static Texture* isoIconTexture = nullptr;
 static bool gEnablePopAnimations = false; // Toggle Populating animation
 static std::vector<std::string> gPopAnimDirs;
 static std::vector<size_t> gPopAnimOrder;
@@ -817,7 +820,7 @@ bool readDaxIconPNG(const std::string& path, std::vector<uint8_t>& outPng);
 // ---------------------------------------------------------------
 // Small helpers
 // ---------------------------------------------------------------
-static const char* kCatSettingsLabel = "Game Categories settings";
+static const char* kCatSettingsLabel = "Game Categories Settings";
 
 static const char* rootDisplayName(const char* r) {
     if (!r) return "";
@@ -1786,7 +1789,8 @@ static void sortLikeLegacy(std::vector<GameItem>& v){
 void sortWorkingListAlpha(bool byTitle,
                           std::vector<GameItem>& workingList,
                           int& selectedIndex,
-                          int& scrollOffset) {
+                          int& scrollOffset,
+                          int visibleRows) {
     if (workingList.empty()) return;
 
     std::string keepPath;
@@ -1811,8 +1815,8 @@ void sortWorkingListAlpha(bool byTitle,
             if (workingList[i].path == keepPath) { selectedIndex = i; break; }
         }
         if (selectedIndex < scrollOffset) scrollOffset = selectedIndex;
-        if (selectedIndex >= scrollOffset + MAX_DISPLAY)
-            scrollOffset = selectedIndex - MAX_DISPLAY + 1;
+        if (selectedIndex >= scrollOffset + visibleRows)
+            scrollOffset = selectedIndex - visibleRows + 1;
         if (scrollOffset < 0) scrollOffset = 0;
     }
 }
@@ -2826,6 +2830,8 @@ private:
     bool catSortMode     = false;   // SELECT toggles this while in View_Categories
     int catScrollIndex = -1;
     unsigned long long catScrollStartUs = 0;
+    int gameScrollIndex = -1;
+    unsigned long long gameScrollStartUs = 0;
 
     // Helper: is a visible row non-movable (header/footer)?
     bool isCategoryRowLocked(int row) const {
@@ -2840,6 +2846,8 @@ private:
     static constexpr float CAT_ROW_H = 16.0f;
     static constexpr float CAT_LIST_OFFSET_Y = 5.0f;
     static constexpr float CAT_SETTINGS_GAP = 9.0f;
+    static constexpr float GAME_ROW_H = 16.0f;
+    static constexpr float GAME_LIST_OFFSET_Y = CAT_LIST_OFFSET_Y - 5.0f;
     int categoryVisibleRows() const {
         const float panelH = 226.0f;
         float listH = panelH - 8.0f - CAT_LIST_OFFSET_Y;
@@ -2856,6 +2864,14 @@ private:
         int visible = (int)(listH / rowH);
         if (visible < 1) visible = 1;
         return visible;
+    }
+    int contentVisibleRows() const {
+        const float panelH = 226.0f;
+        float listH = panelH - 8.0f - GAME_LIST_OFFSET_Y;
+        if (listH < GAME_ROW_H) listH = GAME_ROW_H;
+        int visible = (int)(listH / GAME_ROW_H);
+        if (visible < 1) visible = 1;
+        return visible + 1;
     }
     const char* currentDeviceHeaderName() const {
         if (!currentDevice.empty()) {
@@ -3839,6 +3855,22 @@ private:
                                   GU_VERTEX_32BITF  | GU_TRANSFORM_2D, 2, nullptr, vtx);
         sceGuDisable(GU_TEXTURE_2D);
     }
+    static std::string ellipsizeText(const std::string& s, size_t maxChars) {
+        if (s.size() <= maxChars) return s;
+        if (maxChars <= 3) return s.substr(0, maxChars);
+        return s.substr(0, maxChars - 3) + "...";
+    }
+    std::string currentCategoryHeaderLabel() const {
+        if (view == View_CategoryContents) {
+            if (!currentCategory.empty()) return currentCategory;
+            return "Uncategorized";
+        }
+        if (view == View_AllFlat) {
+            if (gclArkOn || gclProOn) return "All content";
+            return "Uncategorized";
+        }
+        return currentDeviceHeaderName();
+    }
     void drawHeader() {
         const int bannerH = 15;
         const float textY = (float)(bannerH - 4);
@@ -3846,17 +3878,25 @@ private:
         sceGuBlendFunc(GU_ADD, GU_SRC_ALPHA, GU_ONE_MINUS_SRC_ALPHA, 0, 0);
         drawRect(0, 0, SCREEN_WIDTH, bannerH, COLOR_BANNER);
 
-        const char* leftLabel = "HomeBrew Sorter Ultimate";
+        std::string leftLabel = "HomeBrew Sorter Ultimate";
         Texture* deviceIcon = nullptr;
+        bool underlineLabel = false;
 
-        if (!showRoots && (view == View_Categories || view == View_GclSettings)) {
-            leftLabel = currentDeviceHeaderName();
-            // Determine which device icon to use
+        auto pickDeviceIcon = [&]() {
             if (!strncasecmp(currentDevice.c_str(), "ms0:", 4)) {
                 deviceIcon = memcardSmallIcon;
             } else if (!strncasecmp(currentDevice.c_str(), "ef0:", 4)) {
                 deviceIcon = internalSmallIcon;
             }
+        };
+
+        if (!showRoots && (view == View_Categories || view == View_GclSettings)) {
+            leftLabel = currentDeviceHeaderName();
+            pickDeviceIcon();
+        } else if (!showRoots && (view == View_CategoryContents || view == View_AllFlat)) {
+            leftLabel = ellipsizeText(currentCategoryHeaderLabel(), 23);
+            underlineLabel = true;
+            pickDeviceIcon();
         }
 
         float textX = 5.0f;
@@ -3869,7 +3909,24 @@ private:
             textX += iconW + 3.0f;  // Icon width + 3px gap
         }
 
-        drawTextAligned(textX, textY, leftLabel, COLOR_WHITE, INTRAFONT_ALIGN_LEFT);
+        drawTextAligned(textX, textY, leftLabel.c_str(), COLOR_WHITE, INTRAFONT_ALIGN_LEFT);
+        if (underlineLabel && leftLabel.find('_') != std::string::npos) {
+            const float scale = 0.5f;
+            const float underscoreW = measureTextWidth(scale, "_");
+            const float underlineY = textY + 2.0f;
+            std::string prefix;
+            prefix.reserve(leftLabel.size());
+            for (size_t ci = 0; ci < leftLabel.size(); ++ci) {
+                if (leftLabel[ci] == '_') {
+                    float prefixW = measureTextWidth(scale, prefix.c_str());
+                    float ux = textX + prefixW;
+                    int lineW = (int)(underscoreW + 1.0f);
+                    if (lineW < 1) lineW = 1;
+                    drawRect((int)(ux), (int)(underlineY - 1.0f), lineW, 1, COLOR_WHITE);
+                }
+                prefix.push_back(leftLabel[ci]);
+            }
+        }
 
         char mid[64];
         float midX = 195.0f;
@@ -3882,11 +3939,27 @@ private:
             midX = SCREEN_WIDTH / 2.0f;
             midAlign = INTRAFONT_ALIGN_CENTER;
         } else if (view == View_GclSettings) {
-            snprintf(mid, sizeof(mid), "Categories settings");
+            snprintf(mid, sizeof(mid), "Categories Settings");
             midX = SCREEN_WIDTH / 2.0f;
             midAlign = INTRAFONT_ALIGN_CENTER;
-        } else {
-            snprintf(mid, sizeof(mid), "Games found: %d", (int)flatAll.size());
+        } else if (view == View_CategoryContents || view == View_AllFlat) {
+            int appCount = (int)workingList.size();
+            int selectedCount = 0;
+            uint64_t selectedBytes = 0;
+            if (!checked.empty()) {
+                for (const auto& gi : workingList) {
+                    if (checked.find(gi.path) != checked.end()) {
+                        ++selectedCount;
+                        selectedBytes += gi.sizeBytes;
+                    }
+                }
+            }
+            if (selectedCount > 0) {
+                const std::string total = humanSize3(selectedBytes);
+                snprintf(mid, sizeof(mid), "%d Selected / %s", selectedCount, total.c_str());
+            } else {
+                snprintf(mid, sizeof(mid), "Apps Found: %d", appCount);
+            }
         }
         drawTextAligned(midX, textY, mid, COLOR_WHITE, midAlign);
 
@@ -3907,7 +3980,7 @@ private:
                 std::string msg = std::string("Select Destination Storage (") + v + " Mode)";
                 drawText(10, 25, msg.c_str(), COLOR_WHITE);
             }
-        } else {
+        } else if (!(view == View_CategoryContents || view == View_AllFlat)) {
             char buf[256];
             const char* lbl = showTitles ? "App Title" : "File/Folder";
             if (view == View_Categories || view == View_GclSettings) {
@@ -4101,6 +4174,8 @@ private:
         if (!selectionIconTex || !selectionIconTex->data) return;
 
         const int boxW = 144, boxH = 80;
+        const float ctrlX = 290.0f;
+        const float ctrlW = 185.0f;
         const int controlsTop = SCREEN_HEIGHT - 30;
 
         const int w   = selectionIconTex->width;
@@ -4110,13 +4185,13 @@ private:
         float sx = (float)boxW / (float)w;
         float sy = (float)boxH / (float)h;
         float s  = (sx < sy) ? sx : sy;
+        if (s > 1.0f) s = 1.0f;
         int dw = (int)(w * s), dh = (int)(h * s);
 
-        int x = SCREEN_WIDTH - 12 - dw;
-        int y = controlsTop - 6 - dh;
-
-        drawRect(x-2, y-2, dw+4, dh+4, 0xFF000000);
-        drawRect(x-1, y-1, dw+2, dh+2, 0xFF404040);
+        const int boxX = (int)(ctrlX + (ctrlW - boxW) * 0.5f);
+        const int boxY = controlsTop - 6 - boxH + 12;
+        int x = boxX + (boxW - dw) / 2 + 1;
+        int y = boxY + (boxH - dh) / 2;
 
         sceKernelDcacheWritebackRange(selectionIconTex->data, tbw * h * 4);
         sceGuTexFlush();
@@ -4152,13 +4227,13 @@ private:
         const float panelY = 22.0f;
         const float panelW = 280.0f;
         const float panelH = 226.0f;
-        drawRect((int)panelX, (int)panelY, (int)panelW, (int)panelH, COLOR_BANNER);
+        drawRect((int)panelX, (int)(panelY - 1.0f), (int)panelW, (int)(panelH + 1.0f), COLOR_BANNER);
 
         const float ctrlX = 290.0f;
         const float ctrlY = 22.0f;
         const float ctrlW = 185.0f;
-        const float keyH = 27.0f;
-        drawRect((int)ctrlX, (int)ctrlY, (int)ctrlW, (int)keyH, COLOR_BANNER);
+        const float keyH = 22.0f;
+        drawRect((int)ctrlX, (int)(ctrlY - 1.0f), (int)ctrlW, (int)(keyH + 1.0f), COLOR_BANNER);
         const unsigned keyTextCol = 0xFFBBBBBB;
         float keyIconH = 15.0f;
         float keyIconW = 0.0f;
@@ -4170,7 +4245,7 @@ private:
         const float keyIconX = keyBaseX + 10.0f;
         const float keyGap = (keyIconW > 0.0f) ? 10.0f : 0.0f;
         const float keyLabelPad = 6.0f;
-        const float keyY = ctrlY + 16.0f;
+        const float keyY = ctrlY + 13.0f;
         if (okIconTexture && okIconTexture->data && okIconTexture->height > 0) {
             drawTextureScaled(okIconTexture, keyIconX, keyY - 10.0f, keyIconH, 0xFFFFFFFF);
         }
@@ -4183,7 +4258,7 @@ private:
         const float creditGap = 6.0f;
         const float creditY = ctrlY + keyH + creditGap - 1.0f;
         const float creditH = 39.0f;
-        drawRect((int)ctrlX, (int)creditY, (int)ctrlW, (int)creditH, COLOR_BANNER);
+        drawRect((int)ctrlX, (int)(creditY - 1.0f), (int)ctrlW, (int)(creditH + 1.0f), COLOR_BANNER);
         const float creditTopLineY = creditY + 14.0f;
         const float creditBottomY = creditY + creditH - 6.0f;
         std::string credit = gHomeAnimEntries.empty() ? "No animations" : currentHomeAnimCredit();
@@ -4193,7 +4268,7 @@ private:
         const float switchGap = 5.0f;
         const float switchY = creditY + creditH + switchGap;
         const float switchH = 42.0f;
-        drawRect((int)ctrlX, (int)switchY, (int)ctrlW, (int)switchH, COLOR_BANNER);
+        drawRect((int)ctrlX, (int)(switchY - 1.0f), (int)ctrlW, (int)(switchH + 1.0f), COLOR_BANNER);
 
         const float switchPadY = switchY + 3.0f;
         const float switchIconH = 14.0f;
@@ -4213,14 +4288,14 @@ private:
         drawTextStyled(switchMidX, switchPadY + 32.0f, animBuf, 0.7f, COLOR_WHITE, 0, INTRAFONT_ALIGN_CENTER, false);
 
         const float animGap = 8.0f;
-        const float animH = 103.0f;
+        const float animH = 108.0f;
         float animY = switchY + switchH + animGap - 3.0f;
         const float footerMargin = 18.0f + 4.0f;
         float maxAnimY = SCREEN_HEIGHT - footerMargin - animH;
         if (animY > maxAnimY) animY = maxAnimY;
         const float animX = ctrlX;
         const float animW = ctrlW;
-        drawRect((int)animX, (int)animY, (int)animW, (int)animH, COLOR_BANNER);
+        drawRect((int)animX, (int)(animY - 1.0f), (int)animW, (int)(animH + 1.0f), COLOR_BANNER);
 
         advanceHomeAnimationFrame();
         Texture* animTex = (gHomeAnimFrameIndex < gHomeAnimFrames.size()) ? gHomeAnimFrames[gHomeAnimFrameIndex].tex : nullptr;
@@ -4382,19 +4457,19 @@ private:
         const float panelY = 22.0f;
         const float panelW = 280.0f;
         const float panelH = 226.0f;
-        drawRect((int)panelX, (int)panelY, (int)panelW, (int)panelH, COLOR_BANNER);
+        drawRect((int)panelX, (int)(panelY - 1.0f), (int)panelW, (int)(panelH + 1.0f), COLOR_BANNER);
 
         const float ctrlX = 290.0f;
         const float ctrlY = 22.0f;
         const float ctrlW = 185.0f;
         const float ctrlHFull = 94.0f;
         const float ctrlH = catSortMode ? (ctrlHFull - 17.0f) : ctrlHFull;
-        drawRect((int)ctrlX, (int)ctrlY, (int)ctrlW, (int)ctrlH, COLOR_BANNER);
+        drawRect((int)ctrlX, (int)(ctrlY - 1.0f), (int)ctrlW, (int)(ctrlH + 1.0f), COLOR_BANNER);
 
         // Mode switcher block (L/R)
         const float modeY = ctrlY + ctrlHFull + 5.0f;
         const float modeH = 42.0f;
-        drawRect((int)ctrlX, (int)modeY, (int)ctrlW, (int)modeH, COLOR_BANNER);
+        drawRect((int)ctrlX, (int)(modeY - 1.0f), (int)ctrlW, (int)(modeH + 1.0f), COLOR_BANNER);
 
         // Mode switcher labels (L top-left, R top-right)
         const float modePadY = modeY + 3.0f;
@@ -4442,20 +4517,20 @@ private:
             }
             const float labelPad = bumpRight ? 6.0f : 0.0f;
             drawTextStyled(x + labelPad, y + 2.0f, label, 0.7f, textCol, 0, INTRAFONT_ALIGN_LEFT, false);
-            y += 17.0f;
+            y += 18.0f;
         };
 
-        float keyY = ctrlY + 16.0f;
+        float keyY = ctrlY + 13.0f;
         const float keyX = ctrlX + 5.0f;
         if (!catSortMode) {
             drawKeyRowLeft(keyX, keyY, okIconTexture, "Select", true, keyTextCol);
             drawKeyRowLeft(keyX, keyY, selectIconTexture, "Rename", false, keyTextCol);
-            drawKeyRowLeft(keyX, keyY, triangleIconTexture, "Add/Del. category", true, keyTextCol);
+            drawKeyRowLeft(keyX, keyY, triangleIconTexture, "Add/Del. Category", true, keyTextCol);
             drawKeyRowLeft(keyX, keyY, squareIconTexture, "(Un)Hide in XMB", true, keyTextCol);
             drawKeyRowLeft(keyX, keyY, circleIconTexture, "Back", true, keyTextCol);
         } else {
-            drawKeyRowLeft(keyX, keyY, okIconTexture, "Pick up/Drop", true, keyTextCol);
-            drawKeyRowLeft(keyX, keyY, startIconTexture, "Save order", false, saveTextCol);
+            drawKeyRowLeft(keyX, keyY, okIconTexture, "Pick Up/Drop", true, keyTextCol);
+            drawKeyRowLeft(keyX, keyY, startIconTexture, "Save List Order", false, saveTextCol);
             drawKeyRowLeft(keyX, keyY, squareIconTexture, "(Un)Hide in XMB", true, keyTextCol);
             drawKeyRowLeft(keyX, keyY, circleIconTexture, "Back", true, keyTextCol);
         }
@@ -4624,13 +4699,13 @@ private:
         const float panelY = 22.0f;
         const float panelW = 280.0f;
         const float panelH = 226.0f;
-        drawRect((int)panelX, (int)panelY, (int)panelW, (int)panelH, COLOR_BANNER);
+        drawRect((int)panelX, (int)(panelY - 1.0f), (int)panelW, (int)(panelH + 1.0f), COLOR_BANNER);
 
         const float ctrlX = 290.0f;
         const float ctrlY = 22.0f;
         const float ctrlW = 185.0f;
         const float ctrlH = 95.0f;
-        drawRect((int)ctrlX, (int)ctrlY, (int)ctrlW, (int)ctrlH, COLOR_BANNER);
+        drawRect((int)ctrlX, (int)(ctrlY - 1.0f), (int)ctrlW, (int)(ctrlH + 1.0f), COLOR_BANNER);
 
         const unsigned keyTextCol = 0xFFBBBBBB;
         auto drawKeyRowLeft = [&](float baseX, float& y, Texture* icon, const char* label,
@@ -4728,6 +4803,252 @@ private:
         }
     }
 
+    void drawGameListMenu() {
+        const float panelX = 5.0f;
+        const float panelY = 22.0f;
+        const float panelW = 280.0f;
+        const float panelH = 226.0f;
+        drawRect((int)panelX, (int)(panelY - 1.0f), (int)panelW, (int)(panelH + 1.0f), COLOR_BANNER);
+
+        const float ctrlX = 290.0f;
+        const float ctrlY = 22.0f;
+        const float ctrlW = 185.0f;
+        const float ctrlH = 94.0f + 5.0f + 42.0f; // match Categories controls + L/R block height
+        drawRect((int)ctrlX, (int)(ctrlY - 1.0f), (int)ctrlW, (int)(ctrlH + 1.0f), COLOR_BANNER);
+
+        const unsigned keyTextCol = 0xFFBBBBBB;
+        const unsigned saveTextCol = 0xFF17D0FD;
+        const unsigned pickedGlowCol = 0xFF8CE8FE;
+        auto drawKeyRowLeft = [&](float baseX, float& y, Texture* icon, const char* label,
+                                  bool bumpRight, unsigned textCol){
+            float iconH = 15.0f;
+            if (icon == startIconTexture || icon == selectIconTexture) iconH = 18.0f;
+            float iconW = 0.0f;
+            if (icon && icon->data && icon->height > 0) {
+                iconW = (float)icon->width * (iconH / (float)icon->height);
+            }
+            const float gap = (iconW > 0.0f) ? (6.0f + (bumpRight ? 4.0f : 0.0f)) : 0.0f;
+            float x = baseX + (bumpRight ? 6.0f : 0.0f);
+            if (bumpRight) x += 4.0f;
+            if (icon && icon->data && icon->height > 0) {
+                drawTextureScaled(icon, x, y - 10.0f, iconH, 0xFFFFFFFF);
+                x += iconW + gap;
+            }
+            const float labelPad = bumpRight ? 6.0f : 0.0f;
+            drawTextStyled(x + labelPad, y + 2.0f, label, 0.7f, textCol, 0, INTRAFONT_ALIGN_LEFT, false);
+            y += 17.0f;
+        };
+
+        float keyY = ctrlY + 13.0f;
+        const float keyX = ctrlX + 5.0f;
+        drawKeyRowLeft(keyX, keyY, okIconTexture, "Pick Up/Drop", true, keyTextCol);
+        const char* toggleLabel = showTitles ? "Toggle Filenames" : "Toggle App Titles";
+        drawKeyRowLeft(keyX, keyY, lIconTexture, toggleLabel, true, keyTextCol);
+        drawKeyRowLeft(keyX, keyY, rIconTexture, "Alphabetize", true, keyTextCol);
+        drawKeyRowLeft(keyX, keyY, startIconTexture, "Save List Order", false, saveTextCol);
+        drawKeyRowLeft(keyX, keyY, selectIconTexture, "Rename", false, keyTextCol);
+        drawKeyRowLeft(keyX, keyY, squareIconTexture, "Mark for Bulk Op.", true, keyTextCol);
+        drawKeyRowLeft(keyX, keyY, triangleIconTexture, "File Operation", true, keyTextCol);
+        drawKeyRowLeft(keyX, keyY, circleIconTexture, "Back", true, keyTextCol);
+
+        if (entries.empty()) return;
+
+        const float listTop = panelY + 4.0f + GAME_LIST_OFFSET_Y;
+        const float rowH = GAME_ROW_H;
+        const int visibleRows = contentVisibleRows();
+        int maxScroll = (int)entries.size() - visibleRows;
+        if (maxScroll < 0) maxScroll = 0;
+        if (scrollOffset > maxScroll) scrollOffset = maxScroll;
+        if (scrollOffset < 0) scrollOffset = 0;
+
+        const int startRow = scrollOffset;
+        const int endRow = std::min((int)entries.size(), startRow + visibleRows);
+        intraFontActivate(font);
+        sceGuEnable(GU_BLEND);
+        sceGuBlendFunc(GU_ADD,GU_SRC_ALPHA,GU_ONE_MINUS_SRC_ALPHA,0,0);
+        const float debugRightX = panelX + panelW - 12.0f;
+        const float scale = 0.5f;
+        const float lineH = 16.0f * scale;
+        const float labelIconH = 15.0f;
+        const float listShiftX = -15.0f;
+        const float scrollTrackX = panelX + panelW - 6.0f;
+        const float sizeRightX = scrollTrackX - 9.0f;
+        const float iconSlotW = labelIconH;
+        const float checkGap = 4.0f;
+        const float checkX = panelX + 18.0f + listShiftX;
+        const float iconSlotX = checkX + CHECKBOX_PX + checkGap;
+        const float textLeftX = iconSlotX + iconSlotW + 4.0f;
+        const float textRightX = scrollTrackX - 43.0f;
+        const float textAvailW = textRightX - textLeftX;
+
+        const unsigned long long nowUs = (unsigned long long)sceKernelGetSystemTimeWide();
+        if (gameScrollIndex != selectedIndex) {
+            gameScrollIndex = selectedIndex;
+            gameScrollStartUs = nowUs;
+        }
+
+        auto clipTextToWidth = [&](const std::string& s, float maxW, float offsetPx)->std::string {
+            if (s.empty() || maxW <= 0.0f) return std::string();
+            float skip = (offsetPx > 0.0f) ? offsetPx : 0.0f;
+            float used = 0.0f;
+            std::string out;
+            out.reserve(s.size());
+            for (size_t ci = 0; ci < s.size(); ++ci) {
+                char buf[2] = { s[ci], '\0' };
+                float cw = measureTextWidth(scale, buf);
+                if (skip > 0.0f) {
+                    if (skip >= cw) { skip -= cw; continue; }
+                    skip = 0.0f;
+                    continue; // drop partially skipped char
+                }
+                if (used + cw > maxW) break;
+                out.push_back(s[ci]);
+                used += cw;
+            }
+            return out;
+        };
+
+        for(int i = startRow; i < endRow; i++){
+            bool sel  = (i == selectedIndex);
+            bool isDir= FIO_S_ISDIR(entries[i].d_stat.st_mode);
+            const bool picked = moving && sel;
+
+            unsigned baseCol = isDir ? COLOR_CYAN : COLOR_WHITE;
+            unsigned textCol = sel ? COLOR_BLACK : baseCol;
+            unsigned shadowCol = sel ? COLOR_WHITE : 0x40000000;
+            if (picked) shadowCol = pickedGlowCol;
+
+            uint32_t labelColor = baseCol;
+            const char* labelText = "[FILE]";  // default
+
+            if (isDir) {
+                labelText = "[DIR]";
+            } else {
+                // Use CATEGORY to determine PS1 vs Homebrew (with per-frame cache)
+                if ((view == View_AllFlat || view == View_CategoryContents) &&
+                    !isDir && i >= 0 && i < (int)workingList.size()) {
+                    const GameItem& gi = workingList[i];
+                    if (gi.kind == GameItem::EBOOT_FOLDER) {
+                        std::string ebootPath = gi.path + "/EBOOT.PBP";
+                        std::string category;
+
+                        // Check cache first
+                        auto it = categoryCache.find(ebootPath);
+                        if (it != categoryCache.end()) {
+                            category = it->second;
+                        } else {
+                            // Read and cache
+                            category = readEbootCategory(ebootPath);
+                            categoryCache[ebootPath] = category;
+                        }
+
+                        if (category == "ME") {
+                            labelText = "[PS1]";
+                        } else if (category == "MG") {
+                            labelText = "[HB]";
+                        } else {
+                            labelText = "[FILE]";  // fallback for unknown CATEGORY
+                        }
+                    } else {
+                        labelText = "[FILE]";  // ISO files
+                    }
+                } else {
+                    labelText = "[FILE]";
+                }
+            }
+
+            const int rowIndex = i - startRow;
+            const float rowTop = listTop + rowH * rowIndex;
+            const float centerY = rowTop + (rowH * 0.5f);
+            const float baseline = centerY + (lineH * 0.25f) - 2.0f;
+
+            Texture* labelIcon = nullptr;
+            if (!strcmp(labelText, "[PS1]")) labelIcon = ps1IconTexture;
+            else if (!strcmp(labelText, "[HB]")) labelIcon = homebrewIconTexture;
+            else if (!strcmp(labelText, "[FILE]")) labelIcon = isoIconTexture;
+
+            if (labelIcon && labelIcon->data && labelIcon->height > 0) {
+                float iconW = (float)labelIcon->width * (labelIconH / (float)labelIcon->height);
+                float iconX = iconSlotX + (iconSlotW - iconW) * 0.5f;
+                float iconY = centerY - (labelIconH * 0.5f) - 4.0f;
+                // Snap to whole pixels to reduce shimmering/jagged edges.
+                iconX = (float)((int)(iconX + 0.5f));
+                iconY = (float)((int)(iconY + 0.5f));
+                drawTextureScaled(labelIcon, iconX, iconY, labelIconH, labelColor);
+            } else {
+                const float labelTextW = measureTextWidth(scale, labelText);
+                const float labelTextX = iconSlotX + (iconSlotW - labelTextW) * 0.5f;
+                drawText(labelTextX, baseline, labelText, labelColor);
+            }
+
+            // --- filesize column (content views only) ---
+            if (view == View_AllFlat || view == View_CategoryContents) {
+                if (!isDir && i >= 0 && i < (int)workingList.size()) {
+                    const GameItem& gi = workingList[i];
+                    const std::string sz = (gi.sizeBytes > 0) ? humanSize3(gi.sizeBytes) : std::string("");
+                    intraFontSetStyle(font, 0.5f, COLOR_GRAY, 0, 0.0f, INTRAFONT_ALIGN_RIGHT);
+                    intraFontPrint(font, sizeRightX, baseline + 1.0f, sz.c_str());
+                }
+            }
+
+            // checkbox left of filename (content views only)
+            if (view == View_AllFlat || view == View_CategoryContents) {
+                if (!isDir && i >= 0 && i < (int)workingList.size()) {
+                    const std::string& p = workingList[i].path;
+                    bool isChecked = (checked.find(p) != checked.end());
+                    const float checkboxY = rowTop + (rowH - ITEM_HEIGHT) * 0.5f + 3.0f;
+                    drawCheckboxAt((int)checkX, (int)checkboxY, isChecked);
+                }
+            }
+
+            std::string label = entries[i].d_name;
+            std::string drawLabel = label;
+            float textOffsetX = 0.0f;
+            float textOverflow = 0.0f;
+            if (textAvailW > 0.0f) {
+                const float textW = measureTextWidth(scale, label.c_str());
+                textOverflow = textW - textAvailW;
+            }
+            if (sel && textOverflow > 2.0f) {
+                const float speed = 120.0f; // px/sec
+                const double elapsed = (double)(nowUs - gameScrollStartUs) / 1000000.0;
+                textOffsetX = (float)(elapsed * speed);
+                if (textOffsetX > textOverflow) textOffsetX = textOverflow;
+            }
+            if (textAvailW > 0.0f) {
+                const float clipOffset = (textOffsetX > 0.0f) ? textOffsetX : 0.0f;
+                drawLabel = clipTextToWidth(label, textAvailW, clipOffset);
+            }
+
+            drawTextStyled(textLeftX, baseline, drawLabel.c_str(),
+                           scale, textCol, shadowCol, INTRAFONT_ALIGN_LEFT, false);
+
+
+            if ((view==View_AllFlat || view==View_CategoryContents) && showDebugTimes && !isDir) {
+                if (i >= 0 && i < (int)workingList.size()) {
+                    const GameItem& gi = workingList[i];
+                    char right[64], buf[32];
+                    fmtDT(gi.time, buf, sizeof(buf));
+                    snprintf(right, sizeof(right), "%s [F]", buf);
+                    intraFontSetStyle(font,0.5f,COLOR_GRAY,0,0.0f,INTRAFONT_ALIGN_RIGHT);
+                    intraFontPrint(font, debugRightX, baseline - 0.5f, right);
+                }
+            }
+        }
+
+        if ((int)entries.size() > visibleRows) {
+            const float trackX = panelX + panelW - 6.0f;
+            const float trackY = listTop - 3.0f;
+            const float trackH = rowH * visibleRows;
+            drawRect((int)trackX, (int)trackY, 2, (int)trackH, 0x40000000);
+            float thumbH = trackH * ((float)visibleRows / (float)entries.size());
+            if (thumbH < 6.0f) thumbH = 6.0f;
+            const float t = (maxScroll > 0) ? ((float)scrollOffset / (float)maxScroll) : 0.0f;
+            const float thumbY = trackY + t * (trackH - thumbH);
+            drawRect((int)trackX, (int)thumbY, 2, (int)thumbH, 0xFFBBBBBB);
+        }
+    }
+
     void drawFileList() {
         if (!showRoots && view == View_GclSettings) {
             drawGclSettingsMenu();
@@ -4739,6 +5060,10 @@ private:
         }
         if (showRoots && opPhase != OP_SelectDevice) {
             drawRootMenu();
+            return;
+        }
+        if (!showRoots && (view == View_AllFlat || view == View_CategoryContents)) {
+            drawGameListMenu();
             return;
         }
         int y = LIST_START_Y;
@@ -4916,6 +5241,9 @@ private:
 
 
     void drawControls() {
+        if (!showRoots && (view == View_AllFlat || view == View_CategoryContents)) {
+            return; // custom UI blocks handle controls in content views
+        }
         int y = SCREEN_HEIGHT-30;
         const char* mode = showTitles ? "Title" : "Name";
         if (actionMode != AM_None) {
@@ -5481,8 +5809,9 @@ private:
             if (workingList[i].path == path) {
                 selectedIndex = i;
                 if (selectedIndex < scrollOffset) scrollOffset = selectedIndex;
-                if (selectedIndex >= scrollOffset + MAX_DISPLAY)
-                    scrollOffset = selectedIndex - MAX_DISPLAY + 1;
+                const int visible = contentVisibleRows();
+                if (selectedIndex >= scrollOffset + visible)
+                    scrollOffset = selectedIndex - visible + 1;
                 return;
             }
         }
@@ -6029,7 +6358,7 @@ private:
             if (oldSel >= (int)entries.size()) oldSel = (int)entries.size()-1;
             if (oldSel < 0) oldSel = 0;
             selectedIndex = oldSel;
-            int maxScroll = (int)entries.size() - MAX_DISPLAY;
+            int maxScroll = (int)entries.size() - contentVisibleRows();
             if (maxScroll < 0) maxScroll = 0;
             if (oldScroll > maxScroll) oldScroll = maxScroll;
             if (oldScroll < 0) oldScroll = 0;
@@ -6736,10 +7065,10 @@ private:
         gclLoadBlacklistFor(currentDevice);
         const auto& blNow = gclBlacklistMap[blacklistRootKey(currentDevice)];
 
-        add(std::string("Category mode: ")      + gclModeLabel(gclCfg.mode));
-        add(std::string("Category prefix: ")    + gclPrefixLabel(gclCfg.prefix));
-        add(std::string("Show uncategorized: ") + gclUncatLabel(gclCfg.uncategorized, isPspGo()));
-        add(std::string("Sort categories: ")    + gclSortLabel(gclCfg.catsort));
+        add(std::string("Category Mode: ")      + gclModeLabel(gclCfg.mode));
+        add(std::string("Category Prefix: ")    + gclPrefixLabel(gclCfg.prefix));
+        add(std::string("Show Uncategorized: ") + gclUncatLabel(gclCfg.uncategorized, isPspGo()));
+        add(std::string("Sort Categories: ")    + gclSortLabel(gclCfg.catsort));
         {
             char buf[64];
             snprintf(buf, sizeof(buf), "Folder Rename Blacklist: %d item%s", (int)blNow.size(),
@@ -6886,7 +7215,7 @@ private:
         if (idx == 0) {
             // Category mode
             std::vector<OptionItem> items = { {"Multi MS", false}, {"Contextual menu", false}, {"Folders", false} };
-            optMenu = new OptionListMenu("Category mode", "Choose how you want your categories to be presented in the XMB.", items, SCREEN_WIDTH, SCREEN_HEIGHT);
+            optMenu = new OptionListMenu("Category Mode", "Choose how you want your categories to be presented in the XMB.", items, SCREEN_WIDTH, SCREEN_HEIGHT);
             gclPending = GCL_SK_Mode;
             optMenu->setSelected((int)gclCfg.mode);
 
@@ -6899,7 +7228,7 @@ private:
             std::vector<OptionItem> items = {
                 {"None", false}, {"Use CAT prefix", false}
             };
-            optMenu = new OptionListMenu("Category prefix", "Require the \"CAT_\" prefix on folders meant to act as categories.", items, SCREEN_WIDTH, SCREEN_HEIGHT);
+            optMenu = new OptionListMenu("Category Prefix", "Require the \"CAT_\" prefix on folders meant to act as categories.", items, SCREEN_WIDTH, SCREEN_HEIGHT);
             gclPending = GCL_SK_Prefix;
             optMenu->setSelected((int)gclCfg.prefix);
 
@@ -6912,7 +7241,7 @@ private:
             std::vector<OptionItem> items = {
                 {"No", false}, {"Only Memory Stick", false}, {"Only Internal Storage", !go}, {"Both", !go}
             };
-            optMenu = new OptionListMenu("Show uncategorized", "Enable the \"Uncategorized\" category for games not placed in a category subfolder.", items, SCREEN_WIDTH, SCREEN_HEIGHT);
+            optMenu = new OptionListMenu("Show Uncategorized", "Enable the \"Uncategorized\" category for games not placed in a category subfolder.", items, SCREEN_WIDTH, SCREEN_HEIGHT);
             gclPending = GCL_SK_Uncat;
             optMenu->setSelected((int)gclCfg.uncategorized);
             optMenu->setOptionsOffsetAdjust(-3);
@@ -6925,7 +7254,7 @@ private:
         } else if (idx == 3) {
             // Sort categories
             std::vector<OptionItem> items = { {"No", false}, {"Yes", false} };
-            optMenu = new OptionListMenu("Sort categories", "Sort categories by using a \"##\" prefix. E.g.: \"01MyCategory\", \"CAT_02MyCategory\"", items, SCREEN_WIDTH, SCREEN_HEIGHT);
+            optMenu = new OptionListMenu("Sort Categories", "Sort categories by using a \"##\" prefix. E.g.: \"01MyCategory\", \"CAT_02MyCategory\"", items, SCREEN_WIDTH, SCREEN_HEIGHT);
             gclPending = GCL_SK_Sort;
             optMenu->setSelected((int)gclCfg.catsort);
 
@@ -8611,6 +8940,9 @@ public:
         if (blacklistIcon) { texFree(blacklistIcon); blacklistIcon = nullptr; }
         if (lIconTexture) { texFree(lIconTexture); lIconTexture = nullptr; }
         if (rIconTexture) { texFree(rIconTexture); rIconTexture = nullptr; }
+        if (ps1IconTexture) { texFree(ps1IconTexture); ps1IconTexture = nullptr; }
+        if (homebrewIconTexture) { texFree(homebrewIconTexture); homebrewIconTexture = nullptr; }
+        if (isoIconTexture) { texFree(isoIconTexture); isoIconTexture = nullptr; }
         if (!gPopAnimFrames.empty()) { freeAnimationFrames(gPopAnimFrames); gPopAnimMinDelayUs = 0; }
         if (!gHomeAnimFrames.empty()) { freeAnimationFrames(gHomeAnimFrames); gHomeAnimMinDelayUs = 0; }
         gHomeAnimEntries.clear();
@@ -8974,7 +9306,7 @@ public:
 
 
 
-        // R trigger: toggle Sort mode on Categories; rename elsewhere
+        // R trigger: toggle Sort mode on Categories; A→Z elsewhere
         if (pressed & PSP_CTRL_RTRIGGER) {
             if (showRoots) {
                 cycleHomeAnimation(+1);
@@ -8996,6 +9328,10 @@ public:
                 } else {
                     setCategorySortMode(true);
                 }
+            } else if (!showRoots && (view == View_AllFlat || view == View_CategoryContents)) {
+                moving = false;
+                sortWorkingListAlpha(showTitles, workingList, selectedIndex, scrollOffset, contentVisibleRows());
+                refillRowsFromWorkingPreserveSel();
             } else {
                 beginRenameSelected();
             }
@@ -9064,7 +9400,7 @@ public:
             return;
         }
 
-        // SELECT: Categories → Rename; Content views → A→Z
+        // SELECT: Categories → Rename; Content views → Rename
         if (pressed & PSP_CTRL_SELECT) {
             if (!showRoots && view == View_Categories) {
                 if (!catSortMode) {
@@ -9076,11 +9412,8 @@ public:
                 return;
             }
 
-            // Content views: quick A→Z
             if (!showRoots && (view == View_AllFlat || view == View_CategoryContents)) {
-                moving = false;
-                sortWorkingListAlpha(showTitles, workingList, selectedIndex, scrollOffset);
-                refillRowsFromWorkingPreserveSel();
+                beginRenameSelected();
                 return;
             }
             return;
@@ -9189,12 +9522,14 @@ public:
                 if (moving && selectedIndex + 1 < (int)workingList.size()) {
                     std::swap(workingList[selectedIndex], workingList[selectedIndex+1]);
                     selectedIndex++;
-                    if (selectedIndex >= scrollOffset + MAX_DISPLAY) scrollOffset = selectedIndex - MAX_DISPLAY + 1;
+                    const int visible = contentVisibleRows();
+                    if (selectedIndex >= scrollOffset + visible) scrollOffset = selectedIndex - visible + 1;
                     refillRowsFromWorkingPreserveSel();
                 } else {
                     if (selectedIndex + 1 < (int)entries.size()){
                         selectedIndex++;
-                        if (selectedIndex >= scrollOffset + MAX_DISPLAY) scrollOffset = selectedIndex - MAX_DISPLAY + 1;
+                        const int visible = contentVisibleRows();
+                        if (selectedIndex >= scrollOffset + visible) scrollOffset = selectedIndex - visible + 1;
                     }
                 }
             } else {
@@ -9209,7 +9544,7 @@ public:
                     if (view == View_GclSettings) {
                         if (selectedIndex + 1 < (int)entries.size()) {
                             const char* cur = entries[selectedIndex].d_name;
-                            if (!strncasecmp(cur, "Sort categories:", 16) && gclCfg.prefix == 0) {
+                            if (!strncasecmp(cur, "Sort Categories:", 16) && gclCfg.prefix == 0) {
                                 int next = selectedIndex + 1;
                                 if (next < (int)rowFlags.size() && (rowFlags[next] & ROW_DISABLED)) {
                                     msgBox = new MessageBox(
@@ -9252,7 +9587,11 @@ public:
                     } else {
                         if (selectedIndex + 1 < (int)entries.size()){
                             selectedIndex++;
-                            const int visible = (!showRoots && view == View_Categories) ? categoryVisibleRows() : MAX_DISPLAY;
+                            const int visible = (!showRoots && view == View_Categories)
+                                ? categoryVisibleRows()
+                                : ((!showRoots && (view == View_AllFlat || view == View_CategoryContents))
+                                    ? contentVisibleRows()
+                                    : MAX_DISPLAY);
                             if (selectedIndex >= scrollOffset + visible) scrollOffset = selectedIndex - visible + 1;
                         }
                     }
@@ -9874,6 +10213,9 @@ int main(int argc, char* argv[]) {
     std::string rPath      = baseDir + "resources/R.png";
     std::string memSmallPath = baseDir + "resources/memcard_small.png";
     std::string intSmallPath = baseDir + "resources/internal_small.png";
+    std::string ps1Path    = baseDir + "resources/ps1.png";
+    std::string homebrewPath = baseDir + "resources/homebrew.png";
+    std::string isoPath    = baseDir + "resources/iso.png";
     std::string animRoot   = baseDir + "resources/animations";
 
     backgroundTexture      = texLoadPNG(pngPath.c_str());
@@ -9901,6 +10243,9 @@ int main(int argc, char* argv[]) {
     rIconTexture      = texLoadPNG(rPath.c_str());
     memcardSmallIcon  = texLoadPNG(memSmallPath.c_str());
     internalSmallIcon = texLoadPNG(intSmallPath.c_str());
+    ps1IconTexture    = texLoadPNG(ps1Path.c_str());
+    homebrewIconTexture = texLoadPNG(homebrewPath.c_str());
+    isoIconTexture    = texLoadPNG(isoPath.c_str());
 
     initHomeAnimations(animRoot);
 
