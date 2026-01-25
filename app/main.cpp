@@ -72,6 +72,7 @@
 #include <unordered_set>
 #include <unordered_map>
 #include <stdarg.h>
+#include <cmath>
 #include <set>
 
 #include "Texture.h"
@@ -650,6 +651,25 @@ static bool getFreeBytesCMF(const char* devMaybeSlash, uint64_t& outFree) {
     if (rc < 0 || devctl.sectorSize == 0) return false;
 
     outFree = (u64)devctl.freeClusters * devctl.sectorCount * devctl.sectorSize;
+    return true;
+}
+
+// Returns total capacity bytes for a device (ms0:/ or ef0:/).
+static bool getTotalBytesCMF(const char* devMaybeSlash, uint64_t& outTotal) {
+    outTotal = 0;
+    if (!devMaybeSlash || std::strlen(devMaybeSlash) < 4) return false;
+
+    char dev4[5];
+    std::memcpy(dev4, devMaybeSlash, 4); // "ms0:" / "ef0:"
+    dev4[4] = '\0';
+
+    CMF_SystemDevCtl devctl{};
+    CMF_SystemDevCommand cmd{ &devctl };
+
+    int rc = pspIoDevctl(dev4, 0x02425818, &cmd, sizeof(cmd), nullptr, 0);
+    if (rc < 0 || devctl.sectorSize == 0) return false;
+
+    outTotal = (u64)devctl.maxClusters * devctl.sectorCount * devctl.sectorSize;
     return true;
 }
 
@@ -1839,9 +1859,10 @@ struct FileOpsItem { const char* label; bool disabled; };
 
 class FileOpsMenu {
 public:
-    FileOpsMenu(const std::vector<FileOpsItem>& items, int screenW, int screenH)
-    : _items(items), _screenW(screenW), _screenH(screenH) {
-        _w = 280; _h = 120; _x = (_screenW - _w)/2; _y = (_screenH - _h)/2;
+    FileOpsMenu(const char* title, const std::vector<FileOpsItem>& items,
+                int screenW, int screenH, int w, int h)
+    : _title(title ? title : ""), _items(items), _screenW(screenW), _screenH(screenH) {
+        _w = w; _h = h; _x = (_screenW - _w)/2; _y = (_screenH - _h)/2;
     }
     void primeButtons(unsigned buttons) { _lastButtons = buttons; }
     
@@ -1873,26 +1894,56 @@ public:
 
         const unsigned COLOR_PANEL  = 0xD0303030;
         const unsigned COLOR_BORDER = 0xFFFFFFFF;
+        const unsigned COLOR_GLOW   = 0x80FFFFFF;
         _rect(_x-1, _y-1, _w+2, _h+2, COLOR_BORDER);
         _rect(_x,   _y,   _w,   _h,   COLOR_PANEL);
 
         if (font) {
-            intraFontSetStyle(font, 0.9f, COLOR_WHITE, 0, 0.f, INTRAFONT_ALIGN_LEFT);
-            intraFontPrint(font, (float)(_x + 10), (float)(_y + 12), "File operations");
+            const int textOffsetY = 4;
+            const int titleOffsetY = 2;
+            const int controlsOffsetY = 0;
+            const int padX = 10;
+            const float titleScale = 0.9f;
+            const float itemScale  = 0.8f;
 
-            const int startY = _y + 36;
+            // Title
+            const int titleY = _y + 12 + textOffsetY + titleOffsetY;
+            intraFontSetStyle(font, titleScale, COLOR_WHITE, 0, 0.f, INTRAFONT_ALIGN_LEFT);
+            intraFontPrint(font, (float)(_x + padX), (float)titleY, _title.c_str());
+
+            // Divider directly under the title (no subtitle block).
+            const int hrY = titleY + 12;
+            _hFadeLine(_x + padX, hrY, _w - (padX * 2), 1, 0x90, 16, 0x00C0C0C0);
+
+            const int startY = hrY + 23;
             const int lineH  = 18;
             for (int i = 0; i < (int)_items.size(); ++i) {
                 bool sel = (i == _sel);
                 unsigned col = _items[i].disabled ? COLOR_GRAY : COLOR_WHITE;
-                if (sel) {
-                    _rect(_x + 8, startY + i*lineH - 2, _w - 16, lineH + 4, 0x40FFFFFF);
+                unsigned shadow = (sel && !_items[i].disabled) ? COLOR_GLOW : 0;
+                intraFontSetStyle(font, itemScale, col, shadow, 0.f, INTRAFONT_ALIGN_LEFT);
+                float itemY = (float)(startY + i*lineH);
+                intraFontPrint(font, (float)(_x + 16), itemY, _items[i].label);
+                if (sel && !_items[i].disabled) {
+                    intraFontPrint(font, (float)(_x + 17), itemY, _items[i].label);
                 }
-                intraFontSetStyle(font, 0.8f, col, 0, 0.f, INTRAFONT_ALIGN_LEFT);
-                intraFontPrint(font, (float)(_x + 16), (float)(startY + i*lineH), _items[i].label);
             }
+
+            // Controls
+            const float iconH = 15.0f;
+            const float controlsY = (float)(_y + _h - 18 + textOffsetY + controlsOffsetY);
+            const float controlsTextY = controlsY + 1.0f;
+            float cx = (float)(_x + padX);
+            _drawTextureScaled(okIconTexture, cx, controlsY - 11.0f, iconH, 0xFFFFFFFF);
+            cx += iconH + 6.0f;
             intraFontSetStyle(font, 0.7f, 0xFFBBBBBB, 0, 0.f, INTRAFONT_ALIGN_LEFT);
-            intraFontPrint(font, (float)(_x + 10), (float)(_y + _h - 16), "X: Select   O: Close");
+            const char* selectLabel = "Select";
+            intraFontPrint(font, cx - 2.0f, controlsTextY, selectLabel);
+            cx += _measureText(font, 0.7f, selectLabel) + 12.0f;
+            _drawTextureScaled(circleIconTexture, cx, controlsY - 11.0f, iconH, 0xFFFFFFFF);
+            cx += iconH + 6.0f;
+            intraFontSetStyle(font, 0.7f, 0xFFBBBBBB, 0, 0.f, INTRAFONT_ALIGN_LEFT);
+            intraFontPrint(font, cx - 2.0f, controlsTextY, "Close");
         }
     }
 
@@ -1915,6 +1966,72 @@ private:
         return false;
     }
 
+    static float _measureText(intraFont* font, float size, const char* s) {
+        if (!s) return 0.0f;
+        if (!font) return (float)(strlen(s) * 8) * size;
+        intraFontSetStyle(font, size, COLOR_WHITE, 0, 0.f, INTRAFONT_ALIGN_LEFT);
+        return intraFontMeasureText(font, s);
+    }
+    static void _drawTextureScaled(Texture* t, float x, float y, float targetH, unsigned color) {
+        if (!t || !t->data || targetH <= 0.0f) return;
+        const int w = t->width;
+        const int h = t->height;
+        const int tbw = t->stride;
+        if (w <= 0 || h <= 0) return;
+        float s = targetH / (float)h;
+        float dw = (float)w * s;
+        float dh = targetH;
+
+        sceKernelDcacheWritebackRange(t->data, tbw * h * 4);
+        sceGuTexFlush();
+        sceGuTexMode(GU_PSM_8888, 0, 0, GU_FALSE);
+        sceGuTexFunc(GU_TFX_MODULATE, GU_TCC_RGBA);
+        sceGuTexImage(0, tbw, tbw, tbw, t->data);
+        sceGuTexFilter(GU_NEAREST, GU_NEAREST);
+        sceGuTexWrap(GU_CLAMP, GU_CLAMP);
+        sceGuEnable(GU_TEXTURE_2D);
+
+        struct V { float u, v; unsigned color; float x, y, z; };
+        V* vtx = (V*)sceGuGetMemory(2 * sizeof(V));
+        vtx[0].u = 0.0f;         vtx[0].v = 0.0f;
+        vtx[0].x = x;            vtx[0].y = y;            vtx[0].z = 0.0f; vtx[0].color = color;
+        vtx[1].u = (float)w;     vtx[1].v = (float)h;
+        vtx[1].x = x + dw;       vtx[1].y = y + dh;       vtx[1].z = 0.0f; vtx[1].color = color;
+        sceGuDrawArray(GU_SPRITES, GU_TEXTURE_32BITF | GU_COLOR_8888 |
+                                  GU_VERTEX_32BITF  | GU_TRANSFORM_2D, 2, nullptr, vtx);
+        sceGuDisable(GU_TEXTURE_2D);
+    }
+    static void _hFadeLine(int x, int y, int w, int h, uint8_t midAlpha, int fadePx, uint32_t rgb) {
+        if (w <= 0 || h <= 0) return;
+        if (fadePx * 2 > w) fadePx = w / 2;
+        if (fadePx < 1) fadePx = 1;
+
+        const int steps = 6;
+        auto colWithAlpha = [&](uint8_t a)->unsigned { return (unsigned(a) << 24) | (rgb & 0x00FFFFFF); };
+
+        for (int i = 0; i < steps; ++i) {
+            int x0 = x + (fadePx * i) / steps;
+            int x1 = x + (fadePx * (i + 1)) / steps;
+            int segW = x1 - x0;
+            if (segW <= 0) continue;
+            uint8_t a = (uint8_t)((midAlpha * (i + 1)) / steps);
+            _rect(x0, y, segW, h, colWithAlpha(a));
+        }
+
+        int midW = w - (fadePx * 2);
+        if (midW > 0) _rect(x + fadePx, y, midW, h, colWithAlpha(midAlpha));
+
+        for (int i = 0; i < steps; ++i) {
+            int x0 = x + w - fadePx + (fadePx * i) / steps;
+            int x1 = x + w - fadePx + (fadePx * (i + 1)) / steps;
+            int segW = x1 - x0;
+            if (segW <= 0) continue;
+            uint8_t a = (uint8_t)((midAlpha * (steps - i)) / steps);
+            _rect(x0, y, segW, h, colWithAlpha(a));
+        }
+    }
+
+    std::string _title;
     std::vector<FileOpsItem> _items;
     int _screenW{}, _screenH{};
     int _x{}, _y{}, _w{}, _h{};
@@ -2292,6 +2409,8 @@ private:
     std::vector<uint64_t> rowFreeBytes;
     std::vector<RowDisableReason> rowReason;   // <--- add
     std::vector<uint64_t>        rowNeedBytes; // <--- add
+    std::vector<uint64_t>        rowTotalBytes;
+    std::vector<uint8_t>        rowPresent;   // 1 if device row exists on hardware
 
     int selectedIndex = 0;
     int scrollOffset  = 0;
@@ -2809,6 +2928,7 @@ private:
     FileOpsMenu* fileMenu = nullptr;
     OptionListMenu* optMenu = nullptr;   // ← NEW: modal option picker
     std::vector<std::string> optMenuOwnedLabels; // keep dynamic labels alive for OptionListMenu
+    std::string msgBoxOwnedText; // keep transient MessageBox text alive
     static bool rootPickGcl;             // ← declaration only; no in-class initializer
     static bool rootKeepGclSelection;    // keep selection on "Game Categories:" after toggle
     bool inputWaitRelease = false;
@@ -3158,6 +3278,8 @@ private:
     // Snapshot of source selection (paths + kinds)
     std::vector<std::string> opSrcPaths;
     std::vector<GameItem::Kind> opSrcKinds;
+    int         opSrcCount = 0;
+    uint64_t    opSrcTotalBytes = 0;
 
     // Destination selections
     std::string opDestDevice;     // "ms0:/" or "ef0:/"
@@ -3199,6 +3321,12 @@ private:
     void markDeviceDirty(const std::string& devOrPath) {
         std::string key = rootPrefix(devOrPath);  // accepts "ms0:/", "ef0:/", or any full path
         if (!key.empty()) deviceCache[key].dirty = true;
+    }
+
+    // Marks all device cache lines dirty so next device entry forces a rescan.
+    void markAllDevicesDirty() {
+        for (auto &kv : deviceCache) kv.second.dirty = true;
+        for (const auto &r : roots) markDeviceDirty(r);
     }
 
     void setCategorySortMode(bool enable, bool saveOnExit = false) {
@@ -3257,6 +3385,8 @@ private:
         opPhase    = OP_None;
         opSrcPaths.clear();
         opSrcKinds.clear();
+        opSrcCount = 0;
+        opSrcTotalBytes = 0;
         opDestDevice.clear();
         opDestCategory.clear();
         moving = false;
@@ -3763,6 +3893,53 @@ private:
             drawRect(x0, y, segW, h, colWithAlpha(a));
         }
     }
+    void drawPieSlice(float cx, float cy, float r, float startRad, float endRad, unsigned col) {
+        if (r <= 0.0f || endRad <= startRad) return;
+        const float span = endRad - startRad;
+        const float full = 6.2831853f;
+        int segs = (int)(span / full * 40.0f + 0.5f);
+        if (segs < 2) segs = 2;
+
+        struct V { unsigned color; float x,y,z; };
+        V* v = (V*)sceGuGetMemory((segs + 2) * sizeof(V));
+        v[0] = { col, cx, cy, 0.0f };
+        for (int i = 0; i <= segs; ++i) {
+            float t = (float)i / (float)segs;
+            float a = startRad + span * t;
+            v[i + 1] = { col, cx + cosf(a) * r, cy + sinf(a) * r, 0.0f };
+        }
+        sceGuDisable(GU_TEXTURE_2D);
+        sceGuShadeModel(GU_FLAT);
+        sceGuAmbientColor(0xFFFFFFFF);
+        sceGuDrawArray(GU_TRIANGLE_FAN, GU_COLOR_8888 | GU_VERTEX_32BITF | GU_TRANSFORM_2D,
+                       segs + 2, 0, v);
+        sceGuEnable(GU_TEXTURE_2D);
+    }
+    void drawPieRingSegment(float cx, float cy, float rOuter, float rInner,
+                            float startRad, float endRad, unsigned col) {
+        if (rOuter <= rInner || endRad <= startRad) return;
+        const float span = endRad - startRad;
+        const float full = 6.2831853f;
+        int segs = (int)(span / full * 40.0f + 0.5f);
+        if (segs < 2) segs = 2;
+
+        struct V { unsigned color; float x,y,z; };
+        V* v = (V*)sceGuGetMemory((segs + 1) * 2 * sizeof(V));
+        for (int i = 0; i <= segs; ++i) {
+            float t = (float)i / (float)segs;
+            float a = startRad + span * t;
+            float ca = cosf(a);
+            float sa = sinf(a);
+            v[i * 2 + 0] = { col, cx + ca * rOuter, cy + sa * rOuter, 0.0f };
+            v[i * 2 + 1] = { col, cx + ca * rInner, cy + sa * rInner, 0.0f };
+        }
+        sceGuDisable(GU_TEXTURE_2D);
+        sceGuShadeModel(GU_FLAT);
+        sceGuAmbientColor(0xFFFFFFFF);
+        sceGuDrawArray(GU_TRIANGLE_STRIP, GU_COLOR_8888 | GU_VERTEX_32BITF | GU_TRANSFORM_2D,
+                       (segs + 1) * 2, 0, v);
+        sceGuEnable(GU_TEXTURE_2D);
+    }
     void drawTextAligned(float x,float y,const char* s,unsigned col,int align) {
         if (font) {
             intraFontSetStyle(font,0.5f,col,0,0.0f,align);
@@ -3881,6 +4058,9 @@ private:
         std::string leftLabel = "HomeBrew Sorter Ultimate";
         Texture* deviceIcon = nullptr;
         bool underlineLabel = false;
+        const bool opHeader = (actionMode != AM_None &&
+                               (opPhase == OP_SelectDevice || opPhase == OP_SelectCategory ||
+                                opPhase == OP_Confirm));
 
         auto pickDeviceIcon = [&]() {
             if (!strncasecmp(currentDevice.c_str(), "ms0:", 4)) {
@@ -3890,7 +4070,11 @@ private:
             }
         };
 
-        if (!showRoots && (view == View_Categories || view == View_GclSettings)) {
+        if (opHeader) {
+            leftLabel = (actionMode == AM_Copy) ? "Copy Operation" : "Move Operation";
+            deviceIcon = nullptr;
+            underlineLabel = false;
+        } else if (!showRoots && (view == View_Categories || view == View_GclSettings)) {
             leftLabel = currentDeviceHeaderName();
             pickDeviceIcon();
         } else if (!showRoots && (view == View_CategoryContents || view == View_AllFlat)) {
@@ -3931,7 +4115,14 @@ private:
         char mid[64];
         float midX = 195.0f;
         int midAlign = INTRAFONT_ALIGN_LEFT;
-        if (showRoots) {
+        if (opHeader) {
+            const int count = (opSrcCount > 0) ? opSrcCount : (int)opSrcPaths.size();
+            const std::string total = humanSize3(opSrcTotalBytes);
+            const char* appWord = (count == 1) ? "App" : "Apps";
+            snprintf(mid, sizeof(mid), "%d %s / %s", count, appWord, total.c_str());
+            midX = SCREEN_WIDTH * 0.5f;
+            midAlign = INTRAFONT_ALIGN_CENTER;
+        } else if (showRoots) {
             snprintf(mid, sizeof(mid), "Main Menu");
             midX = 215.0f;
         } else if (view == View_Categories) {
@@ -3959,6 +4150,7 @@ private:
                 snprintf(mid, sizeof(mid), "%d Selected / %s", selectedCount, total.c_str());
             } else {
                 snprintf(mid, sizeof(mid), "Apps Found: %d", appCount);
+                midX += 4.0f;
             }
         }
         drawTextAligned(midX, textY, mid, COLOR_WHITE, midAlign);
@@ -3975,7 +4167,7 @@ private:
         drawTextAligned(SCREEN_WIDTH - 5.0f, textY, date, COLOR_WHITE, INTRAFONT_ALIGN_RIGHT);
 
         if (showRoots) {
-            if (actionMode != AM_None) {
+            if (actionMode != AM_None && !opHeader) {
                 const char* v = (actionMode == AM_Copy) ? "Copy" : "Move";
                 std::string msg = std::string("Select Destination Storage (") + v + " Mode)";
                 drawText(10, 25, msg.c_str(), COLOR_WHITE);
@@ -4232,6 +4424,187 @@ private:
         const float ctrlX = 290.0f;
         const float ctrlY = 22.0f;
         const float ctrlW = 185.0f;
+        const bool devicePicker = (opPhase == OP_SelectDevice);
+
+        if (devicePicker) {
+            const float ctrlH = 39.0f;
+            drawRect((int)ctrlX, (int)(ctrlY - 1.0f), (int)ctrlW, (int)(ctrlH + 1.0f), COLOR_BANNER);
+            const unsigned keyTextCol = 0xFFBBBBBB;
+            auto drawKeyRowLeft = [&](float baseX, float& y, Texture* icon, const char* label,
+                                      bool bumpRight, unsigned textCol){
+                float iconH = 15.0f;
+                float iconW = 0.0f;
+                if (icon && icon->data && icon->height > 0) {
+                    iconW = (float)icon->width * (iconH / (float)icon->height);
+                }
+                const float gap = (iconW > 0.0f) ? (6.0f + (bumpRight ? 4.0f : 0.0f)) : 0.0f;
+                float x = baseX + (bumpRight ? 6.0f : 0.0f);
+                if (bumpRight) x += 4.0f;
+                if (icon && icon->data && icon->height > 0) {
+                    drawTextureScaled(icon, x, y - 10.0f, iconH, 0xFFFFFFFF);
+                    x += iconW + gap;
+                }
+                const float labelPad = bumpRight ? 6.0f : 0.0f;
+                drawTextStyled(x + labelPad, y + 2.0f, label, 0.7f, textCol, 0, INTRAFONT_ALIGN_LEFT, false);
+                y += 17.0f;
+            };
+
+            float keyY = ctrlY + 13.0f;
+            const float keyX = ctrlX + 5.0f;
+            drawKeyRowLeft(keyX, keyY, okIconTexture, "Select", true, keyTextCol);
+            drawKeyRowLeft(keyX, keyY, circleIconTexture, "Back", true, keyTextCol);
+
+            const int rowCount = (int)entries.size();
+            const float top = panelY + 4.0f;
+            const float bottom = panelY + panelH - 4.0f;
+            const float rowH = (rowCount > 0) ? ((bottom - top) / (float)rowCount) : 0.0f;
+            const float deviceShiftX = 12.0f;
+            const float textCenterX = panelX + (panelW * 0.5f) + deviceShiftX;
+            const float iconGap = 10.0f;
+            const float iconYOffsetBase = -6.0f;
+
+            const unsigned freeCol = 0xFFBBBBBB;
+            const unsigned usedCol = 0xFF17D0FD; // same as "Save List Order"
+            const unsigned needWarnCol = COLOR_RED;
+            const unsigned needOkCol = 0xFFFFC88C; // baby blue (ABGR)
+            const unsigned pieBgCol = 0x66BBBBBB; // 40% gray
+
+            for (int i = 0; i < rowCount; ++i) {
+                const char* name = entries[i].d_name;
+                if (!name || (!strcmp(name, "__USB_MODE__") || !strcmp(name, "__GCL_TOGGLE__"))) continue;
+
+                const bool sel = (i == selectedIndex);
+                const bool disabled = (i < (int)rowFlags.size() && (rowFlags[i] & ROW_DISABLED));
+                const bool present = (i < (int)rowPresent.size()) ? (rowPresent[i] != 0) : !disabled;
+                const unsigned baseCol = disabled ? COLOR_GRAY : COLOR_WHITE;
+                const unsigned textCol = sel ? COLOR_BLACK : baseCol;
+                const unsigned shadowCol = sel ? COLOR_WHITE : 0x40000000;
+                const unsigned iconCol = disabled ? 0x66FFFFFF : 0xFFFFFFFF;
+
+                const int rowIndex = i;
+                const float rowTop = top + rowH * rowIndex;
+                const float centerY = rowTop + rowH * 0.5f;
+                float rowShift = 0.0f;
+                if (!strcmp(name, "ms0:/")) rowShift = -3.0f;
+                else if (!strcmp(name, "ef0:/")) rowShift = 3.0f;
+                const float nameCenterY = (centerY - 28.0f) + rowShift;
+                const float pieCenterY = (centerY + 25.0f) + rowShift;
+
+                const char* lines[2] = { nullptr, nullptr };
+                int lineCount = 1;
+                float scale = 0.75f;
+                Texture* icon = nullptr;
+                float iconH = 0.0f;
+
+                if (!strcmp(name, "ms0:/")) {
+                    lines[0] = "Memory"; lines[1] = "Stick"; lineCount = 2;
+                    scale = 0.95f; icon = rootMemIcon; iconH = 40.0f;
+                } else if (!strcmp(name, "ef0:/")) {
+                    lines[0] = "Internal"; lines[1] = "Storage"; lineCount = 2;
+                    scale = 0.95f; icon = rootInternalIcon; iconH = 40.0f;
+                } else {
+                    lines[0] = rootDisplayName(name);
+                    scale = 0.6f; icon = nullptr; iconH = 0.0f;
+                }
+
+                float rowYOffset = 0.0f;
+                if (!strcmp(name, "ms0:/")) rowYOffset = 4.0f;
+                else if (!strcmp(name, "ef0:/")) rowYOffset = 5.0f;
+
+                const float lineH = 16.0f * scale;
+                const float blockH = lineH * (float)lineCount;
+                const float firstBaseline = (nameCenterY + rowYOffset) - (blockH * 0.5f) + (lineH * 0.75f);
+
+                float maxW = 0.0f;
+                for (int l = 0; l < lineCount; ++l) {
+                    float w = measureTextWidth(scale, lines[l]);
+                    if (w > maxW) maxW = w;
+                }
+                const float textLeftX = textCenterX - (maxW * 0.5f);
+
+                if (icon && iconH > 0.0f && icon->height > 0) {
+                    float iconW = (float)icon->width * (iconH / (float)icon->height);
+                    float iconX = textLeftX - iconGap - iconW;
+                    if (!strcmp(name, "ms0:/")) iconX -= 6.0f;
+                    float iconY = (nameCenterY + rowYOffset) - (iconH * 0.5f) + iconYOffsetBase + 5.0f;
+                    drawTextureScaled(icon, iconX, iconY, iconH, iconCol);
+                }
+
+                const float lineGap = (!strcmp(name, "ms0:/") || !strcmp(name, "ef0:/")) ? 2.0f : 0.0f;
+                for (int l = 0; l < lineCount; ++l) {
+                    drawTextStyled(textCenterX, firstBaseline + (lineH * l) + (lineGap * l),
+                                   lines[l], scale, textCol, shadowCol, INTRAFONT_ALIGN_CENTER, true);
+                }
+
+                if (present) {
+                    const float pieR = 22.0f;
+                    const float pieX = panelX + 60.0f + deviceShiftX;
+                    const float infoX = pieX + pieR + 8.0f;
+                    const float infoScale = 0.6f;
+                    const float infoLineH = 16.0f * infoScale + 3.0f;
+
+                    uint64_t freeB = (i < (int)rowFreeBytes.size()) ? rowFreeBytes[i] : 0;
+                    uint64_t needB = (i < (int)rowNeedBytes.size()) ? rowNeedBytes[i] : 0;
+                    uint64_t totalB = (i < (int)rowTotalBytes.size()) ? rowTotalBytes[i] : 0;
+                    if (present && totalB == 0) {
+                        getTotalBytesCMF(name, totalB);
+                        if (i < (int)rowTotalBytes.size()) rowTotalBytes[i] = totalB;
+                    }
+                    uint64_t usedB = (totalB > freeB) ? (totalB - freeB) : 0;
+
+                    const bool isSameMove = (actionMode == AM_Move && !preOpDevice.empty() && !strcasecmp(preOpDevice.c_str(), name));
+                    if (isSameMove) needB = 0;
+                    const bool noSpace = (i < (int)rowReason.size()) && (rowReason[i] == RD_NO_SPACE);
+                    const unsigned needCol = noSpace ? needWarnCol : needOkCol;
+
+                    float usedRatio = (totalB > 0) ? (float)usedB / (float)totalB : 0.0f;
+                    float needRatio = (totalB > 0) ? (float)needB / (float)totalB : 0.0f;
+                    if (usedRatio < 0.0f) usedRatio = 0.0f;
+                    if (usedRatio > 1.0f) usedRatio = 1.0f;
+                    if (needRatio < 0.0f) needRatio = 0.0f;
+                    if (needRatio > (1.0f - usedRatio)) needRatio = 1.0f - usedRatio;
+
+                    const float startA = -1.5707963f;
+                    drawPieSlice(pieX, pieCenterY, pieR, 0.0f, 6.2831853f, pieBgCol);
+                    if (usedRatio > 0.0f) {
+                        drawPieSlice(pieX, pieCenterY, pieR, startA, startA + usedRatio * 6.2831853f, usedCol);
+                    }
+                    if (needRatio > 0.0f) {
+                        float needStart = startA + usedRatio * 6.2831853f;
+                        drawPieSlice(pieX, pieCenterY, pieR, needStart, needStart + needRatio * 6.2831853f, needCol);
+                    }
+
+                    // Subtle perimeter highlights/shadows for a simple 3D look.
+                    if (pieR > 6.0f) {
+                        const float ringOuter = pieR;
+                        const float ringInner = pieR - 2.0f;
+                        drawPieRingSegment(pieX, pieCenterY, ringOuter, ringInner, -2.4f, -0.8f, 0x55FFFFFF);
+                        drawPieRingSegment(pieX, pieCenterY, ringOuter, ringInner, 1.2f, 2.6f, 0x33000000);
+                        drawPieRingSegment(pieX, pieCenterY, pieR - 1.0f, pieR - 5.0f,
+                                           -0.9f, -0.2f, 0x88FFFFFF);
+                    }
+
+                    float infoY = pieCenterY - infoLineH;
+                    const std::string freeStr = (freeB > 0 || totalB > 0) ? humanSize3(freeB) : std::string("--");
+                    const std::string usedStr = (totalB > 0) ? humanSize3(usedB) : std::string("--");
+                    const bool showNeed = (needB > 0) || isSameMove;
+
+                    std::string freeLine = std::string("Free Space: ") + freeStr;
+                    drawTextStyled(infoX, infoY, freeLine.c_str(), infoScale, freeCol, 0, INTRAFONT_ALIGN_LEFT, false);
+                    infoY += infoLineH;
+                    if (showNeed) {
+                        std::string needLine = isSameMove
+                            ? std::string("Space Needed: N/A")
+                            : std::string("Space Needed: ") + humanSize3(needB);
+                        drawTextStyled(infoX, infoY, needLine.c_str(), infoScale, needCol, 0, INTRAFONT_ALIGN_LEFT, false);
+                        infoY += infoLineH;
+                    }
+                    std::string usedLine = std::string("Used Space: ") + usedStr;
+                    drawTextStyled(infoX, infoY, usedLine.c_str(), infoScale, usedCol, 0, INTRAFONT_ALIGN_LEFT, false);
+                }
+            }
+            return;
+        }
         const float keyH = 22.0f;
         drawRect((int)ctrlX, (int)(ctrlY - 1.0f), (int)ctrlW, (int)(keyH + 1.0f), COLOR_BANNER);
         const unsigned keyTextCol = 0xFFBBBBBB;
@@ -4462,38 +4835,42 @@ private:
         const float ctrlX = 290.0f;
         const float ctrlY = 22.0f;
         const float ctrlW = 185.0f;
+        const bool opCategoryMode =
+            (actionMode != AM_None && (opPhase == OP_SelectCategory || opPhase == OP_Confirm));
         const float ctrlHFull = 94.0f;
-        const float ctrlH = catSortMode ? (ctrlHFull - 17.0f) : ctrlHFull;
+        const float ctrlH = opCategoryMode ? 39.0f : (catSortMode ? (ctrlHFull - 17.0f) : ctrlHFull);
         drawRect((int)ctrlX, (int)(ctrlY - 1.0f), (int)ctrlW, (int)(ctrlH + 1.0f), COLOR_BANNER);
 
-        // Mode switcher block (L/R)
-        const float modeY = ctrlY + ctrlHFull + 5.0f;
-        const float modeH = 42.0f;
-        drawRect((int)ctrlX, (int)(modeY - 1.0f), (int)ctrlW, (int)(modeH + 1.0f), COLOR_BANNER);
+        if (!opCategoryMode) {
+            // Mode switcher block (L/R)
+            const float modeY = ctrlY + ctrlHFull + 5.0f;
+            const float modeH = 42.0f;
+            drawRect((int)ctrlX, (int)(modeY - 1.0f), (int)ctrlW, (int)(modeH + 1.0f), COLOR_BANNER);
 
-        // Mode switcher labels (L top-left, R top-right)
-        const float modePadY = modeY + 3.0f;
-        const float modeScale = 0.7f;
-        const float modeIconH = 14.0f;
-        unsigned stdCol  = catSortMode ? COLOR_GRAY : COLOR_WHITE;
-        unsigned sortCol = catSortMode ? COLOR_WHITE : COLOR_GRAY;
-        unsigned lIconCol = catSortMode ? 0xFFFFFFFF : 0x66FFFFFF; // dim L in Standard
-        unsigned rIconCol = catSortMode ? 0x66FFFFFF : 0xFFFFFFFF; // dim R in Sort
-        if (!gclCfg.catsort) {
-            lIconCol = 0x66FFFFFF;
-            rIconCol = 0x66FFFFFF;
+            // Mode switcher labels (L top-left, R top-right)
+            const float modePadY = modeY + 3.0f;
+            const float modeScale = 0.7f;
+            const float modeIconH = 14.0f;
+            unsigned stdCol  = catSortMode ? COLOR_GRAY : COLOR_WHITE;
+            unsigned sortCol = catSortMode ? COLOR_WHITE : COLOR_GRAY;
+            unsigned lIconCol = catSortMode ? 0xFFFFFFFF : 0x66FFFFFF; // dim L in Standard
+            unsigned rIconCol = catSortMode ? 0x66FFFFFF : 0xFFFFFFFF; // dim R in Sort
+            if (!gclCfg.catsort) {
+                lIconCol = 0x66FFFFFF;
+                rIconCol = 0x66FFFFFF;
+            }
+            const float lX = ctrlX + 5.0f;
+            if (lIconTexture && lIconTexture->data) {
+                drawTextureScaled(lIconTexture, lX, modePadY, modeIconH, lIconCol);
+            }
+            const float rX = ctrlX + ctrlW - modeIconH - 5.0f;
+            if (rIconTexture && rIconTexture->data) {
+                drawTextureScaled(rIconTexture, rX, modePadY, modeIconH, rIconCol);
+            }
+            drawTextStyled(ctrlX + ctrlW * 0.5f, modePadY + 12.0f, "Change Mode", modeScale, 0xFFBBBBBB, 0, INTRAFONT_ALIGN_CENTER, false);
+            drawTextStyled(ctrlX + ctrlW * 0.5f, modePadY + 32.0f, catSortMode ? "Sort" : "Standard",
+                           modeScale, catSortMode ? sortCol : stdCol, 0, INTRAFONT_ALIGN_CENTER, false);
         }
-        const float lX = ctrlX + 5.0f;
-        if (lIconTexture && lIconTexture->data) {
-            drawTextureScaled(lIconTexture, lX, modePadY, modeIconH, lIconCol);
-        }
-        const float rX = ctrlX + ctrlW - modeIconH - 5.0f;
-        if (rIconTexture && rIconTexture->data) {
-            drawTextureScaled(rIconTexture, rX, modePadY, modeIconH, rIconCol);
-        }
-        drawTextStyled(ctrlX + ctrlW * 0.5f, modePadY + 12.0f, "Change Mode", modeScale, 0xFFBBBBBB, 0, INTRAFONT_ALIGN_CENTER, false);
-        drawTextStyled(ctrlX + ctrlW * 0.5f, modePadY + 32.0f, catSortMode ? "Sort" : "Standard",
-                       modeScale, catSortMode ? sortCol : stdCol, 0, INTRAFONT_ALIGN_CENTER, false);
 
         const unsigned keyTextCol = 0xFFBBBBBB;
         const unsigned saveTextCol = 0xFF17D0FD;
@@ -4501,9 +4878,9 @@ private:
 
         // Controls box
         auto drawKeyRowLeft = [&](float baseX, float& y, Texture* icon, const char* label,
-                                  bool bumpRight, unsigned textCol){
+                                  bool bumpRight, unsigned textCol, float rowStep){
             float iconH = 15.0f;
-            if (icon == startIconTexture || icon == selectIconTexture) iconH = 18.0f;
+            if (!opCategoryMode && (icon == startIconTexture || icon == selectIconTexture)) iconH = 18.0f;
             float iconW = 0.0f;
             if (icon && icon->data && icon->height > 0) {
                 iconW = (float)icon->width * (iconH / (float)icon->height);
@@ -4517,22 +4894,25 @@ private:
             }
             const float labelPad = bumpRight ? 6.0f : 0.0f;
             drawTextStyled(x + labelPad, y + 2.0f, label, 0.7f, textCol, 0, INTRAFONT_ALIGN_LEFT, false);
-            y += 18.0f;
+            y += rowStep;
         };
 
         float keyY = ctrlY + 13.0f;
         const float keyX = ctrlX + 5.0f;
-        if (!catSortMode) {
-            drawKeyRowLeft(keyX, keyY, okIconTexture, "Select", true, keyTextCol);
-            drawKeyRowLeft(keyX, keyY, selectIconTexture, "Rename", false, keyTextCol);
-            drawKeyRowLeft(keyX, keyY, triangleIconTexture, "Add/Del. Category", true, keyTextCol);
-            drawKeyRowLeft(keyX, keyY, squareIconTexture, "(Un)Hide in XMB", true, keyTextCol);
-            drawKeyRowLeft(keyX, keyY, circleIconTexture, "Back", true, keyTextCol);
+        if (opCategoryMode) {
+            drawKeyRowLeft(keyX, keyY, okIconTexture, "Select", true, keyTextCol, 17.0f);
+            drawKeyRowLeft(keyX, keyY, circleIconTexture, "Back", true, keyTextCol, 17.0f);
+        } else if (!catSortMode) {
+            drawKeyRowLeft(keyX, keyY, okIconTexture, "Select", true, keyTextCol, 18.0f);
+            drawKeyRowLeft(keyX, keyY, selectIconTexture, "Rename", false, keyTextCol, 18.0f);
+            drawKeyRowLeft(keyX, keyY, triangleIconTexture, "Category Ops.", true, keyTextCol, 18.0f);
+            drawKeyRowLeft(keyX, keyY, squareIconTexture, "(Un)Hide in XMB", true, keyTextCol, 18.0f);
+            drawKeyRowLeft(keyX, keyY, circleIconTexture, "Back", true, keyTextCol, 18.0f);
         } else {
-            drawKeyRowLeft(keyX, keyY, okIconTexture, "Pick Up/Drop", true, keyTextCol);
-            drawKeyRowLeft(keyX, keyY, startIconTexture, "Save List Order", false, saveTextCol);
-            drawKeyRowLeft(keyX, keyY, squareIconTexture, "(Un)Hide in XMB", true, keyTextCol);
-            drawKeyRowLeft(keyX, keyY, circleIconTexture, "Back", true, keyTextCol);
+            drawKeyRowLeft(keyX, keyY, okIconTexture, "Pick Up/Drop", true, keyTextCol, 18.0f);
+            drawKeyRowLeft(keyX, keyY, startIconTexture, "Save List", false, saveTextCol, 18.0f);
+            drawKeyRowLeft(keyX, keyY, squareIconTexture, "(Un)Hide in XMB", true, keyTextCol, 18.0f);
+            drawKeyRowLeft(keyX, keyY, circleIconTexture, "Back", true, keyTextCol, 18.0f);
         }
 
         // Categories list
@@ -4549,6 +4929,8 @@ private:
         const float iconGap = 10.0f;
 
         const bool hasSettingsRow = (rowCount > 0 && !strcasecmp(entries[0].d_name, kCatSettingsLabel));
+        const bool inOpCategorySelect =
+            (actionMode != AM_None && (opPhase == OP_SelectCategory || opPhase == OP_Confirm));
         const unsigned long long nowUs = (unsigned long long)sceKernelGetSystemTimeWide();
         if (catScrollIndex != selectedIndex) {
             catScrollIndex = selectedIndex;
@@ -4557,7 +4939,7 @@ private:
         for (int i = startRow; i < endRow; ++i) {
             const char* name = entries[i].d_name;
             const bool sel = (i == selectedIndex);
-            const bool disabled = (actionMode!=AM_None && opPhase==OP_SelectCategory &&
+            const bool disabled = (inOpCategorySelect &&
                                    opDisabledCategories.find(name) != opDisabledCategories.end());
 
             const bool locked = isCategoryRowLocked(i);
@@ -4704,7 +5086,7 @@ private:
         const float ctrlX = 290.0f;
         const float ctrlY = 22.0f;
         const float ctrlW = 185.0f;
-        const float ctrlH = 95.0f;
+        const float ctrlH = 40.0f;
         drawRect((int)ctrlX, (int)(ctrlY - 1.0f), (int)ctrlW, (int)(ctrlH + 1.0f), COLOR_BANNER);
 
         const unsigned keyTextCol = 0xFFBBBBBB;
@@ -4725,10 +5107,10 @@ private:
             }
             const float labelPad = bumpRight ? 6.0f : 0.0f;
             drawTextStyled(x + labelPad, y + 2.0f, label, 0.7f, textCol, 0, INTRAFONT_ALIGN_LEFT, false);
-            y += 17.0f;
+            y += 18.0f;
         };
 
-        float keyY = ctrlY + 16.0f;
+        float keyY = ctrlY + 13.0f;
         const float keyX = ctrlX + 5.0f;
         drawKeyRowLeft(keyX, keyY, okIconTexture, "Select", true, keyTextCol);
         drawKeyRowLeft(keyX, keyY, circleIconTexture, "Back", true, keyTextCol);
@@ -4845,10 +5227,10 @@ private:
         const char* toggleLabel = showTitles ? "Toggle Filenames" : "Toggle App Titles";
         drawKeyRowLeft(keyX, keyY, lIconTexture, toggleLabel, true, keyTextCol);
         drawKeyRowLeft(keyX, keyY, rIconTexture, "Alphabetize", true, keyTextCol);
-        drawKeyRowLeft(keyX, keyY, startIconTexture, "Save List Order", false, saveTextCol);
+        drawKeyRowLeft(keyX, keyY, startIconTexture, "Save List", false, saveTextCol);
         drawKeyRowLeft(keyX, keyY, selectIconTexture, "Rename", false, keyTextCol);
-        drawKeyRowLeft(keyX, keyY, squareIconTexture, "Mark for Bulk Op.", true, keyTextCol);
-        drawKeyRowLeft(keyX, keyY, triangleIconTexture, "File Operation", true, keyTextCol);
+        drawKeyRowLeft(keyX, keyY, squareIconTexture, "Mark for App Ops.", true, keyTextCol);
+        drawKeyRowLeft(keyX, keyY, triangleIconTexture, "App Operations", true, keyTextCol);
         drawKeyRowLeft(keyX, keyY, circleIconTexture, "Back", true, keyTextCol);
 
         if (entries.empty()) return;
@@ -5058,7 +5440,7 @@ private:
             drawCategoryMenu();
             return;
         }
-        if (showRoots && opPhase != OP_SelectDevice) {
+        if (showRoots) {
             drawRootMenu();
             return;
         }
@@ -5247,6 +5629,7 @@ private:
         int y = SCREEN_HEIGHT-30;
         const char* mode = showTitles ? "Title" : "Name";
         if (actionMode != AM_None) {
+            if (showRoots || view == View_Categories) return;
             const char* v = (actionMode == AM_Copy) ? "Copy" : "Move";
             if (showRoots) {
                 drawText(10,y, (std::string(v)+": X = Choose Destination Device   O: Cancel").c_str(), COLOR_WHITE);
@@ -6335,8 +6718,10 @@ private:
         rowFreeBytes.clear();
         rowReason.clear();      // <--- add
         rowNeedBytes.clear();   // <--- add
+        rowTotalBytes.clear();
+        rowPresent.clear();
         entries.clear(); entryPaths.clear(); entryKinds.clear();
-        rowFlags.clear(); rowFreeBytes.clear();
+        rowFlags.clear(); rowFreeBytes.clear(); rowTotalBytes.clear(); rowPresent.clear();
         selectedIndex=0; scrollOffset=0;
         freeSelectionIcon();
     }
@@ -7048,7 +7433,7 @@ private:
         const int prevSel = selectedIndex, prevOff = scrollOffset;
 
         entries.clear(); entryPaths.clear(); entryKinds.clear();
-        rowFlags.clear(); rowFreeBytes.clear(); rowReason.clear(); rowNeedBytes.clear();
+        rowFlags.clear(); rowFreeBytes.clear(); rowReason.clear(); rowNeedBytes.clear(); rowTotalBytes.clear(); rowPresent.clear();
 
         gclLoadBlacklistFor(currentDevice);
 
@@ -7383,6 +7768,8 @@ private:
             entryPaths.emplace_back("");
             entryKinds.push_back(GameItem::ISO_FILE);
             rowFlags.push_back(0); rowFreeBytes.push_back(0); rowReason.push_back(RD_NONE); rowNeedBytes.push_back(0);
+            rowTotalBytes.push_back(0);
+            rowPresent.push_back(0);
         };
 
         auto addDeviceRow = [&](const std::string& r, bool present){
@@ -7394,7 +7781,7 @@ private:
 
             uint8_t flags = 0;
             RowDisableReason reason = RD_NONE;
-            uint64_t needB = 0, freeB = 0;
+            uint64_t needB = 0, freeB = 0, totalB = 0;
 
             if (!present) {
                 flags |= ROW_DISABLED;
@@ -7413,25 +7800,33 @@ private:
                     (r == preOpDevice);
 
                 // For other rows (or Copy), compute free/need and possibly disable
-                if (!sameDeviceMoveRow &&
-                    opPhase == OP_SelectDevice &&
+                if (opPhase == OP_SelectDevice &&
                     (actionMode == AM_Move || actionMode == AM_Copy)) {
-                    needB = bytesNeededForOp(opSrcPaths, opSrcKinds, r, /*isCopy=*/(actionMode == AM_Copy));
-                    if (getFreeBytesCMF(r.c_str(), freeB)) {
-                        if (needB > 0 && freeB + HEADROOM < needB) {
-                            flags |= ROW_DISABLED;
-                            reason = RD_NO_SPACE;
+                    if (!sameDeviceMoveRow) {
+                        needB = bytesNeededForOp(opSrcPaths, opSrcKinds, r, /*isCopy=*/(actionMode == AM_Copy));
+                        if (getFreeBytesCMF(r.c_str(), freeB)) {
+                            if (needB > 0 && freeB + HEADROOM < needB) {
+                                flags |= ROW_DISABLED;
+                                reason = RD_NO_SPACE;
+                            }
+                        } else {
+                            freeB = 0; // unknown; UI will say "probing"
                         }
                     } else {
-                        freeB = 0; // unknown; UI will say "probing"
+                        // Still show actual free space for same-device Move.
+                        getFreeBytesCMF(r.c_str(), freeB);
                     }
                 }
             }
+
+            if (present) getTotalBytesCMF(r.c_str(), totalB);
 
             rowFlags.push_back(flags);
             rowFreeBytes.push_back(freeB);
             rowReason.push_back(reason);
             rowNeedBytes.push_back(needB);
+            rowTotalBytes.push_back(totalB);
+            rowPresent.push_back(present ? 1 : 0);
 
             if (present && r == currentDevice) preselect = (int)entries.size() - 1;
         };
@@ -7442,8 +7837,8 @@ private:
             addSimpleRow("__USB_MODE__");
             addSimpleRow("__GCL_TOGGLE__");
         } else {
-            if (hasMs) addDeviceRow("ms0:/", true);
-            if (hasEf) addDeviceRow("ef0:/", true);
+            addDeviceRow("ms0:/", hasMs);
+            addDeviceRow("ef0:/", hasEf);
         }
 
         showRoots = true; moving = false;
@@ -7454,6 +7849,20 @@ private:
         } else {
             for (int i = 0; i < (int)entries.size(); ++i)
                 if ((rowFlags[i] & ROW_DISABLED) == 0) { selectedIndex = i; break; }
+        }
+
+        if (opPhase == OP_SelectDevice && !opDestDevice.empty()) {
+            for (int i = 0; i < (int)entries.size(); ++i) {
+                if (strcasecmp(entries[i].d_name, opDestDevice.c_str()) == 0) {
+                    if ((rowFlags[i] & ROW_DISABLED) == 0) {
+                        selectedIndex = i;
+                        if (selectedIndex < scrollOffset) scrollOffset = selectedIndex;
+                        if (selectedIndex >= scrollOffset + MAX_DISPLAY)
+                            scrollOffset = selectedIndex - MAX_DISPLAY + 1;
+                    }
+                    break;
+                }
+            }
         }
 
         if (rootKeepGclSelection) {
@@ -7862,7 +8271,24 @@ private:
         std::string keepPath = (selectedIndex >= 0 && selectedIndex < (int)workingList.size())
                             ? workingList[selectedIndex].path : std::string();
 
-        msgBox = new MessageBox("Saving...", nullptr, SCREEN_WIDTH, SCREEN_HEIGHT, 1.0f, 0, "", 16, 18, 8, 14);
+        const char* returnText = "Returning...";
+        const float popScale = 1.0f;
+        const int popPadX = 10;
+        const int popPadY = 24;
+        const int popLineH = (int)(24.0f * popScale + 0.5f);
+        const float popTextW = measureTextWidth(popScale, returnText);
+        const int popExtraW = 4;
+        int popPanelW = (int)(popTextW + popPadX * 2 + popExtraW + 0.5f);
+        popPanelW -= 6;
+        popPanelW -= 27; // 20px narrower than the Returning modal
+        if (popPanelW < 40) popPanelW = 40;
+        const int popBottom = 14;
+        const int popPanelH = popPadY + popLineH + popBottom - 24;
+        const int popWrapTweak = 32;
+        const int popForcedPxPerChar = 8;
+        msgBox = new MessageBox("Saving...", nullptr, SCREEN_WIDTH, SCREEN_HEIGHT,
+                                popScale, 0, "", popPadX, popPadY, popWrapTweak, popForcedPxPerChar,
+                                popPanelW, popPanelH);
         renderOneFrame();
 
         ScePspDateTime startDT{}; sceRtcGetCurrentClockLocalTime(&startDT);
@@ -7918,6 +8344,15 @@ private:
             patchTimesAndResort(flatAll, workingList);
         }
 
+        // Update device cache so returning to the device keeps the saved order.
+        {
+            const std::string key = rootPrefix(currentDevice);
+            if (!key.empty()) {
+                auto &entry = deviceCache[key];
+                snapshotCurrentScan(entry.snap);
+                entry.dirty = false;
+            }
+        }
 
         drawMessage("Order saved", COLOR_GREEN);
         sceKernelDelayThread(700 * 1000);
@@ -8478,6 +8913,8 @@ private:
         // Clear sentinel/op state used to piggyback confirm close
         opDestDevice.clear();
         opSrcPaths.clear(); opSrcKinds.clear();
+        opSrcCount = 0;
+        opSrcTotalBytes = 0;
         opPhase = OP_None;
     }
 
@@ -8607,6 +9044,8 @@ private:
         actionMode = AM_None;
         opPhase    = OP_None;
         opSrcPaths.clear(); opSrcKinds.clear();
+        opSrcCount = 0;
+        opSrcTotalBytes = 0;
         opDestDevice.clear(); opDestCategory.clear();
 
         char res[64];
@@ -8659,6 +9098,8 @@ private:
         opPhase    = OP_None;
         opSrcPaths.clear();
         opSrcKinds.clear();
+        opSrcCount = 0;
+        opSrcTotalBytes = 0;
         opDestDevice.clear();
         opDestCategory.clear();
 
@@ -8670,12 +9111,13 @@ private:
 
         // Snapshot selection
         if (!checked.empty()) {
-            for (auto &p : checked) {
-                opSrcPaths.push_back(p);
-                GameItem::Kind k = GameItem::ISO_FILE;
-                for (auto &gi : workingList) if (gi.path == p) { k = gi.kind; break; }
-                opSrcKinds.push_back(k);
+            for (const auto& gi : workingList) {
+                if (checked.find(gi.path) == checked.end()) continue;
+                opSrcPaths.push_back(gi.path);
+                opSrcKinds.push_back(gi.kind);
+                opSrcTotalBytes += gi.sizeBytes;
             }
+            opSrcCount = (int)opSrcPaths.size();
         } else {
             if (selectedIndex < 0 || selectedIndex >= (int)workingList.size()) {
                 msgBox = new MessageBox("No item selected.", okIconTexture, SCREEN_WIDTH, SCREEN_HEIGHT, 1.0f, 20, "OK", 16, 18, 8, 14);
@@ -8684,6 +9126,8 @@ private:
             }
             opSrcPaths.push_back(workingList[selectedIndex].path);
             opSrcKinds.push_back(workingList[selectedIndex].kind);
+            opSrcTotalBytes = workingList[selectedIndex].sizeBytes;
+            opSrcCount = 1;
         }
 
         // Save UI snapshot so we can restore
@@ -8702,9 +9146,26 @@ private:
                 opPhase = OP_SelectDevice;
 
                 // NEW: transient feedback while we do the first free-space probe
+                const char* returnText = "Returning...";
+                const float popScale = 1.0f;
+                const int popPadX = 10;
+                const int popPadY = 24;
+                const int popLineH = (int)(24.0f * popScale + 0.5f);
+                const float popTextW = measureTextWidth(popScale, returnText);
+                const int popExtraW = 4;
+                int popPanelW = (int)(popTextW + popPadX * 2 + popExtraW + 0.5f);
+                popPanelW -= 6;
+                const int popBottom = 14;
+                const int popPanelH = popPadY + popLineH + popBottom - 24;
+                const int popWrapTweak = 32;
+                const int popForcedPxPerChar = 8;
+                const int renamePanelW = popPanelW - 4;
+                const int renamePanelH = popPanelH - 4;
                 msgBox = new MessageBox("Calculating free space...", nullptr,
-                                        SCREEN_WIDTH, SCREEN_HEIGHT, 1.0f, 0, "",
-                                        16, 18, 8, 14);
+                                        SCREEN_WIDTH, SCREEN_HEIGHT,
+                                        popScale, 0, "", popPadX, popPadY,
+                                        popWrapTweak, popForcedPxPerChar,
+                                        renamePanelW + 135, renamePanelH);
                 renderOneFrame();
 
                 buildRootRows();  // (will probe free space as needed)
@@ -8733,6 +9194,8 @@ private:
         opPhase    = OP_None;
         opSrcPaths.clear();
         opSrcKinds.clear();
+        opSrcCount = 0;
+        opSrcTotalBytes = 0;
         opDestDevice.clear();
         opDestCategory.clear();
 
@@ -8752,13 +9215,26 @@ private:
     }
 
     void showConfirmAndRun() {
-        char buf[128];
-        const char* devName = rootDisplayName(opDestDevice.c_str());
-        const char* catName = (opDestCategory.empty() || !strcasecmp(opDestCategory.c_str(),"Uncategorized")) ? "Uncategorized" : opDestCategory.c_str();
-        const char* verb    = (actionMode == AM_Copy) ? "Copy" : "Move";
-        snprintf(buf, sizeof(buf), "%s %d item(s) to %s — %s\nPress X to confirm.",
-                verb, (int)opSrcPaths.size(), devName, catName);
-        msgBox = new MessageBox(buf, okIconTexture, SCREEN_WIDTH, SCREEN_HEIGHT, 1.0f, 20, "OK", 16, 18, 8, 14);
+        const int count = (int)opSrcPaths.size();
+        const char* verb = (actionMode == AM_Copy) ? "Copy" : "Move";
+        const char* title = (count == 1)
+            ? ((actionMode == AM_Copy) ? "Copy App" : "Move App")
+            : ((actionMode == AM_Copy) ? "Copy Apps" : "Move Apps");
+        char subtitle[96];
+        snprintf(subtitle, sizeof(subtitle),
+                 "%s %d %s?", verb, count, (count == 1) ? "app" : "apps");
+        msgBoxOwnedText = std::string(title) + "\n" + subtitle;
+        msgBox = new MessageBox(msgBoxOwnedText.c_str(), okIconTexture, SCREEN_WIDTH, SCREEN_HEIGHT,
+                                0.9f, 15, "Confirm",
+                                10, 18, 82, 9,
+                                240, 75);
+        msgBox->setOkAlignLeft(true);
+        msgBox->setOkPosition(10, 7);
+        msgBox->setOkStyle(0.7f, 0xFFBBBBBB);
+        msgBox->setOkTextOffset(-2, -1);
+        msgBox->setSubtitleStyle(0.7f, 0xFFBBBBBB);
+        msgBox->setSubtitleGapAdjust(-6);
+        msgBox->setCancel(circleIconTexture, "Cancel", PSP_CTRL_CIRCLE);
         opPhase = OP_Confirm;
     }
 
@@ -9173,15 +9649,37 @@ public:
 
             // Confirm/cancel flow
             if (pressed & PSP_CTRL_CIRCLE) {
+                if (!showRoots && opPhase == OP_SelectCategory && !opDestDevice.empty()) {
+                    opDestCategory.clear();
+                    buildRootRowsForDevicePicker();
+                    return;
+                }
                 // Show immediate exit overlay, restore view, then close overlay.
                 const char* actWord = (actionMode == AM_Move) ? "Move" : "Copy";
                 char exitingMsg[64];
                 snprintf(exitingMsg, sizeof(exitingMsg), "Exiting %s operation...", actWord);
 
                 // Show a passive overlay
+                const char* returnText = "Returning...";
+                const float popScale = 1.0f;
+                const int popPadX = 10;
+                const int popPadY = 24;
+                const int popLineH = (int)(24.0f * popScale + 0.5f);
+                const float popTextW = measureTextWidth(popScale, returnText);
+                const int popExtraW = 4;
+                int popPanelW = (int)(popTextW + popPadX * 2 + popExtraW + 0.5f);
+                popPanelW -= 6;
+                const int popBottom = 14;
+                const int popPanelH = popPadY + popLineH + popBottom - 24;
+                const int popWrapTweak = 32;
+                const int popForcedPxPerChar = 8;
+                const int renamePanelW = popPanelW - 4;
+                const int renamePanelH = popPanelH - 4;
                 msgBox = new MessageBox(exitingMsg, nullptr,
                                         SCREEN_WIDTH, SCREEN_HEIGHT,
-                                        1.0f, 0, "", 16, 18, 8, 14);
+                                        popScale, 0, "", popPadX, popPadY,
+                                        popWrapTweak, popForcedPxPerChar,
+                                        renamePanelW + 135, renamePanelH);
                 renderOneFrame();   // paint the overlay once
 
                 // Restore previous view/state
@@ -9244,7 +9742,26 @@ public:
                         // Prefer cache; only show spinner if we actually need to scan
                         bool needScan = deviceCache[rootPrefix(opDestDevice)].dirty;
                         if (needScan) {
-                            msgBox = new MessageBox("Scanning destination...", nullptr, SCREEN_WIDTH, SCREEN_HEIGHT, 1.0f, 0, "", 16, 18, 8, 14);
+                            const char* returnText = "Returning...";
+                            const float popScale = 1.0f;
+                            const int popPadX = 10;
+                            const int popPadY = 24;
+                            const int popLineH = (int)(24.0f * popScale + 0.5f);
+                            const float popTextW = measureTextWidth(popScale, returnText);
+                            const int popExtraW = 4;
+                            int popPanelW = (int)(popTextW + popPadX * 2 + popExtraW + 0.5f);
+                            popPanelW -= 6;
+                            const int popBottom = 14;
+                            const int popPanelH = popPadY + popLineH + popBottom - 24;
+                            const int popWrapTweak = 32;
+                            const int popForcedPxPerChar = 8;
+                            const int renamePanelW = popPanelW - 4;
+                            const int renamePanelH = popPanelH - 4;
+                            msgBox = new MessageBox("Scanning destination...", nullptr,
+                                                    SCREEN_WIDTH, SCREEN_HEIGHT,
+                                                    popScale, 0, "", popPadX, popPadY,
+                                                    popWrapTweak, popForcedPxPerChar,
+                                                    renamePanelW + 121, renamePanelH);
                             renderOneFrame();
                         }
                         scanDevicePreferCache(opDestDevice);
@@ -9438,7 +9955,7 @@ public:
                         { "Delete", false }
                     };
                     menuContext = MC_ContentOps;
-                    fileMenu = new FileOpsMenu(items, SCREEN_WIDTH, SCREEN_HEIGHT);
+                    fileMenu = new FileOpsMenu("File Operations", items, SCREEN_WIDTH, SCREEN_HEIGHT, 250, 140);
 
                     // NEW: Prime & debounce
                     SceCtrlData now{}; sceCtrlReadBufferPositive(&now, 1);
@@ -9450,7 +9967,7 @@ public:
                         { "Delete", false }
                     };
                     menuContext = MC_CategoryOps;
-                    fileMenu = new FileOpsMenu(items, SCREEN_WIDTH, SCREEN_HEIGHT);
+                    fileMenu = new FileOpsMenu("Category Operations", items, SCREEN_WIDTH, SCREEN_HEIGHT, 250, 120);
 
                     // NEW: Prime & debounce
                     SceCtrlData now{}; sceCtrlReadBufferPositive(&now, 1);
@@ -9648,6 +10165,7 @@ public:
                         UsbActivate();
                         gUsbActive = true;
                         gUsbShownConnected = false;
+                        markAllDevicesDirty();
                         gUsbBox = new MessageBox(
                             "Connect to PC...\nOn PSP Go, Bluetooth must be turned off in the System Settings.",
                             circleIconTexture, SCREEN_WIDTH, SCREEN_HEIGHT, 1.0f, 15, "Disconnect",
@@ -9798,10 +10316,29 @@ public:
             // Handle active dialogs
             if (msgBox) {
                 if (!msgBox->update()) {
+                    const bool canceled = msgBox->wasCanceled();
                     delete msgBox; msgBox = nullptr; inputWaitRelease = true;
+                    msgBoxOwnedText.clear();
 
                     // If we just closed a confirmation, perform the chosen op now.
                     if (opPhase == OP_Confirm) {
+                        if (canceled) {
+                            if (opDestDevice == "__DELETE__" || opDestDevice == "__DEL_CAT__") {
+                                opPhase = OP_None;
+                                opDestDevice.clear();
+                                opDestCategory.clear();
+                                opSrcPaths.clear();
+                                opSrcKinds.clear();
+                                opSrcCount = 0;
+                                opSrcTotalBytes = 0;
+                                actionMode = AM_None;
+                                continue;
+                            }
+                            // For Move/Copy confirms, return to the selection phase instead of canceling the op.
+                            opDestCategory.clear();
+                            opPhase = showRoots ? OP_SelectDevice : OP_SelectCategory;
+                            continue;
+                        }
                         if (opDestDevice == "__DELETE__") {
                             ClockGuard cg; cg.boost333();
                             msgBox = new MessageBox("Deleting...", nullptr, SCREEN_WIDTH, SCREEN_HEIGHT, 1.0f, 0, "", 16, 18, 8, 14);
@@ -9813,7 +10350,22 @@ public:
                             // Delete the CAT_ folder across ISO/GAME roots (all contents),
                             // per spec: non-game files don't affect the confirmation count and will just be removed.
                             ClockGuard cg; cg.boost333();
-                            msgBox = new MessageBox("Deleting category...", nullptr, SCREEN_WIDTH, SCREEN_HEIGHT, 1.0f, 0, "", 16, 18, 8, 14);
+                            const char* returnText = "Returning...";
+                            const float popScale = 1.0f;
+                            const int popPadX = 10;
+                            const int popPadY = 24;
+                            const int popLineH = (int)(24.0f * popScale + 0.5f);
+                            const float popTextW = measureTextWidth(popScale, returnText);
+                            const int popExtraW = 4;
+                            int popPanelW = (int)(popTextW + popPadX * 2 + popExtraW + 0.5f);
+                            popPanelW -= 6;
+                            const int popBottom = 14;
+                            const int popPanelH = popPadY + popLineH + popBottom - 24;
+                            const int popWrapTweak = 32;
+                            const int popForcedPxPerChar = 8;
+                            msgBox = new MessageBox("Deleting category...", nullptr, SCREEN_WIDTH, SCREEN_HEIGHT,
+                                                    popScale, 0, "", popPadX, popPadY, popWrapTweak, popForcedPxPerChar,
+                                                    popPanelW + 80, popPanelH);
                             renderOneFrame();
 
                             std::string delCat = opDestCategory;
@@ -10052,9 +10604,23 @@ public:
                             if (delPaths.empty()) {
                                 msgBox = new MessageBox("Nothing to delete.", okIconTexture, SCREEN_WIDTH, SCREEN_HEIGHT, 1.0f, 20, "OK", 16, 18, 8, 14);
                             } else {
-                                char buf[96];
-                                snprintf(buf, sizeof(buf), "Delete %d item(s)?\nPress X to confirm.", (int)delPaths.size());
-                                msgBox = new MessageBox(buf, okIconTexture, SCREEN_WIDTH, SCREEN_HEIGHT, 1.0f, 20, "OK", 16, 18, 8, 14);
+                                const int count = (int)delPaths.size();
+                                const char* title = (count == 1) ? "Delete App" : "Delete Apps";
+                                char subtitle[96];
+                                snprintf(subtitle, sizeof(subtitle),
+                                         "Delete %d %s?", count, (count == 1) ? "app" : "apps");
+                                msgBoxOwnedText = std::string(title) + "\n" + subtitle;
+                                msgBox = new MessageBox(msgBoxOwnedText.c_str(), okIconTexture, SCREEN_WIDTH, SCREEN_HEIGHT,
+                                                        0.9f, 15, "Confirm",
+                                                        10, 18, 82, 9,
+                                                        240, 75);
+                                msgBox->setOkAlignLeft(true);
+                                msgBox->setOkPosition(10, 7);
+                                msgBox->setOkStyle(0.7f, 0xFFBBBBBB);
+                                msgBox->setOkTextOffset(-2, -1);
+                                msgBox->setSubtitleStyle(0.7f, 0xFFBBBBBB);
+                                msgBox->setSubtitleGapAdjust(-6);
+                                msgBox->setCancel(circleIconTexture, "Cancel", PSP_CTRL_CIRCLE);
                                 opSrcPaths = delPaths; opSrcKinds = delKinds;
                                 actionMode = AM_None;
                                 opPhase    = OP_Confirm;
@@ -10131,16 +10697,27 @@ public:
                                 std::string cat = entries[selectedIndex].d_name;
 
                                 int games = countGamesInCategory(currentDevice, cat);
-                                char buf[128];
+                                char subtitle[128];
                                 if (games > 0) {
-                                    snprintf(buf, sizeof(buf),
-                                             "%d game(s) are in this folder and will be deleted.\nPress X to confirm.",
+                                    snprintf(subtitle, sizeof(subtitle),
+                                             "%d app(s) are in this category and will be deleted.",
                                              games);
                                 } else {
-                                    snprintf(buf, sizeof(buf),
-                                             "Delete empty category?\nPress X to confirm.");
+                                    snprintf(subtitle, sizeof(subtitle),
+                                             "Delete empty category?");
                                 }
-                                msgBox = new MessageBox(buf, okIconTexture, SCREEN_WIDTH, SCREEN_HEIGHT, 1.0f, 20, "OK", 16, 18, 8, 14);
+                                msgBoxOwnedText = std::string("Delete Category\n") + subtitle;
+                                msgBox = new MessageBox(msgBoxOwnedText.c_str(), okIconTexture, SCREEN_WIDTH, SCREEN_HEIGHT,
+                                                        0.9f, 15, "Confirm",
+                                                        10, 18, 82, 9,
+                                                        240, 90);
+                                msgBox->setOkAlignLeft(true);
+                                msgBox->setOkPosition(10, 7);
+                                msgBox->setOkStyle(0.7f, 0xFFBBBBBB);
+                                msgBox->setOkTextOffset(-2, -1);
+                                msgBox->setSubtitleStyle(0.7f, 0xFFBBBBBB);
+                                msgBox->setSubtitleGapAdjust(-6);
+                                msgBox->setCancel(circleIconTexture, "Cancel", PSP_CTRL_CIRCLE);
 
                                 // Reuse the confirm-close hook, sentinel device + stash cat in opDestCategory
                                 actionMode = AM_None;

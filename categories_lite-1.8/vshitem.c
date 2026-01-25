@@ -18,6 +18,7 @@
  *  along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <pspkernel.h>
 #include "categories_lite.h"
 #include "psppaf.h"
 #include "stub_funcs.h"
@@ -36,6 +37,8 @@
 extern int game_plug;
 extern int model;
 extern int context_mode;
+extern int sysconf_hint_mode;
+extern unsigned long long sysconf_hint_time;
 
 char user_buffer[256];
 
@@ -216,18 +219,26 @@ wchar_t* scePafGetTextPatched(void *arg, char *name) {
             return (wchar_t *) user_buffer;
             // sysconf subtitle 1
         } else if (sce_paf_private_strcmp(name, GC_SYSCONF_MODE_SUB) == 0) {
+            sysconf_hint_mode = 1;
+            sysconf_hint_time = sceKernelGetSystemTimeWide();
             gc_utf8_to_unicode((wchar_t *)user_buffer, lang_container.msg_mode_sub);
             return (wchar_t *) user_buffer;
         // sysconf subtitle 2
         } else if (sce_paf_private_strcmp(name, GC_SYSCONF_PREFIX_SUB) == 0) {
+            sysconf_hint_mode = 2;
+            sysconf_hint_time = sceKernelGetSystemTimeWide();
             gc_utf8_to_unicode((wchar_t *)user_buffer, lang_container.msg_prefix_sub);
             return (wchar_t *) user_buffer;
         // sysconf subtitle 3
         } else if (sce_paf_private_strcmp(name, GC_SYSCONF_SHOW_SUB) == 0) {
+            sysconf_hint_mode = 3;
+            sysconf_hint_time = sceKernelGetSystemTimeWide();
             gc_utf8_to_unicode((wchar_t *)user_buffer, lang_container.msg_show_sub);
             return (wchar_t *) user_buffer;
             // sysconf subtitle 4
         } else if (sce_paf_private_strcmp(name, GC_SYSCONF_SORT_SUB) == 0) {
+            sysconf_hint_mode = 4;
+            sysconf_hint_time = sceKernelGetSystemTimeWide();
             gc_utf8_to_unicode((wchar_t *)user_buffer, lang_container.msg_sort_sub);
             return (wchar_t *) user_buffer;
             // Memory Stick

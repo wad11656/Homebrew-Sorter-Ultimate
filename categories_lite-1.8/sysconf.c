@@ -21,6 +21,7 @@
  */
 
 #include <psputils.h>
+#include <pspkernel.h>
 #include "categories_lite.h"
 #include "psppaf.h"
 #include "vshitem.h"
@@ -36,11 +37,52 @@
 char user_buffer[256];
 static u32 backup[4] = { 0, 0, 0, 0 };
 int context_mode = 0;
+static int last_sysconf_mode = 0;
 static SceSysconfItem *sysconf_item[] = { NULL, NULL, NULL, NULL };
+static const char *last_sysconf_key = NULL;
+static int pending_sysconf_mode = 0;
+static unsigned long long pending_sysconf_time = 0;
+int sysconf_hint_mode = 0;
+unsigned long long sysconf_hint_time = 0;
+static const char *fallback_show_opts[] = {
+    "No",
+    "Only Memory Stick",
+    "Only Internal Storage",
+    "Both"
+};
 
 extern int sysconf_plug;
-
 extern int model;
+
+static void ensureLangLoadedForMode(int mode) {
+    int need = 0;
+    switch (mode) {
+    case 1:
+        if (!lang_container.mode[0] || !lang_container.mode[1] || !lang_container.mode[2] ||
+            !lang_container.mode[0][0] || !lang_container.mode[1][0] || !lang_container.mode[2][0]) need = 1;
+        break;
+    case 2:
+        if (!lang_container.prefix[0] || !lang_container.prefix[1] ||
+            !lang_container.prefix[0][0] || !lang_container.prefix[1][0]) need = 1;
+        break;
+    case 3:
+        if (!lang_container.show[0] || !lang_container.show[1] ||
+            !lang_container.show[2] || !lang_container.show[3] ||
+            !lang_container.show[0][0] || !lang_container.show[1][0] ||
+            !lang_container.show[2][0] || !lang_container.show[3][0]) need = 1;
+        break;
+    case 4:
+        if (!lang_container.sort[0] || !lang_container.sort[1] ||
+            !lang_container.sort[0][0] || !lang_container.sort[1][0]) need = 1;
+        break;
+    default:
+        break;
+    }
+    if (need) {
+        int lid = get_registry_value("/CONFIG/SYSTEM/XMB", "language");
+        LoadLanguage(lid, model == 4 ? INTERNAL_STORAGE : MEMORY_STICK);
+    }
+}
 
 #define GC_SYSCONF_MODE "gc0"
 #define GC_SYSCONF_MODE_SUB "gcs0"
@@ -64,6 +106,18 @@ static const char *sysconf_sub[] = {
     GC_SYSCONF_SHOW_SUB,
     GC_SYSCONF_SORT_SUB
 };
+static const char sysconf_page_mode[] = OPTION_PAGE;
+static const char sysconf_page_prefix[] = OPTION_PAGE;
+static const char sysconf_page_show[] = OPTION_PAGE;
+static const char sysconf_page_sort[] = OPTION_PAGE;
+static const char *sysconf_page[] = {
+    sysconf_page_mode,
+    sysconf_page_prefix,
+    sysconf_page_show,
+    sysconf_page_sort
+};
+static const unsigned long long pending_window_us = 200000ULL;
+static const unsigned long long hint_window_us = 300000ULL;
 
 void (*AddSysconfItem)(u32 *option, SceSysconfItem **item);
 SceSysconfItem *(*GetSysconfItem)(void *arg0, void *arg1);
@@ -86,13 +140,12 @@ void AddSysconfItemPatched(u32 *option, SceSysconfItem **item) {
             sysconf_item[i]->text = sysconf_str[i];
             sysconf_item[i]->regkey = sysconf_str[i];
             sysconf_item[i]->subtitle = sysconf_sub[i];
-            sysconf_item[i]->page = OPTION_PAGE;
+            sysconf_item[i]->page = sysconf_page[i];
             option[2] = 1;
             AddSysconfItem(option, &sysconf_item[i]);
         }
     }
     sysconf_plug = 0;
-    context_mode = 0;
     context_gamecats = 0;
     kprintf("called, option addr: %08X\n", option);
 }
@@ -151,21 +204,30 @@ void HijackContext(SceRcoEntry *src, char **options, int n) {
 
 SceSysconfItem *GetSysconfItemPatched(void *arg0, void *arg1) {
     SceSysconfItem *item = GetSysconfItem(arg0, arg1);
-    kprintf("called, item->text: %s, id: %i\n", item->text, item->id);
-    context_mode = 0;
+    kprintf("sysconf:GetSysconfItem item->text=%s regkey=%s id=%i\n",
+            item->text ? item->text : "(null)",
+            item->regkey ? item->regkey : "(null)",
+            item->id);
+    int next_mode = context_mode;
+    const char *key = item->regkey ? item->regkey : item->text;
     for(u32 i = 0; i < ITEMSOF(sysconf_str); i++) {
-        if(sce_paf_private_strcmp(item->text, sysconf_str[i]) == 0) {
-            context_mode = i + 1;
-            kprintf("match for %s, using context_mode: %i\n", sysconf_str[i], context_mode);
+        if(sce_paf_private_strcmp(key, sysconf_str[i]) == 0 ||
+           (item->text && sce_paf_private_strcmp(item->text, sysconf_str[i]) == 0)) {
+            next_mode = i + 1;
+            last_sysconf_key = sysconf_str[i];
+            kprintf("sysconf:GetSysconfItem match %s -> mode=%i\n", sysconf_str[i], next_mode);
         }
     }
+    context_mode = next_mode;
+    if (context_mode > 0) last_sysconf_mode = context_mode;
+    kprintf("sysconf:GetSysconfItem final mode=%i last=%i key=%s\n",
+            context_mode, last_sysconf_mode, last_sysconf_key ? last_sysconf_key : "(null)");
     return item;
 }
 
 int vshGetRegistryValuePatched(u32 *option, char *name, void *arg2, int size, int *value) {
     if (name) {
-        context_mode = 0;
-        kprintf("name: %s\n", name);
+        kprintf("sysconf:GetReg name=%s\n", name);
         if (strcmp(name, "/CONFIG/SYSTEM/XMB/language") == 0) {
             lang_id = get_registry_value("/CONFIG/SYSTEM/XMB", "language");
             LoadLanguage(lang_id, model == 4 ? INTERNAL_STORAGE : MEMORY_STICK);
@@ -173,7 +235,14 @@ int vshGetRegistryValuePatched(u32 *option, char *name, void *arg2, int size, in
         for(u32 i = 0; i < ITEMSOF(sysconf_str); i++) {
             if(sce_paf_private_strcmp(name, sysconf_str[i]) == 0) {
                 context_mode = i + 1;
-                kprintf("match for %s, using context_mode: %i\n", sysconf_str[i], context_mode);
+                kprintf("sysconf:GetReg match %s -> mode=%i\n", sysconf_str[i], context_mode);
+                if (context_mode > 0) last_sysconf_mode = context_mode;
+                last_sysconf_key = sysconf_str[i];
+                {
+                    unsigned long long now = sceKernelGetSystemTimeWide();
+                    pending_sysconf_mode = context_mode;
+                    pending_sysconf_time = now;
+                }
                 switch(i) {
                 case 0:
                     *value = config.mode;
@@ -243,11 +312,62 @@ int ResolveRefWStringPatched(void *resource, u32 *data, int *a2, char **string, 
 }
 
 int GetPageNodeByIDPatched(void *resource, char *name, SceRcoEntry **child) {
+    int forced_mode = 0;
+    if (name) {
+        for (u32 i = 0; i < ITEMSOF(sysconf_page); i++) {
+            if (name == sysconf_page[i]) {
+                forced_mode = i + 1;
+                break;
+            }
+        }
+    }
     int res = GetPageNodeByID(resource, name, child);
     if(name) {
         //kprintf("name: %s, mode: %i\n", name, context_mode);
         if (sce_paf_private_strcmp(name, OPTION_PAGE) == 0) {
-            kprintf("name: %s, mode: %i\n", name, context_mode);
+            int desired_mode = 0;
+            if (forced_mode > 0) {
+                desired_mode = forced_mode;
+            } else {
+                unsigned long long now = sceKernelGetSystemTimeWide();
+                if (sysconf_hint_mode > 0 && (now - sysconf_hint_time) < hint_window_us) {
+                    desired_mode = sysconf_hint_mode;
+                    sysconf_hint_mode = 0;
+                    sysconf_hint_time = 0;
+                }
+                if (desired_mode == 0 && pending_sysconf_mode > 0) {
+                    if ((now - pending_sysconf_time) < pending_window_us) {
+                        desired_mode = pending_sysconf_mode;
+                    } else {
+                        pending_sysconf_mode = 0;
+                    }
+                }
+                if (desired_mode == 0 && last_sysconf_key) {
+                    for (u32 i = 0; i < ITEMSOF(sysconf_str); i++) {
+                        if (sce_paf_private_strcmp(last_sysconf_key, sysconf_str[i]) == 0) {
+                            desired_mode = i + 1;
+                            break;
+                        }
+                    }
+                }
+                if (desired_mode == 0 && last_sysconf_mode > 0) {
+                    desired_mode = last_sysconf_mode;
+                }
+            }
+            if (desired_mode > 0) {
+                context_mode = desired_mode;
+                last_sysconf_mode = desired_mode;
+                last_sysconf_key = sysconf_str[desired_mode - 1];
+            }
+            ensureLangLoadedForMode(context_mode);
+            kprintf("sysconf:GetPage name=%s mode=%i last=%i key=%s\n",
+                    name ? name : "(null)", context_mode, last_sysconf_mode,
+                    last_sysconf_key ? last_sysconf_key : "(null)");
+            kprintf("sysconf:GetPage show=[%s|%s|%s|%s]\n",
+                    (lang_container.show[0] ? lang_container.show[0] : "(null)"),
+                    (lang_container.show[1] ? lang_container.show[1] : "(null)"),
+                    (lang_container.show[2] ? lang_container.show[2] : "(null)"),
+                    (lang_container.show[3] ? lang_container.show[3] : "(null)"));
             switch(context_mode) {
             case 0:
                 HijackContext(*child, NULL, 0);
@@ -259,7 +379,14 @@ int GetPageNodeByIDPatched(void *resource, char *name, SceRcoEntry **child) {
                 HijackContext(*child, lang_container.prefix, ITEMSOF(lang_container.prefix));
                 break;
             case 3:
-                HijackContext(*child, lang_container.show, ITEMSOF(lang_container.show));
+                {
+                    const char *opts[4];
+                    for (int i = 0; i < 4; ++i) {
+                        const char *s = lang_container.show[i];
+                        opts[i] = (s && s[0]) ? s : fallback_show_opts[i];
+                    }
+                    HijackContext(*child, (char **)opts, 4);
+                }
                 break;
             case 4:
                 HijackContext(*child, lang_container.sort, ITEMSOF(lang_container.sort));

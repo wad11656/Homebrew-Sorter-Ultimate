@@ -37,9 +37,11 @@ class MessageBox {
         void setOkTextOffset(int dx, int dy);
         void setSubtitleStyle(float scale, unsigned color);
         void setSubtitleGapAdjust(int px);
+        void setCancel(Texture* icon, const char* label, unsigned button = PSP_CTRL_CIRCLE);
 
         bool isVisible() const { return _visible; }
         void forceClose() { _visible = false; }
+        bool wasCanceled() const { return _canceled; }
 
         // ---- Progress API (unchanged) ----
         void showProgress(const char* fileMessage, uint64_t offset, uint64_t size);
@@ -79,6 +81,10 @@ private:
     int _okBottomPad = 14;
     int _okTextOffsetX = 0;
     int _okTextOffsetY = 0;
+    Texture* _cancelIcon = nullptr;
+    const char* _cancelLabel = nullptr;
+    unsigned _cancelButton = 0;
+    bool _canceled = false;
 
     float _subtitleScale = -1.0f;
     unsigned _subtitleColor = 0xFFFFFFFF;

@@ -27,14 +27,6 @@ static void mbDrawRect(int x, int y, int w, int h, unsigned color) {
                    2, 0, v);
 }
 
-// Trim to ~35 chars like the homebrew, add "..." if needed
-static std::string mbTrim35(const std::string& s) {
-    if (s.size() <= 35) return s;
-    std::string out = s.substr(0, 35);
-    out += "...";
-    return out;
-}
-
 static void mbCountLinesMaxChars(const char* s, int& outMaxChars, int& outLines) {
     outMaxChars = 0;
     outLines = 1;
@@ -74,7 +66,9 @@ MessageBox::MessageBox(const char* message,
   _textScale(textScale),
   _iconTargetH(iconTargetH),
   _visible(true),
-  _closeButton(closeButton) {
+  _closeButton(closeButton),
+  _cancelButton(0),
+  _canceled(false) {
     if (_w <= 0 || _h <= 0) {
         int maxChars = 0, lines = 1;
         mbCountLinesMaxChars(_msg, maxChars, lines);
@@ -112,6 +106,7 @@ bool MessageBox::update() {
     // These statics intentionally persist across calls to preserve edge/hold state.
     static unsigned lastButtons = 0;
     static unsigned long long holdStartUs = 0;
+    static unsigned holdMask = 0;
     static MessageBox* activeBox = nullptr;
     static bool armedForInput = true;   // becomes true once close button is seen released after showing
 
@@ -120,14 +115,17 @@ bool MessageBox::update() {
         activeBox = this;
         armedForInput = false;  // wait for release so we don't instantly close from a previous press
         holdStartUs = 0;
+        holdMask = 0;
         lastButtons = now;
     }
 
     // Arm when the close button is fully released
     if (!armedForInput) {
-        if ((now & _closeButton) == 0) {
+        unsigned gate = _closeButton | _cancelButton;
+        if ((now & gate) == 0) {
             armedForInput = true;
             holdStartUs = 0;
+            holdMask = 0;
         }
         lastButtons = now;
         return _visible;
@@ -135,29 +133,37 @@ bool MessageBox::update() {
 
     // Edge detection + hold fallback (helps when edges are missed due to long frames)
     unsigned newlyPressed = now & ~lastButtons;
-    bool close = (newlyPressed & _closeButton) != 0;
+    bool cancel = (_cancelButton != 0) && ((newlyPressed & _cancelButton) != 0);
+    bool close = (!cancel) && ((newlyPressed & _closeButton) != 0);
 
-    if (!close) {
-        if (now & _closeButton) {
-            // Start or continue measuring hold
-            if ((lastButtons & _closeButton) == 0) {
+    if (!close && !cancel) {
+        unsigned curMask = 0;
+        if (_cancelButton && (now & _cancelButton)) curMask = _cancelButton;
+        else if (now & _closeButton) curMask = _closeButton;
+
+        if (curMask == 0) {
+            holdStartUs = 0;
+            holdMask = 0;
+        } else {
+            if (curMask != holdMask) {
+                holdMask = curMask;
                 holdStartUs = now_us();
             } else {
                 if (holdStartUs == 0) holdStartUs = now_us();
                 unsigned long long elapsed = now_us() - holdStartUs;
                 // 220ms hold fallback: feels snappy but forgiving
                 if (elapsed >= 220000ULL) {
-                    close = true;
+                    if (holdMask == _cancelButton) cancel = true;
+                    else if (holdMask == _closeButton) close = true;
                 }
             }
-        } else {
-            holdStartUs = 0;
         }
     }
 
     lastButtons = now;
 
-    if (close) {
+    if (close || cancel) {
+        _canceled = cancel;
         _visible = false;
         // After closing, require release before any other UI consumes this press.
         armedForInput = false;
@@ -272,24 +278,61 @@ void MessageBox::render(intraFont* font) {
 
     // ---- Progress UI ----
     if (_progEnabled) {
+        const int barH = 12;
+        const int barW = innerW;
+        const int barX = innerX;
+        const float textMaxW = (float)barW;
         if (font) {
-            intraFontSetStyle(font, _textScale, COLOR_TEXT, 0, 0.0f, INTRAFONT_ALIGN_CENTER);
             float cx = _x + _w * 0.5f;
+            const float titleScale = _textScale * 0.85f;
+            const float detailScale = (_useSubtitleStyle && _subtitleScale > 0.0f)
+                                      ? _subtitleScale : 0.7f;
+            const unsigned detailColor = _useSubtitleStyle ? _subtitleColor : 0xFFBBBBBB;
 
-            // Line 1: game title (headline), if any
+            auto trimToWidth = [&](const std::string& s, float scale, float maxW)->std::string {
+                if (s.empty() || maxW <= 0.0f) return s;
+                if (!font) {
+                    const float pxPerChar = 12.0f * scale;
+                    int maxChars = (pxPerChar > 0.0f) ? (int)(maxW / pxPerChar) : 0;
+                    if (maxChars <= 0) return std::string();
+                    if ((int)s.size() <= maxChars) return s;
+                    if (maxChars <= 3) return s.substr(0, maxChars);
+                    return s.substr(0, maxChars - 3) + "...";
+                }
+                intraFontSetStyle(font, scale, COLOR_TEXT, 0, 0.0f, INTRAFONT_ALIGN_LEFT);
+                if (intraFontMeasureText(font, s.c_str()) <= maxW) return s;
+                const char* ell = "...";
+                const float ellW = intraFontMeasureText(font, ell);
+                if (ellW > maxW) return std::string();
+                size_t lo = 0, hi = s.size();
+                while (lo < hi) {
+                    size_t mid = (lo + hi) / 2;
+                    std::string cand = s.substr(0, mid) + ell;
+                    if (intraFontMeasureText(font, cand.c_str()) <= maxW) lo = mid + 1;
+                    else hi = mid;
+                }
+                size_t fit = (lo == 0) ? 0 : (lo - 1);
+                std::string out = s.substr(0, fit);
+                out += ell;
+                return out;
+            };
+
+            // Line 1: app title (headline), if any
             if (!_progTitle.empty()) {
-                std::string t = mbTrim35(_progTitle);
+                std::string t = trimToWidth(_progTitle, titleScale, textMaxW);
                 float cy = (float)(y + 6);
+                intraFontSetStyle(font, titleScale, COLOR_TEXT, 0, 0.0f, INTRAFONT_ALIGN_CENTER);
                 intraFontPrint(font, cx, cy, t.c_str());
-                y = (int)(cy + (int)(22.0f * _textScale + 0.5f));
+                y = (int)(cy + (int)(22.0f * titleScale + 0.5f));
             }
 
             // Line 2: filename (detail), if any
             if (!_progDetail.empty()) {
-                std::string d = mbTrim35(_progDetail);
+                std::string d = trimToWidth(_progDetail, detailScale, textMaxW);
                 float cy = (float)(y + 2);
+                intraFontSetStyle(font, detailScale, detailColor, 0, 0.0f, INTRAFONT_ALIGN_CENTER);
                 intraFontPrint(font, cx, cy, d.c_str());
-                y = (int)(cy + (int)(22.0f * _textScale + 0.5f));
+                y = (int)(cy + (int)(22.0f * detailScale + 0.5f));
             } else {
                 // keep some breathing room even if no detail
                 y += (int)(16.0f * _textScale + 0.5f);
@@ -297,9 +340,6 @@ void MessageBox::render(intraFont* font) {
         }
 
         // progress bar
-        const int barH = 12;
-        int barW = innerW;
-        int barX = innerX;
         int barY = y + 6;
 
         mbDrawRect(barX, barY, barW, barH, PROG_BAR_BG);
@@ -340,11 +380,34 @@ void MessageBox::render(intraFont* font) {
     // Approx text width for short labels like "OK"
     float okScale = (_okScale > 0.0f) ? _okScale : _textScale;
     float fontPx = 24.0f * okScale;
-    float okTextW = (float)std::strlen(_okLabel ? _okLabel : "OK") * (fontPx * 0.55f);
+    auto measureTextW = [&](const char* s)->float {
+        if (!s || !*s) return 0.0f;
+        if (font) {
+            intraFontSetStyle(font, okScale, COLOR_TEXT, 0, 0.0f, INTRAFONT_ALIGN_LEFT);
+            return intraFontMeasureText(font, s);
+        }
+        return (float)std::strlen(s) * (fontPx * 0.55f);
+    };
+    float okTextW = measureTextW(_okLabel ? _okLabel : "OK");
     float gap = 6.0f;
+    float groupGap = 12.0f;
 
-    // Center the whole (icon + gap + text) horizontally
-    float totalW = drawW + (drawW > 0 ? gap : 0) + okTextW;
+    // Cancel measurements (optional)
+    Texture* cancelTex = _cancelIcon;
+    float cancelDrawW = 0.0f;
+    if (cancelTex && cancelTex->data && cancelTex->height > 0 && iconH > 0.0f) {
+        float scale = iconH / (float)cancelTex->height;
+        cancelDrawW = cancelTex->width * scale;
+    }
+    float cancelTextW = measureTextW(_cancelLabel ? _cancelLabel : "");
+
+    const bool showOk = ((_okLabel && *_okLabel) || drawW > 0.0f);
+    const bool showCancel = ((_cancelLabel && *_cancelLabel) || cancelDrawW > 0.0f);
+    float okGroupW = showOk ? (drawW + (drawW > 0 ? gap : 0) + okTextW) : 0.0f;
+    float cancelGroupW = showCancel ? (cancelDrawW + (cancelDrawW > 0 ? gap : 0) + cancelTextW) : 0.0f;
+
+    // Center the whole (ok + cancel) group horizontally
+    float totalW = okGroupW + ((showOk && showCancel) ? groupGap : 0.0f) + cancelGroupW;
     int okLeftPad = (_okLeftPad >= 0) ? _okLeftPad : _padX;
     float startX = _okAlignLeft ? (float)(_x + okLeftPad) : (_x + (_w - totalW) * 0.5f);
 
@@ -354,48 +417,98 @@ void MessageBox::render(intraFont* font) {
     float iy1 = iy0 + iconH;
     float textBaseline = iy0 + iconH * 0.5f + fontPx * 0.35f; // nudge factor
 
-    // Icon
-    if (iconTex && iconTex->data && drawW > 0.0f) {
-        sceGuEnable(GU_TEXTURE_2D);
-        sceGuTexMode(GU_PSM_8888, 0, 0, GU_FALSE);
-        sceGuTexFunc(GU_TFX_REPLACE, GU_TCC_RGBA);
-        sceGuTexImage(0, iconTex->stride, iconTex->stride, iconTex->stride, iconTex->data);
-        sceGuTexFilter(GU_NEAREST, GU_NEAREST);
-        sceGuTexWrap(GU_CLAMP, GU_CLAMP);
+    // OK icon + label
+    float okStartX = startX;
+    if (showOk) {
+        if (iconTex && iconTex->data && drawW > 0.0f) {
+            sceGuEnable(GU_TEXTURE_2D);
+            sceGuTexMode(GU_PSM_8888, 0, 0, GU_FALSE);
+            sceGuTexFunc(GU_TFX_REPLACE, GU_TCC_RGBA);
+            sceGuTexImage(0, iconTex->stride, iconTex->stride, iconTex->stride, iconTex->data);
+            sceGuTexFilter(GU_NEAREST, GU_NEAREST);
+            sceGuTexWrap(GU_CLAMP, GU_CLAMP);
 
-        float ix0 = startX;
-        float ix1 = ix0 + drawW;
+            float ix0 = okStartX;
+            float ix1 = ix0 + drawW;
 
-        struct V { float u, v; unsigned color; float x, y, z; };
-        V* v = (V*)sceGuGetMemory(2 * sizeof(V));
-        v[0].u = 0.0f;                 v[0].v = 0.0f;
-        v[0].x = ix0;                  v[0].y = iy0;  v[0].z = 0.0f; v[0].color = 0xFFFFFFFF;
-        v[1].u = (float)iconTex->width  - 0.5f;
-        v[1].v = (float)iconTex->height - 0.5f;
-        v[1].x = ix1;                  v[1].y = iy1;  v[1].z = 0.0f; v[1].color = 0xFFFFFFFF;
+            struct V { float u, v; unsigned color; float x, y, z; };
+            V* v = (V*)sceGuGetMemory(2 * sizeof(V));
+            v[0].u = 0.0f;                 v[0].v = 0.0f;
+            v[0].x = ix0;                  v[0].y = iy0;  v[0].z = 0.0f; v[0].color = 0xFFFFFFFF;
+            v[1].u = (float)iconTex->width  - 0.5f;
+            v[1].v = (float)iconTex->height - 0.5f;
+            v[1].x = ix1;                  v[1].y = iy1;  v[1].z = 0.0f; v[1].color = 0xFFFFFFFF;
 
-        sceGuDrawArray(GU_SPRITES,
-                       GU_TEXTURE_32BITF | GU_VERTEX_32BITF |
-                       GU_COLOR_8888    | GU_TRANSFORM_2D,
-                       2, nullptr, v);
+            sceGuDrawArray(GU_SPRITES,
+                           GU_TEXTURE_32BITF | GU_VERTEX_32BITF |
+                           GU_COLOR_8888    | GU_TRANSFORM_2D,
+                           2, nullptr, v);
 
-        sceGuDisable(GU_TEXTURE_2D);
+            sceGuDisable(GU_TEXTURE_2D);
 
-        if (font && _okLabel && *_okLabel) {
+            if (font && _okLabel && *_okLabel) {
+                intraFontSetStyle(font, okScale, _okColor, 0, 0.0f, INTRAFONT_ALIGN_LEFT);
+                float okX = ix1 + gap + _okTextOffsetX;
+                float okY = textBaseline + _okTextOffsetY;
+                intraFontPrint(font, okX, okY, _okLabel ? _okLabel : "OK");
+            }
+        } else if (font && _okLabel && *_okLabel) {
             intraFontSetStyle(font, okScale, _okColor, 0, 0.0f, INTRAFONT_ALIGN_LEFT);
-            float okX = ix1 + gap + _okTextOffsetX;
+            float okX = okStartX + _okTextOffsetX;
             float okY = textBaseline + _okTextOffsetY;
             intraFontPrint(font, okX, okY, _okLabel ? _okLabel : "OK");
         }
-    } else {
-        // No icon → center the label
-        if (font) {
-            intraFontSetStyle(font, okScale, _okColor, 0, 0.0f, _okAlignLeft ? INTRAFONT_ALIGN_LEFT : INTRAFONT_ALIGN_CENTER);
-            float cx = _okAlignLeft ? (float)innerX : (_x + _w * 0.5f);
-            float cy = (float)bottomAreaTop + iconH * 0.5f + fontPx * 0.35f;
-            cx += _okTextOffsetX;
-            cy += _okTextOffsetY;
-            intraFontPrint(font, cx, cy, _okLabel ? _okLabel : "OK");
+    }
+
+    // Cancel icon + label
+    if (showCancel) {
+        float cancelStartX = okStartX + okGroupW + (showOk ? groupGap : 0.0f);
+        if (cancelTex && cancelTex->data && cancelDrawW > 0.0f) {
+            sceGuEnable(GU_TEXTURE_2D);
+            sceGuTexMode(GU_PSM_8888, 0, 0, GU_FALSE);
+            sceGuTexFunc(GU_TFX_REPLACE, GU_TCC_RGBA);
+            sceGuTexImage(0, cancelTex->stride, cancelTex->stride, cancelTex->stride, cancelTex->data);
+            sceGuTexFilter(GU_NEAREST, GU_NEAREST);
+            sceGuTexWrap(GU_CLAMP, GU_CLAMP);
+
+            float ix0 = cancelStartX;
+            float ix1 = ix0 + cancelDrawW;
+
+            struct V { float u, v; unsigned color; float x, y, z; };
+            V* v = (V*)sceGuGetMemory(2 * sizeof(V));
+            v[0].u = 0.0f;                  v[0].v = 0.0f;
+            v[0].x = ix0;                   v[0].y = iy0;  v[0].z = 0.0f; v[0].color = 0xFFFFFFFF;
+            v[1].u = (float)cancelTex->width  - 0.5f;
+            v[1].v = (float)cancelTex->height - 0.5f;
+            v[1].x = ix1;                   v[1].y = iy1;  v[1].z = 0.0f; v[1].color = 0xFFFFFFFF;
+
+            sceGuDrawArray(GU_SPRITES,
+                           GU_TEXTURE_32BITF | GU_VERTEX_32BITF |
+                           GU_COLOR_8888    | GU_TRANSFORM_2D,
+                           2, nullptr, v);
+
+            sceGuDisable(GU_TEXTURE_2D);
+
+            if (font && _cancelLabel && *_cancelLabel) {
+                intraFontSetStyle(font, okScale, _okColor, 0, 0.0f, INTRAFONT_ALIGN_LEFT);
+                float cx = ix1 + gap + _okTextOffsetX;
+                float cy = textBaseline + _okTextOffsetY;
+                intraFontPrint(font, cx, cy, _cancelLabel);
+            }
+        } else if (font && _cancelLabel && *_cancelLabel) {
+            intraFontSetStyle(font, okScale, _okColor, 0, 0.0f, INTRAFONT_ALIGN_LEFT);
+            float cx = cancelStartX + _okTextOffsetX;
+            float cy = textBaseline + _okTextOffsetY;
+            intraFontPrint(font, cx, cy, _cancelLabel);
+        }
+    }
+    if (!showOk && showCancel) {
+        // If only cancel is shown, keep its label centered when not left-aligned.
+        if (!_okAlignLeft && font && _cancelLabel && *_cancelLabel && cancelDrawW <= 0.0f) {
+            intraFontSetStyle(font, okScale, _okColor, 0, 0.0f, INTRAFONT_ALIGN_CENTER);
+            float cx = _x + _w * 0.5f + _okTextOffsetX;
+            float cy = textBaseline + _okTextOffsetY;
+            intraFontPrint(font, cx, cy, _cancelLabel);
         }
     }
 }
@@ -435,6 +548,13 @@ void MessageBox::setSubtitleStyle(float scale, unsigned color) {
 
 void MessageBox::setSubtitleGapAdjust(int px) {
     _subtitleGapAdjust = px;
+}
+
+void MessageBox::setCancel(Texture* icon, const char* label, unsigned button) {
+    _cancelIcon = icon;
+    _cancelLabel = label;
+    _cancelButton = button;
+    _canceled = false;
 }
 
 // ---- New: progress API impl ----
