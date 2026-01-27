@@ -2444,7 +2444,8 @@ private:
     static inline bool blacklistActive() { return gclCfg.prefix != 0; }
 
     // ---- Lightweight cache patch: update in-memory categories without rescanning disk ----
-    void patchCategoryCacheFromSettings(){
+    void patchCategoryCacheFromSettings(bool forceStripNumbers = false){
+        const bool stripNumbers = forceStripNumbers || gclCfg.catsort;
         // 1) Collect bases and existing numbers from current cache keys (skip "Uncategorized")
         std::set<std::string, bool(*)(const std::string&, const std::string&)> baseSet(
             [](const std::string& a, const std::string& b){ return strcasecmp(a.c_str(), b.c_str()) < 0; }
@@ -2458,7 +2459,7 @@ private:
             const std::string& key = kv.first;
             if (!strcasecmp(key.c_str(), "Uncategorized")) continue; // never renumber/rename this pseudo-folder
 
-            std::string base = stripCategoryPrefixes(key);
+            std::string base = stripCategoryPrefixes(key, stripNumbers);
             if (isBlacklistedBaseNameFor(currentDevice, base)) continue;
             baseSet.insert(base);
             int n = extractLeadingXXAfterOptionalCAT(key.c_str());
@@ -2537,7 +2538,7 @@ private:
                 continue;
             }
 
-            std::string base = stripCategoryPrefixes(oldCat);
+            std::string base = stripCategoryPrefixes(oldCat, stripNumbers);
             if (isBlacklistedBaseNameFor(currentDevice, base)) continue;
             std::string want = formatCategoryNameFromBase(base, assigned[base]);
 
@@ -2631,7 +2632,7 @@ private:
                     snapNewCats.emplace("Uncategorized", kv.second); // keep as-is
                     continue;
                 }
-                std::string base = stripCategoryPrefixes(disp);
+                std::string base = stripCategoryPrefixes(disp, stripNumbers);
                 if (isBlacklistedBaseNameFor(currentDevice, base)) continue;
                 std::string want = formatCategoryNameFromBase(base, assigned[base]);
 
@@ -2709,15 +2710,18 @@ private:
     }
 
     // Strip CAT_, XX, or CAT_XX from a display/category folder name to its base.
-    static std::string stripCategoryPrefixes(const std::string& in){
+    static std::string stripCategoryPrefixes(const std::string& in, bool stripNumbers){
         std::string s = in;
         if (startsWithCAT(s.c_str())) {
             s.erase(0, 4); // remove "CAT_"
         }
-        if (gclCfg.catsort && hasTwoDigitsAfter(s.c_str())) {
+        if (stripNumbers && hasTwoDigitsAfter(s.c_str())) {
             s.erase(0, 2);
         }
         return s;
+    }
+    static std::string stripCategoryPrefixes(const std::string& in){
+        return stripCategoryPrefixes(in, gclCfg.catsort != 0);
     }
 
     // Find the enforced on-disk folder name for a base (e.g., base "ARPG" -> "CAT_03ARPG" or "03ARPG")
@@ -2762,12 +2766,14 @@ private:
 
 
     // Only blacklist ISO/VIDEO as a non-category (per plugin behavior) plus user-defined blacklist.
-    static bool isBlacklistedCategoryFolder(const std::string& rootLabel, const std::string& sub, const std::string& absRoot){
+    static bool isBlacklistedCategoryFolder(const std::string& rootLabel, const std::string& sub,
+                                            const std::string& absRoot, bool forceStripNumbers = false){
         // rootLabel is like "ISO/", "PSP/GAME/", etc.
         if (!strcasecmp(rootLabel.c_str(), "ISO/") && !strcasecmp(sub.c_str(), "VIDEO")) return true;
         if (!blacklistActive()) return false;
 
-        std::string base = stripCategoryPrefixes(sub);
+        const bool stripNumbers = forceStripNumbers || gclCfg.catsort;
+        std::string base = stripCategoryPrefixes(sub, stripNumbers);
         if (isBlacklistedBaseNameFor(absRoot, base)) {
             if (strcasecmp(sub.c_str(), base.c_str()) != 0) {
                 renameIfExists(absRoot, sub, base); // strip CAT_/## from blacklisted folders
@@ -2802,7 +2808,7 @@ private:
     // • Respect "Use CAT prefix" (gclCfg.prefix) and "Sort Categories" (gclCfg.catsort).
     // • Skip game folders (subdirs that contain an EBOOT.PBP) and ISO/VIDEO.
     // • Skip game folders (subdirs that contain an EBOOT.PBP) and ISO/VIDEO.
-    static void enforceCategorySchemeForDevice(const std::string& dev){
+    static void enforceCategorySchemeForDevice(const std::string& dev, bool forceStripNumbers = false){
         const char* isoRoots[]  = {"ISO/"};                // drop ISO/PSP/ as a root
         const char* gameRoots[] = {"PSP/GAME/","PSP/GAME150/"}; // drop PSX/ and Utility/ as roots
 
@@ -2817,18 +2823,20 @@ private:
         // Track existing numbers per base
         std::map<std::string, std::vector<int>> baseExistingNums;
 
+        const bool stripNumbers = forceStripNumbers || gclCfg.catsort;
+
         for (auto &rp : roots){
             const std::string& absRoot  = rp.first;
             const std::string& rootLabel= rp.second;
             std::vector<std::string> subs;
             listSubdirs(absRoot, subs);
             for (auto &sub : subs){
-                if (isBlacklistedCategoryFolder(rootLabel, sub, absRoot)) continue;
+                if (isBlacklistedCategoryFolder(rootLabel, sub, absRoot, forceStripNumbers)) continue;
                 // Skip real game folders
                 std::string subAbs = joinDirFile(absRoot, sub.c_str());
                 if (!findEbootCaseInsensitive(subAbs).empty()) continue;
 
-                std::string base = stripCategoryPrefixes(sub);
+                std::string base = stripCategoryPrefixes(sub, stripNumbers);
                 baseSet.insert(base);
 
                 // Record any existing two-digit number (after optional CAT_)
@@ -2896,7 +2904,7 @@ private:
                 // Find existing entry for this base on this root (any variant).
                 std::string found;
                 for (const auto &sub : subs){
-                    if (!strcasecmp(stripCategoryPrefixes(sub).c_str(), base.c_str())) { found = sub; break; }
+                    if (!strcasecmp(stripCategoryPrefixes(sub, stripNumbers).c_str(), base.c_str())) { found = sub; break; }
                 }
                 if (found.empty()) continue; // not present on this root
                 if (!strcasecmp(found.c_str(), want.c_str())) continue; // already correct
@@ -5923,11 +5931,22 @@ private:
             const char* gameRoots[] = {"PSP/GAME/","PSP/GAME/PSX/","PSP/GAME/Utility/","PSP/GAME150/"};
             bool anyOk=false, anyFail=false;
 
-            // First, rename the existing folder (whatever its current prefix) to the BASE on each root
+            // First, rename the existing folder (whatever its current prefix) to the BASE on each root.
+            // If Sort is ON and the base starts with two digits, use a temporary "00" prefix so we don't
+            // accidentally strip those digits as a sort number during enforcement.
+            std::string renameTo = typed;
+            if (gclCfg.catsort && hasTwoDigitsAfter(renameTo.c_str())) {
+                char tmpNum[8];
+                snprintf(tmpNum, sizeof(tmpNum), "%02d", 0);
+                renameTo = gclCfg.prefix
+                    ? (std::string("CAT_") + tmpNum + typed)
+                    : (std::string(tmpNum) + typed);
+            }
+
             for (auto r : isoRoots) {
                 std::string base = currentDevice + std::string(r);
                 std::string from = base + oldDisplay;
-                std::string to   = base + typed;
+                std::string to   = base + renameTo;
                 if (dirExists(from)) {
                     int rc = sceIoRename(from.c_str(), to.c_str());
                     (rc >= 0) ? anyOk=true : anyFail=true;
@@ -5936,7 +5955,7 @@ private:
             for (auto r : gameRoots) {
                 std::string base = currentDevice + std::string(r);
                 std::string from = base + oldDisplay;
-                std::string to   = base + typed;
+                std::string to   = base + renameTo;
                 if (dirExists(from)) {
                     int rc = sceIoRename(from.c_str(), to.c_str());
                     (rc >= 0) ? anyOk=true : anyFail=true;
@@ -9833,7 +9852,7 @@ public:
                 if (!gclCfg.catsort) {
                     msgBox = new MessageBox(
                         "Sorting not enabled\n"
-                        "To enter Sort mode, select \"Game Categories settings\" at the top of the list, then turn on the \"Sort categories\" option.",
+                        "To enter Sort mode, select \"Game Categories Settings\" at the top of the list, then turn on the \"Sort Categories\" option.",
                         okIconTexture, SCREEN_WIDTH, SCREEN_HEIGHT, 1.0f, 15, "OK",
                         10, 18, 80, 9, 280, 120, PSP_CTRL_CROSS);
                     msgBox->setOkAlignLeft(true);
@@ -9897,7 +9916,7 @@ public:
                 if (!gclCfg.catsort) {
                     msgBox = new MessageBox(
                         "Sorting not enabled\n"
-                        "To enter Sort mode, select \"Game Categories settings\" at the top of the list, then turn on the \"Sort categories\" option.",
+                        "To enter Sort mode, select \"Game Categories Settings\" at the top of the list, then turn on the \"Sort Categories\" option.",
                         okIconTexture, SCREEN_WIDTH, SCREEN_HEIGHT, 1.0f, 15, "OK",
                         10, 18, 80, 9, 280, 120, PSP_CTRL_CROSS);
                     msgBox->setOkAlignLeft(true);
@@ -10480,6 +10499,7 @@ public:
                                 buildRootRows();   // reflect new state immediately
                             }
                         } else {
+                            const uint32_t prevCatsort = gclCfg.catsort;
                             // Existing in-plugin settings pickers
                             switch (pending) {
                                 case GCL_SK_Mode:   gclCfg.mode = (uint32_t)pick; break;
@@ -10531,18 +10551,21 @@ public:
 
                                 // If Prefix or Sort changed, apply immediately and refresh caches
                                 if (pending == GCL_SK_Prefix || pending == GCL_SK_Sort) {
+                                    const bool sortTurnedOff =
+                                        (pending == GCL_SK_Sort && prevCatsort != 0 && gclCfg.catsort == 0);
+                                    const bool forceStripNumbers = sortTurnedOff;
                                     // Clear run-once guard so future opens are allowed to re-enforce if needed
                                     gclSchemeApplied.erase(rootPrefix(currentDevice));
                                     s_catNamingEnforced.erase(rootPrefix(currentDevice));
 
-                                    enforceCategorySchemeForDevice(currentDevice);
+                                    enforceCategorySchemeForDevice(currentDevice, forceStripNumbers);
                                     const bool onMs0 = (strncasecmp(currentDevice.c_str(), "ms0:/", 5) == 0);
                                     if (isPspGo()) {
                                         // Also clear & enforce the opposite root once to keep ms0:/ and ef0:/ consistent
                                         std::string other = onMs0 ? std::string("ef0:/") : std::string("ms0:/");
                                         gclSchemeApplied.erase(rootPrefix(other));
                                         s_catNamingEnforced.erase(rootPrefix(other));
-                                        enforceCategorySchemeForDevice(other);
+                                        enforceCategorySchemeForDevice(other, forceStripNumbers);
                                     }
 
                                     // If prefix was just disabled, immediately bring back blacklisted bases
@@ -10557,7 +10580,7 @@ public:
                                     }
 
                                     // Keep in-memory cache consistent with on-disk names, preserving ICON0 paths
-                                    patchCategoryCacheFromSettings();
+                                    patchCategoryCacheFromSettings(forceStripNumbers);
                                     refreshGclFilterFile();
                                 }
                             }
