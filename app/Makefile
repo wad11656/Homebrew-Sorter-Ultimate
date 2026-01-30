@@ -1,5 +1,5 @@
 TARGET   = APP
-OBJS = main.o fs_driver.o src/Texture.o src/MessageBox.o \
+OBJS = main.o src/kfe_app.o fs_driver.o src/Texture.o src/MessageBox.o \
        third_party/lz4/lz4.o \
        src/iso_titles_extras.o \
        third_party/minilzo/minilzo.o
@@ -30,7 +30,8 @@ LIBS = -lintrafont \
 
 # PSP EBOOT metadata
 EXTRA_TARGETS   = EBOOT.PBP
-PSP_EBOOT_TITLE = Kernel File Explorer
+PSP_EBOOT_TITLE = Homebrew Sorter Ultimate
+PSP_EBOOT_ICON  = ../ICON0.png
 
 # Pull in the standard PSP SDK build rules
 include $(PSPSDK)/lib/build.mak
@@ -39,5 +40,6 @@ include $(PSPSDK)/lib/build.mak
 fs_driver.S:
 	psp-build-exports -s ../fs_driver/exports.exp > fs_driver.S
 
-# Ensure main.o rebuilds if you regenerate the stub
-main.o: fs_driver.S
+# Ensure the stub exists before compiling the core + stub objects
+src/kfe_app.o: fs_driver.S
+fs_driver.o: fs_driver.S
