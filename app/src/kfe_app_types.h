@@ -634,6 +634,22 @@ static void fmtDT(const ScePspDateTime& dt, char* out, size_t n){
     snprintf(out, n, "%04u/%02u/%02u %02u:%02u:%02u", y,mo,d,h,mi,s);
 }
 
+// Match Game Categories Lite ordering when sorting is OFF (mtime desc).
+static u64 categoryFolderMtime(const std::string& dev, const std::string& catName) {
+    if (dev.empty() || catName.empty()) return 0;
+    const char* roots[] = {"PSP/GAME/","PSP/GAME150/","PSP/GAME/PSX/","PSP/GAME/Utility/","ISO/"};
+    SceIoStat st{}; 
+    for (auto r : roots) {
+        std::string p = dev + std::string(r) + catName;
+        if (sceIoGetstat(p.c_str(), &st) >= 0 && FIO_S_ISDIR(st.st_mode)) {
+            u64 t = 0;
+            sceRtcGetTick((ScePspDateTime *)&st.sce_st_mtime, &t);
+            return t;
+        }
+    }
+    return 0;
+}
+
 // dir iterator
 template<typename F>
 static void forEachEntry(const std::string& dir, F f){

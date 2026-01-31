@@ -253,8 +253,7 @@ private:
                 return strcasecmp(a.c_str(), b.c_str()) < 0;
             });
         } else {
-            std::sort(categoryNames.begin(), categoryNames.end(),
-                [](const std::string& a, const std::string& b){ return strcasecmp(a.c_str(), b.c_str()) < 0; });
+            sortCategoryNamesByMtime(categoryNames, currentDevice);
         }
         hasCategories = !categoryNames.empty();
 
@@ -307,8 +306,7 @@ private:
                     return strcasecmp(a.c_str(), b.c_str()) < 0;
                 });
             } else {
-                std::sort(snap.categoryNames.begin(), snap.categoryNames.end(),
-                        [](const std::string& a, const std::string& b){ return strcasecmp(a.c_str(), b.c_str()) < 0; });
+                sortCategoryNamesByMtime(snap.categoryNames, currentDevice);
             }
             snap.hasCategories = !snap.categoryNames.empty();
         }
@@ -361,6 +359,21 @@ private:
     }
     static std::string stripCategoryPrefixes(const std::string& in){
         return stripCategoryPrefixes(in, gclCfg.catsort != 0);
+    }
+
+    void sortCategoryNamesByMtime(std::vector<std::string>& names, const std::string& dev) const {
+        if (names.size() < 2) return;
+        std::unordered_map<std::string, u64> mt;
+        mt.reserve(names.size());
+        for (const auto& n : names) {
+            mt[n] = categoryFolderMtime(dev, n);
+        }
+        std::sort(names.begin(), names.end(),
+            [&](const std::string& a, const std::string& b){
+                u64 ta = mt[a], tb = mt[b];
+                if (ta != tb) return ta > tb; // newest first
+                return strcasecmp(a.c_str(), b.c_str()) < 0;
+            });
     }
 
     // Find the enforced on-disk folder name for a base (e.g., base "ARPG" -> "CAT_03ARPG" or "03ARPG")
@@ -918,8 +931,7 @@ private:
                     return strcasecmp(a.c_str(), b.c_str()) < 0;
                 });
             } else {
-                std::sort(categoryNames.begin(), categoryNames.end(),
-                          [](const std::string& a, const std::string& b){ return strcasecmp(a.c_str(), b.c_str()) < 0; });
+                sortCategoryNamesByMtime(categoryNames, currentDevice);
             }
 
             // Mirror into the device snapshot so cache-based rebuilds reflect the new order

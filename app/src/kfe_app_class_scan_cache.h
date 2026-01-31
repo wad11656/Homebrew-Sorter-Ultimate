@@ -238,9 +238,8 @@
                                 return strcasecmp(a.c_str(), b.c_str()) < 0;
                             });
                 } else {
-                    // Sorting disabled: alphabetical for stable browsing
-                    std::sort(categoryNames.begin(), categoryNames.end(),
-                            [](const std::string& a, const std::string& b){ return strcasecmp(a.c_str(), b.c_str()) < 0; });
+                    // Sorting disabled: match Game Categories Lite (mtime desc)
+                    sortCategoryNamesByMtime(categoryNames, dev);
                 }
 
                 if (!uncategorized.empty()) categories["Uncategorized"]; // flag presence
@@ -1759,10 +1758,23 @@
         }
 
         std::vector<std::string> catsSorted = categoryNames;
-        std::sort(catsSorted.begin(), catsSorted.end(),
-                [](const std::string& a, const std::string& b){
-                    return strcasecmp(a.c_str(), b.c_str()) < 0;
-                });
+        if (gclCfg.catsort) {
+            std::sort(catsSorted.begin(), catsSorted.end(),
+                    [](const std::string& a, const std::string& b){
+                        auto parseXX = [](const std::string& s)->int{
+                            const char* p = s.c_str();
+                            if (startsWithCAT(p)) p += 4;
+                            if (p[0] >= '0' && p[0] <= '9' && p[1] >= '0' && p[1] <= '9')
+                                return (p[0]-'0')*10 + (p[1]-'0');
+                            return 0;
+                        };
+                        int ax = parseXX(a), bx = parseXX(b);
+                        if (ax > 0 || bx > 0) return (ax != bx) ? ax < bx : (strcasecmp(a.c_str(), b.c_str()) < 0);
+                        return strcasecmp(a.c_str(), b.c_str()) < 0;
+                    });
+        } else {
+            sortCategoryNamesByMtime(catsSorted, currentDevice);
+        }
 
         bool alreadyHasUnc = false;
         for (auto& n : catsSorted) if (!strcasecmp(n.c_str(),"Uncategorized")) { alreadyHasUnc = true; break; }
@@ -2132,5 +2144,3 @@
         drawMessage("Order saved", COLOR_GREEN);
         sceKernelDelayThread(700 * 1000);
     }
-
-
