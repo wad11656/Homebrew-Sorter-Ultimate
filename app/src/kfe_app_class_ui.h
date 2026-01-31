@@ -1755,10 +1755,21 @@ private:
                 deviceIcon = internalSmallIcon;
             }
         };
+        auto pickDeviceIconFor = [&](const std::string& dev) {
+            if (!strncasecmp(dev.c_str(), "ms0:", 4)) {
+                deviceIcon = memcardSmallIcon;
+            } else if (!strncasecmp(dev.c_str(), "ef0:", 4)) {
+                deviceIcon = internalSmallIcon;
+            }
+        };
 
         if (opHeader) {
             leftLabel = (actionMode == AM_Copy) ? "Copy Operation" : "Move Operation";
             deviceIcon = nullptr;
+            if ((opPhase == OP_SelectCategory || opPhase == OP_Confirm) &&
+                !opDestDevice.empty() && opDestDevice[0] != '_') {
+                pickDeviceIconFor(opDestDevice);
+            }
             underlineLabel = false;
         } else if (!showRoots && (view == View_Categories || view == View_GclSettings)) {
             leftLabel = currentDeviceHeaderName();
