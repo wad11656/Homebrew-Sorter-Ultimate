@@ -1,5 +1,4 @@
 # Homebrew Sorter GUI Ultimate
-### 🚧 Under Construction 🚧 — No release / Alpha stage
 
 <div align="center">
 <img width="650" src="https://github.com/user-attachments/assets/b1ef3b48-57ac-45e3-aecc-64b13e5f4901" />
