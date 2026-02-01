@@ -592,17 +592,24 @@ static bool isJunkHidden(const char* n) {
     return false;
 }
 
-// case-insensitive EBOOT finder (for presence checks only)
+// case-insensitive PBP finder (EBOOT/PARAM/PBOOT) for presence checks only
 static std::string findEbootCaseInsensitive(const std::string& dirMaybeSlash){
     std::string dpath = dirMaybeSlash;
     if (!dpath.empty() && dpath[dpath.size()-1]=='/') dpath.erase(dpath.size()-1);
     SceUID d = kfeIoOpenDir(dpath.c_str());
     if (d < 0) return {};
     SceIoDirent ent; memset(&ent, 0, sizeof(ent));
+    static const char* kPbpNames[] = { "EBOOT.PBP", "PARAM.PBP", "PBOOT.PBP" };
     while (kfeIoReadDir(d, &ent) > 0) {
         trimTrailingSpaces(ent.d_name);
-        if (!FIO_S_ISDIR(ent.d_stat.st_mode) && strcasecmp(ent.d_name, "EBOOT.PBP") == 0) {
-            std::string full = joinDirFile(dpath, ent.d_name); kfeIoCloseDir(d); return full;
+        if (!FIO_S_ISDIR(ent.d_stat.st_mode)) {
+            for (auto name : kPbpNames) {
+                if (strcasecmp(ent.d_name, name) == 0) {
+                    std::string full = joinDirFile(dpath, ent.d_name);
+                    kfeIoCloseDir(d);
+                    return full;
+                }
+            }
         }
         memset(&ent, 0, sizeof(ent));
     }
@@ -1079,6 +1086,16 @@ static std::string findFileCaseInsensitive(const std::string& dirNoSlash, const 
     return out;
 }
 
+static bool folderHasPbpNamed(const std::string& dirNoSlash, const char* name) {
+    return !findFileCaseInsensitive(dirNoSlash, name).empty();
+}
+
+static bool isUpdateDlcFolder(const std::string& folderNoSlash) {
+    if (folderHasPbpNamed(folderNoSlash, "EBOOT.PBP")) return false;
+    return folderHasPbpNamed(folderNoSlash, "PBOOT.PBP")
+        || folderHasPbpNamed(folderNoSlash, "PARAM.PBP");
+}
+
 // Read title from folder
 static bool getFolderTitle(const std::string& folderNoSlash, std::string& outTitle) {
     std::string sfoPath = findFileCaseInsensitive(folderNoSlash, "PARAM.SFO");
@@ -1239,7 +1256,7 @@ static Texture* loadIsoIconPNG(const std::string& isoPath) {
 // Returns how many "games" are inside a category folder (across ISO and GAME roots)
 // on the given device. Category names may or may not have a CAT_ prefix.
 // Games = ISO-like files (.iso/.cso/.zso/.dax/.jso) in ISO roots,
-//      or folders under PSP/GAME.../<category> that contain an EBOOT.PBP (case-insensitive).
+//      or folders under PSP/GAME.../<category> that contain a PBP (EBOOT/PARAM/PBOOT, case-insensitive).
 // Count games in a named <category> across both ISO and EBOOT schemes (case-insensitive).
 static int countGamesInCategory(const std::string& device, const std::string& cat) {
     const char* isoRoots[]  = {"ISO/"};                // drop ISO/PSP/ as a root
@@ -1391,6 +1408,7 @@ struct GameItem {
     ScePspDateTime time{};     // the time we sort by (folder for EBOOT, file for ISO)
     std::string    sortKey;    // legacy sort string (desc)
     uint64_t       sizeBytes = 0;  // <--- NEW: bytes for size column
+    bool           isUpdateDlc = false; // folder has PBOOT/PARAM but no EBOOT
 };
 
 

@@ -323,6 +323,7 @@ static Texture* internalSmallIcon = nullptr;
 static Texture* ps1IconTexture = nullptr;
 static Texture* homebrewIconTexture = nullptr;
 static Texture* isoIconTexture = nullptr;
+static Texture* updateIconTexture = nullptr;
 static bool gEnablePopAnimations = false; // Toggle Populating animation
 static std::vector<std::string> gPopAnimDirs;
 static std::vector<size_t> gPopAnimOrder;

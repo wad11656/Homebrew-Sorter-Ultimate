@@ -515,6 +515,8 @@ public:
     KernelFileExplorer(){ detectRoots(); buildRootRows(); }
     ~KernelFileExplorer(){
         if (font) intraFontUnload(font);
+        if (fontJpn) intraFontUnload(fontJpn);
+        if (fontKr) intraFontUnload(fontKr);
         freeSelectionIcon();
         freeCategoryIcon();
         if (placeholderIconTexture) { texFree(placeholderIconTexture); placeholderIconTexture = nullptr; }
@@ -578,8 +580,14 @@ public:
         sceDisplayWaitVblankStart(); sceGuDisplay(GU_TRUE);
 
         intraFontInit();
-        font = intraFontLoad("flash0:/font/ltn0.pgf", INTRAFONT_CACHE_MED);
+        font = intraFontLoad("flash0:/font/ltn0.pgf", INTRAFONT_CACHE_MED | INTRAFONT_STRING_UTF8);
+        fontJpn = intraFontLoad("flash0:/font/jpn0.pgf", INTRAFONT_CACHE_MED | INTRAFONT_STRING_UTF8);
+        fontKr  = intraFontLoad("flash0:/font/kr0.pgf", INTRAFONT_CACHE_MED | INTRAFONT_STRING_UTF8);
         if (!font) pspDebugScreenInit();
+
+        // Chain fonts for automatic fallback: Latin → Japanese → Korean
+        if (font && fontJpn) intraFontSetAltFont(font, fontJpn);
+        if (fontJpn && fontKr) intraFontSetAltFont(fontJpn, fontKr);
 
         // Prime font cache by rendering dummy text to eliminate artifacting
         if (font) {
@@ -597,5 +605,3 @@ public:
         // USB drivers are started on demand when USB Mode is entered.
 
     }
-
-

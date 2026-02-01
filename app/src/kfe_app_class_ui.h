@@ -584,6 +584,8 @@ private:
     bool moving = false;
 
     intraFont*  font   = nullptr;
+    intraFont*  fontJpn = nullptr;
+    intraFont*  fontKr  = nullptr;
     MessageBox* msgBox = nullptr;
     FileOpsMenu* fileMenu = nullptr;
     OptionListMenu* optMenu = nullptr;   // ← NEW: modal option picker
@@ -1489,6 +1491,7 @@ private:
                 sumDirBytes(newPath, folderBytes);
                 gi.sizeBytes = folderBytes;
             }
+            gi.isUpdateDlc = isUpdateDlcFolder(newPath);
         }
         gi.sortKey = buildLegacySortKey(gi.time);
 
@@ -1638,10 +1641,66 @@ private:
                        (segs + 1) * 2, 0, v);
         sceGuEnable(GU_TEXTURE_2D);
     }
+    static bool utf8Next(const char* s, size_t len, size_t& i, uint32_t& cp) {
+        if (i >= len) return false;
+        unsigned char c = (unsigned char)s[i];
+        if (c < 0x80) { cp = c; i += 1; return true; }
+        if ((c & 0xE0) == 0xC0 && i + 1 < len) {
+            cp = ((c & 0x1F) << 6) | (s[i + 1] & 0x3F);
+            i += 2; return true;
+        }
+        if ((c & 0xF0) == 0xE0 && i + 2 < len) {
+            cp = ((c & 0x0F) << 12) | ((s[i + 1] & 0x3F) << 6) | (s[i + 2] & 0x3F);
+            i += 3; return true;
+        }
+        if ((c & 0xF8) == 0xF0 && i + 3 < len) {
+            cp = ((c & 0x07) << 18) | ((s[i + 1] & 0x3F) << 12) |
+                 ((s[i + 2] & 0x3F) << 6) | (s[i + 3] & 0x3F);
+            i += 4; return true;
+        }
+        // invalid byte, skip
+        cp = c;
+        i += 1;
+        return true;
+    }
+    static bool isJapaneseCp(uint32_t cp) {
+        return (cp >= 0x3040 && cp <= 0x309F) || // Hiragana
+               (cp >= 0x30A0 && cp <= 0x30FF) || // Katakana
+               (cp >= 0x31F0 && cp <= 0x31FF) || // Katakana Phonetic Extensions
+               (cp >= 0x3400 && cp <= 0x4DBF) || // CJK Ext A
+               (cp >= 0x4E00 && cp <= 0x9FFF) || // CJK Unified
+               (cp >= 0xFF66 && cp <= 0xFF9D);   // Halfwidth Katakana
+    }
+    static bool isKoreanCp(uint32_t cp) {
+        return (cp >= 0x1100 && cp <= 0x11FF) || // Hangul Jamo
+               (cp >= 0x3130 && cp <= 0x318F) || // Hangul Compatibility Jamo
+               (cp >= 0xAC00 && cp <= 0xD7AF);   // Hangul Syllables
+    }
+    intraFont* pickFontForText(const char* s) {
+        if (!font || !s || !*s) return font;
+        if (!fontJpn && !fontKr) return font;
+        bool wantKr = false, wantJpn = false;
+        size_t len = strlen(s);
+        for (size_t i = 0; i < len; ) {
+            uint32_t cp = 0;
+            if (!utf8Next(s, len, i, cp)) break;
+            if (!wantKr && isKoreanCp(cp)) wantKr = true;
+            if (!wantJpn && isJapaneseCp(cp)) wantJpn = true;
+            if (wantKr || wantJpn) break;
+        }
+        if (wantKr && fontKr) return fontKr;
+        if (wantJpn && fontJpn) return fontJpn;
+        return font;
+    }
     void drawTextAligned(float x,float y,const char* s,unsigned col,int align) {
         if (font) {
-            intraFontSetStyle(font,0.5f,col,0,0.0f,align);
-            intraFontPrint(font,x,y,s);
+            intraFont* f = pickFontForText(s);
+            if (f) {
+                intraFontActivate(f);
+                intraFontSetStyle(f,0.5f,col,0,0.0f,align);
+                intraFontPrint(f,x,y,s);
+                return;
+            }
         } else {
             int cx = int(x/8);
             if (align == INTRAFONT_ALIGN_CENTER) {
@@ -1661,16 +1720,24 @@ private:
     float measureTextWidth(float size, const char* s) {
         if (!s) return 0.0f;
         if (!font) return (float)(strlen(s) * 8) * size;
-        intraFontSetStyle(font, size, COLOR_WHITE, 0, 0.0f, INTRAFONT_ALIGN_LEFT);
-        return intraFontMeasureText(font, s);
+        intraFont* f = pickFontForText(s);
+        if (!f) return (float)(strlen(s) * 8) * size;
+        intraFontActivate(f);
+        intraFontSetStyle(f, size, COLOR_WHITE, 0, 0.0f, INTRAFONT_ALIGN_LEFT);
+        return intraFontMeasureText(f, s);
     }
     void drawTextStyled(float x, float y, const char* s, float size, unsigned col, unsigned shadow,
                         int align, bool bold) {
         if (!s) return;
         if (font) {
-            intraFontSetStyle(font, size, col, shadow, 0.0f, align);
-            intraFontPrint(font, x, y, s);
-            if (bold) intraFontPrint(font, x + 1.0f, y, s);
+            intraFont* f = pickFontForText(s);
+            if (f) {
+                intraFontActivate(f);
+                intraFontSetStyle(f, size, col, shadow, 0.0f, align);
+                intraFontPrint(f, x, y, s);
+                if (bold) intraFontPrint(f, x + 1.0f, y, s);
+                return;
+            }
         } else {
             drawTextAligned(x, y, s, col, align);
             if (bold) drawTextAligned(x + 1.0f, y, s, col, align);
@@ -2661,17 +2728,23 @@ private:
             float used = 0.0f;
             std::string out;
             out.reserve(s.size());
-            for (size_t ci = 0; ci < s.size(); ++ci) {
-                char buf[2] = { s[ci], '\0' };
-                float cw = measureTextWidth(scale, buf);
+            size_t ci = 0;
+            while (ci < s.size()) {
+                unsigned char lead = (unsigned char)s[ci];
+                size_t charLen = (lead < 0x80) ? 1 : ((lead & 0xE0) == 0xC0) ? 2 : ((lead & 0xF0) == 0xE0) ? 3 : ((lead & 0xF8) == 0xF0) ? 4 : 1;
+                if (ci + charLen > s.size()) break;
+                std::string ch = s.substr(ci, charLen);
+                float cw = measureTextWidth(scale, ch.c_str());
                 if (skip > 0.0f) {
-                    if (skip >= cw) { skip -= cw; continue; }
+                    if (skip >= cw) { skip -= cw; ci += charLen; continue; }
                     skip = 0.0f;
-                    continue; // drop partially skipped char
+                    ci += charLen;
+                    continue;
                 }
                 if (used + cw > maxW) break;
-                out.push_back(s[ci]);
+                out += ch;
                 used += cw;
+                ci += charLen;
             }
             return out;
         };
@@ -3048,17 +3121,23 @@ private:
             float used = 0.0f;
             std::string out;
             out.reserve(s.size());
-            for (size_t ci = 0; ci < s.size(); ++ci) {
-                char buf[2] = { s[ci], '\0' };
-                float cw = measureTextWidth(scale, buf);
+            size_t ci = 0;
+            while (ci < s.size()) {
+                unsigned char lead = (unsigned char)s[ci];
+                size_t charLen = (lead < 0x80) ? 1 : ((lead & 0xE0) == 0xC0) ? 2 : ((lead & 0xF0) == 0xE0) ? 3 : ((lead & 0xF8) == 0xF0) ? 4 : 1;
+                if (ci + charLen > s.size()) break;
+                std::string ch = s.substr(ci, charLen);
+                float cw = measureTextWidth(scale, ch.c_str());
                 if (skip > 0.0f) {
-                    if (skip >= cw) { skip -= cw; continue; }
+                    if (skip >= cw) { skip -= cw; ci += charLen; continue; }
                     skip = 0.0f;
-                    continue; // drop partially skipped char
+                    ci += charLen;
+                    continue;
                 }
                 if (used + cw > maxW) break;
-                out.push_back(s[ci]);
+                out += ch;
                 used += cw;
+                ci += charLen;
             }
             return out;
         };
@@ -3084,6 +3163,9 @@ private:
                     !isDir && i >= 0 && i < (int)workingList.size()) {
                     const GameItem& gi = workingList[i];
                     if (gi.kind == GameItem::EBOOT_FOLDER) {
+                        if (gi.isUpdateDlc) {
+                            labelText = "[UPD]";
+                        } else {
                         std::string ebootPath = gi.path + "/EBOOT.PBP";
                         std::string category;
 
@@ -3104,6 +3186,7 @@ private:
                         } else {
                             labelText = "[FILE]";  // fallback for unknown CATEGORY
                         }
+                        }
                     } else {
                         labelText = "[FILE]";  // ISO files
                     }
@@ -3120,6 +3203,7 @@ private:
             Texture* labelIcon = nullptr;
             if (!strcmp(labelText, "[PS1]")) labelIcon = ps1IconTexture;
             else if (!strcmp(labelText, "[HB]")) labelIcon = homebrewIconTexture;
+            else if (!strcmp(labelText, "[UPD]")) labelIcon = updateIconTexture;
             else if (!strcmp(labelText, "[FILE]")) labelIcon = isoIconTexture;
 
             if (labelIcon && labelIcon->data && labelIcon->height > 0) {
@@ -3130,7 +3214,7 @@ private:
                 iconX = (float)((int)(iconX + 0.5f));
                 iconY = (float)((int)(iconY + 0.5f));
                 drawTextureScaled(labelIcon, iconX, iconY, labelIconH, labelColor);
-            } else {
+            } else if (strcmp(labelText, "[UPD]") != 0) {
                 const float labelTextW = measureTextWidth(scale, labelText);
                 const float labelTextX = iconSlotX + (iconSlotW - labelTextW) * 0.5f;
                 drawText(labelTextX, baseline, labelText, labelColor);
@@ -3273,6 +3357,9 @@ private:
                     !isDir && i >= 0 && i < (int)workingList.size()) {
                     const GameItem& gi = workingList[i];
                     if (gi.kind == GameItem::EBOOT_FOLDER) {
+                        if (gi.isUpdateDlc) {
+                            labelText = "[UPD]";
+                        } else {
                         std::string ebootPath = gi.path + "/EBOOT.PBP";
                         std::string category;
 
@@ -3292,6 +3379,7 @@ private:
                             labelText = "[HB]";
                         } else {
                             labelText = "[FILE]";  // fallback for unknown CATEGORY
+                        }
                         }
                     } else {
                         labelText = "[FILE]";  // ISO files

@@ -69,6 +69,7 @@ int RunKernelFileExplorer(const char* execPath) {
     std::string ps1Path    = baseDir + "resources/ps1.png";
     std::string homebrewPath = baseDir + "resources/homebrew.png";
     std::string isoPath    = baseDir + "resources/iso.png";
+    std::string updatePath = baseDir + "resources/update.png";
     std::string animRoot   = baseDir + "resources/animations";
 
     backgroundTexture      = texLoadPNG(pngPath.c_str());
@@ -99,6 +100,7 @@ int RunKernelFileExplorer(const char* execPath) {
     ps1IconTexture    = texLoadPNG(ps1Path.c_str());
     homebrewIconTexture = texLoadPNG(homebrewPath.c_str());
     isoIconTexture    = texLoadPNG(isoPath.c_str());
+    updateIconTexture = texLoadPNG(updatePath.c_str());
 
     initHomeAnimations(animRoot);
 

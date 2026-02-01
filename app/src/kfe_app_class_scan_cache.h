@@ -136,7 +136,7 @@
                 name = baseName;
             }
 
-            // If the folder itself contains an EBOOT.PBP, treat it as a stand-alone game (UNCATEGORIZED).
+            // If the folder itself contains a PBP (EBOOT/PARAM/PBOOT), treat it as a stand-alone game (UNCATEGORIZED).
             std::string folderNoSlashRoot = joinDirFile(base, name.c_str());
             if (dirExists(folderNoSlashRoot) && !findEbootCaseInsensitive(folderNoSlashRoot).empty()){
                 GameItem gi; gi.kind = GameItem::EBOOT_FOLDER;
@@ -151,6 +151,7 @@
                 uint64_t folderBytes = 0;
                 sumDirBytes(gi.path, folderBytes);
                 gi.sizeBytes = folderBytes;
+                gi.isUpdateDlc = isUpdateDlcFolder(gi.path);
 
                 std::string t; if (getFolderTitle(gi.path, t)) gi.title = t;
                 uncategorized.push_back(gi);
@@ -179,10 +180,11 @@
                                 gi.time     = stF.sce_st_mtime;
                                 gi.sortKey  = buildLegacySortKey(gi.time);
                             }
-                            // Optional: compute folder size for display (can be O(total files))
+                    // Optional: compute folder size for display (can be O(total files))
                             uint64_t folderBytes = 0;
                             sumDirBytes(gi.path, folderBytes);
                             gi.sizeBytes = folderBytes;
+                            gi.isUpdateDlc = isUpdateDlcFolder(gi.path);
 
                             std::string t; if (getFolderTitle(gi.path, t)) gi.title = t;
                             categories[name].push_back(gi);
@@ -347,6 +349,7 @@
                         uint64_t folderBytes = 0;
                         sumDirBytes(gi.path, folderBytes);
                         gi.sizeBytes = folderBytes;
+                        gi.isUpdateDlc = isUpdateDlcFolder(gi.path);
 
                         std::string t; if (getFolderTitle(gi.path, t)) gi.title = t;
                         items.push_back(gi);
@@ -468,6 +471,7 @@
                             uint64_t folderBytes = 0;
                             sumDirBytes(gi.path, folderBytes);
                             gi.sizeBytes = folderBytes;
+                            gi.isUpdateDlc = isUpdateDlcFolder(gi.path);
 
                             std::string t; if (getFolderTitle(gi.path, t)) gi.title = t;
                             items.push_back(gi);
