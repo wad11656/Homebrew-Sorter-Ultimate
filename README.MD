@@ -17,7 +17,7 @@
 
 <img width="480" height="272" alt="Image" src="https://github.com/user-attachments/assets/5526f8af-d245-4325-a0dd-e456fceff37e" />
 
-### 4. Copy/Move Apps Between Folders or Storage Devices
+### 4. Copy/Move Apps Between Category Folders or Storage Devices
 
 <img width="480" height="272" alt="Image" src="https://github.com/user-attachments/assets/af5a143c-9a5d-4a3e-ae7e-610f31f3bd94" />
 
