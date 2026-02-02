@@ -10,6 +10,8 @@ The classic HomeBrew Sorter GUI
 Sort Categories & Apps on PSP & Adrenaline (Vita). Includes alphabetize function, full Categories Lite integration, and file operations.
 </div>
 
+---
+
 ### 1. Sort, Add, Delete, Rename, and Hide Categories in the XMB
 
 <img width="480" height="272" alt="Image" src="https://github.com/user-attachments/assets/9b42ea88-519d-451b-97d2-9976ed921f07" />
