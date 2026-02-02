@@ -4,9 +4,7 @@
 <img width="650" src="https://github.com/user-attachments/assets/b1ef3b48-57ac-45e3-aecc-64b13e5f4901" />
 </div>
 <br/>
-<div>
 Successor to [HomeBrew Sorter](https://github.com/FPSUsername/HomeBrew_Sorter). Sort Categories & Apps on PSP (Go) & Adrenaline (Vita). Includes alphabetize function, full Categories Lite integration, and file operations.
-</div>
 
 ---
 
