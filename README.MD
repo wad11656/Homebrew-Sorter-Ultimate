@@ -5,7 +5,7 @@ The classic HomeBrew Sorter GUI
 <div align="center">
 <img width="650" src="https://github.com/user-attachments/assets/b1ef3b48-57ac-45e3-aecc-64b13e5f4901" />
 </div>
-
+<br/>
 <div align="center">
 Sort Categories & Apps on PSP & Adrenaline (Vita). Includes alphabetize function, full Categories Lite integration, and file operations.
 </div>
