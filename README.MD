@@ -32,7 +32,7 @@ Sort Categories & Apps on PSP (Go) & Adrenaline (Vita). Includes alphabetize fun
 
 ---
 
-Known Limitations:
+<u>Known Limitations</u>:
 - In-app USB Mode not supported on Adrenaline.
 - The integrated Categories Lite plugin on vanilla (non-ARK) Adrenaline requires "Category prefix" to be enabled.
 - The Categories Lite plugin on vanilla (non-ARK) Adrenaline and LME CFW does not merge Category folders with the same name between `/ISO` and `/PSP/GAME`.
