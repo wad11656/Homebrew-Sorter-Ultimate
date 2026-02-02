@@ -40,4 +40,7 @@ Sort Categories & Apps on PSP (Go) & Adrenaline (Vita). Includes alphabetize fun
 <ins>Additional Info</ins>:
 - You can disable the main screen animations by removing all the folders in the `/resources/animations` folder. (Or even add your own animation folders with animation `.png` frames named the same way as in the existing folders.)
 - You can change the app background by swapping out `/resources/bkg.png`.
-- [CMFileManager by joel16](https://github.com/joel16/CMFileManager-PSP) was used as the base for this app to help with file operations and compiling with the modern PSP SDK.
+- A [personally-updated build of the Categories Lite plugin](https://github.com/wad11656/game-categories-lite) was created and integrated with this app to restore the functionality of hiding Categories from the XMB.
+
+<ins>Credits</ins>:
+[CMFileManager by joel16](https://github.com/joel16/CMFileManager-PSP) was used as the base for this app to help with file operations and compiling with the modern PSP SDK.
