@@ -26,7 +26,7 @@ Sort Categories & Apps on PSP (Go) & Adrenaline (Vita). Includes alphabetize fun
 
 <img width="480" height="272" alt="Image" src="https://github.com/user-attachments/assets/af5a143c-9a5d-4a3e-ae7e-610f31f3bd94" />
 
-### 5. Icon & Title Extraction for All ARK-4-Supported App Types (PS1, Homebrew, ISO, CSO(v2), DAX, JSO, ZSO)
+### 5. Icon & Title Extraction for All ARK-4-Supported App Types [PS1, Homebrew, ISO, CSO(v2), DAX, JSO, ZSO]
 
 <img width="480" height="272" alt="Image" src="https://github.com/user-attachments/assets/7c9abe24-31b7-43b1-97c0-cede0b4b1e28" />
 
