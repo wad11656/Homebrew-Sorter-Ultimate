@@ -1,13 +1,11 @@
-# Homebrew Sorter GUI Ultimate
-
-The classic HomeBrew Sorter GUI 
+# Homebrew Sorter Ultimate
 
 <div align="center">
 <img width="650" src="https://github.com/user-attachments/assets/b1ef3b48-57ac-45e3-aecc-64b13e5f4901" />
 </div>
 <br/>
 <div align="center">
-Sort Categories & Apps on PSP & Adrenaline (Vita). Includes alphabetize function, full Categories Lite integration, and file operations.
+Sort Categories & Apps on PSP (Go) & Adrenaline (Vita). Includes alphabetize function, full Categories Lite integration, and file operations.
 </div>
 
 ---
@@ -31,3 +29,10 @@ Sort Categories & Apps on PSP & Adrenaline (Vita). Includes alphabetize function
 ### 5. Icon & Title Extraction for All ARK-4-Supported App Types (PS1, Homebrew, ISO, CSO(v2), DAX, JSO, ZSO)
 
 <img width="480" height="272" alt="Image" src="https://github.com/user-attachments/assets/7c9abe24-31b7-43b1-97c0-cede0b4b1e28" />
+
+---
+
+Known Limitations:
+- In-app USB Mode not supported on Adrenaline.
+- The integrated Categories Lite plugin on vanilla (non-ARK) Adrenaline requires "Category prefix" to be enabled.
+- The Categories Lite plugin on vanilla (non-ARK) Adrenaline and LME CFW does not merge Category folders between `/ISO` and `/PSP/GAME`.
