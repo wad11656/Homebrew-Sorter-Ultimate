@@ -26,6 +26,9 @@ PSP_EXPORT_FUNC(pspIoChstat)
 PSP_EXPORT_FUNC(pspIoRename)
 PSP_EXPORT_FUNC(pspIoRemoveFile)
 PSP_EXPORT_FUNC(pspIoDevctl)
+PSP_EXPORT_FUNC(pspSysconCtrlLED)
+PSP_EXPORT_FUNC(pspLedSuppressStart)
+PSP_EXPORT_FUNC(pspLedSuppressStop)
 PSP_EXPORT_END
 
 PSP_END_EXPORTS

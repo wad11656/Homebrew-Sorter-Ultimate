@@ -27,6 +27,34 @@ static void mbDrawRect(int x, int y, int w, int h, unsigned color) {
                    2, 0, v);
 }
 
+static void mbDrawTextureScaled(Texture* tex, float x, float y, float h, unsigned color) {
+    if (!tex || !tex->data || tex->width <= 0 || tex->height <= 0 || h <= 0.0f) return;
+    const float scale = h / (float)tex->height;
+    const float w = (float)tex->width * scale;
+
+    sceKernelDcacheWritebackRange(tex->data, tex->stride * tex->height * 4);
+    sceGuTexFlush();
+
+    sceGuEnable(GU_TEXTURE_2D);
+    sceGuTexMode(GU_PSM_8888, 0, 0, GU_FALSE);
+    sceGuTexFunc(GU_TFX_REPLACE, GU_TCC_RGBA);
+    sceGuTexImage(0, tex->stride, tex->stride, tex->stride, tex->data);
+    sceGuTexFilter(GU_LINEAR, GU_LINEAR);
+    sceGuTexWrap(GU_CLAMP, GU_CLAMP);
+
+    const float u0 = 0.0f, v0 = 0.0f;
+    const float u1 = (float)tex->width - 0.5f;
+    const float v1 = (float)tex->height - 0.5f;
+
+    struct V { float u, v; unsigned color; float x, y, z; };
+    V* v = (V*)sceGuGetMemory(2 * sizeof(V));
+    v[0] = { u0, v0, color, x,     y,     0.0f };
+    v[1] = { u1, v1, color, x + w, y + h, 0.0f };
+    sceGuDrawArray(GU_SPRITES, GU_TEXTURE_32BITF | GU_COLOR_8888 |
+                              GU_VERTEX_32BITF  | GU_TRANSFORM_2D, 2, nullptr, v);
+    sceGuDisable(GU_TEXTURE_2D);
+}
+
 static void mbCountLinesMaxChars(const char* s, int& outMaxChars, int& outLines) {
     outMaxChars = 0;
     outLines = 1;
@@ -265,7 +293,30 @@ void MessageBox::render(intraFont* font) {
             const float scale = isTitle ? titleScale : subtitleScale;
             const unsigned color = isTitle ? titleColor : subtitleColor;
             intraFontSetStyle(font, scale, color, 0, 0.0f, INTRAFONT_ALIGN_LEFT);
-            intraFontPrint(font, (float)innerX, (float)y, lines[i].c_str());
+            const char* raw = lines[i].c_str();
+            const char* text = raw;
+            bool hadToken = false;
+            if (_inlineToken) {
+                size_t tokLen = std::strlen(_inlineToken);
+                if (tokLen > 0 && std::strncmp(raw, _inlineToken, tokLen) == 0 && raw[tokLen] == ' ') {
+                    text = raw + tokLen + 1;
+                    hadToken = true;
+                }
+            }
+            float textX = (float)innerX;
+            float textY = (float)y;
+            if (hadToken) {
+                float iconH = 12.0f * (scale / 0.7f);
+                if (iconH < 8.0f) iconH = 8.0f;
+                if (_inlineIcon && _inlineIcon->data) {
+                    float iconY = (float)y - iconH + (float)(22.0f * scale * 0.75f) - 5.0f;
+                    mbDrawTextureScaled(_inlineIcon, textX, iconY, iconH, 0xFFFFFFFF);
+                    float iconW = (float)_inlineIcon->width * (iconH / (float)_inlineIcon->height);
+                    textX += iconW + 4.0f;
+                }
+                textY += 5.0f;
+            }
+            intraFontPrint(font, textX, textY, text);
             int lineH = lineHFor(scale);
             if (isTitle && _useSubtitleStyle) {
                 lineH += _subtitleGapAdjust;
@@ -548,6 +599,11 @@ void MessageBox::setSubtitleStyle(float scale, unsigned color) {
 
 void MessageBox::setSubtitleGapAdjust(int px) {
     _subtitleGapAdjust = px;
+}
+
+void MessageBox::setInlineIcon(Texture* icon, const char* token) {
+    _inlineIcon = icon;
+    _inlineToken = token;
 }
 
 void MessageBox::setCancel(Texture* icon, const char* label, unsigned button) {

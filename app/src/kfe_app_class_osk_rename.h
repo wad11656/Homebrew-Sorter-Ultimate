@@ -100,7 +100,18 @@
         renderOneFrame();
 
         if (data.result == PSP_UTILITY_OSK_RESULT_OK) {
-            out = sanitizeFilename(utf16ToUtf8(out16.data()));
+            std::string raw = utf16ToUtf8(out16.data());
+            auto trimSpaces = [](std::string& s){
+                size_t n = s.size();
+                size_t i = 0;
+                while (i < n && (s[i] == ' ' || s[i] == '\t' || s[i] == '\r' || s[i] == '\n')) i++;
+                size_t j = n;
+                while (j > i && (s[j - 1] == ' ' || s[j - 1] == '\t' || s[j - 1] == '\r' || s[j - 1] == '\n')) j--;
+                if (i > 0 || j < n) s = s.substr(i, j - i);
+            };
+            trimSpaces(raw);
+            if (raw.empty()) return false;
+            out = sanitizeFilename(raw);
             return true;
         }
         return false;

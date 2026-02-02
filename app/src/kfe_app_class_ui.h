@@ -81,6 +81,14 @@ private:
     static std::unordered_map<std::string, std::vector<std::string>> gclFilterMap;           // key: filter root ("ms0:/", "ef0:/")
     static std::unordered_map<std::string, bool> gclFilterLoadedMap;
     static inline bool blacklistActive() { return gclCfg.prefix != 0; }
+    bool isUncategorizedEnabledForDevice(const std::string& dev) const {
+        if (gclCfg.uncategorized == 0) return false;
+        if (gclCfg.uncategorized == 3) return true;
+        if (dev.empty()) return gclCfg.uncategorized != 0;
+        if (gclCfg.uncategorized == 1) return strncasecmp(dev.c_str(), "ms0:/", 5) == 0;
+        if (gclCfg.uncategorized == 2) return strncasecmp(dev.c_str(), "ef0:/", 5) == 0;
+        return true;
+    }
 
     // ---- Lightweight cache patch: update in-memory categories without rescanning disk ----
     void patchCategoryCacheFromSettings(bool forceStripNumbers = false){
@@ -1492,6 +1500,7 @@ private:
                 gi.sizeBytes = folderBytes;
             }
             gi.isUpdateDlc = isUpdateDlcFolder(newPath);
+            fillEbootIconPaths(gi);
         }
         gi.sortKey = buildLegacySortKey(gi.time);
 
@@ -1680,16 +1689,19 @@ private:
         if (!font || !s || !*s) return font;
         if (!fontJpn && !fontKr) return font;
         bool wantKr = false, wantJpn = false;
+        bool sawNonAscii = false;
+        bool invalidUtf8 = false;
         size_t len = strlen(s);
         for (size_t i = 0; i < len; ) {
+            if (((unsigned char)s[i]) & 0x80) sawNonAscii = true;
             uint32_t cp = 0;
-            if (!utf8Next(s, len, i, cp)) break;
+            if (!utf8Next(s, len, i, cp)) { invalidUtf8 = true; break; }
             if (!wantKr && isKoreanCp(cp)) wantKr = true;
             if (!wantJpn && isJapaneseCp(cp)) wantJpn = true;
             if (wantKr || wantJpn) break;
         }
         if (wantKr && fontKr) return fontKr;
-        if (wantJpn && fontJpn) return fontJpn;
+        if ((wantJpn || invalidUtf8 || sawNonAscii) && fontJpn) return fontJpn;
         return font;
     }
     void drawTextAligned(float x,float y,const char* s,unsigned col,int align) {
@@ -2073,6 +2085,13 @@ private:
 
     Texture* loadIconForGameItem(const GameItem& gi) {
         if (gi.kind == GameItem::EBOOT_FOLDER) {
+            if (!gi.iconPath.empty()) {
+                if (Texture* t = texLoadPNG(gi.iconPath.c_str())) return t;
+            }
+            if (!gi.pbpPath.empty()) {
+                if (Texture* t = loadIconFromPBP(gi.pbpPath)) return t;
+            }
+            // Fallback: legacy scan if cached paths are empty/outdated
             std::string iconPath = findFileCaseInsensitive(gi.path, "ICON0.PNG");
             if (!iconPath.empty()) {
                 if (Texture* t = texLoadPNG(iconPath.c_str())) return t;
@@ -2098,6 +2117,13 @@ private:
             return nullptr;
         }
         return nullptr;
+    }
+
+    bool ebootHasIconSource(const GameItem& gi) {
+        if (gi.kind != GameItem::EBOOT_FOLDER) return false;
+        if (!gi.iconPath.empty() || !gi.pbpPath.empty()) return true;
+        if (!findFileCaseInsensitive(gi.path, "ICON0.PNG").empty()) return true;
+        return !findEbootCaseInsensitive(gi.path).empty();
     }
 
     void ensureSelectionIcon() {
@@ -2132,8 +2158,13 @@ private:
         }
 
         Texture* t = loadIconForGameItem(gi);
-        if (t) selectionIconTex = t;
-        else { selectionIconTex = placeholderIconTexture; noIconPaths.insert(key); }
+        if (t) {
+            selectionIconTex = t;
+        } else {
+            selectionIconTex = placeholderIconTexture;
+            const bool cacheFailure = (gi.kind == GameItem::EBOOT_FOLDER) && !ebootHasIconSource(gi);
+            if (cacheFailure) noIconPaths.insert(key);
+        }
         selectionIconKey = key;
     }
 
@@ -2447,7 +2478,7 @@ private:
         drawRect((int)animX, (int)(animY - 1.0f), (int)animW, (int)(animH + 1.0f), COLOR_BANNER);
 
         advanceHomeAnimationFrame();
-        Texture* animTex = (gHomeAnimFrameIndex < gHomeAnimFrames.size()) ? gHomeAnimFrames[gHomeAnimFrameIndex].tex : nullptr;
+        Texture* animTex = getCurrentHomeAnimTexture();
         if (animTex && animTex->data && animTex->width > 0 && animTex->height > 0) {
             const float pad = 8.0f;
             const float boxW = animW - pad * 2.0f;
@@ -2752,13 +2783,36 @@ private:
         auto drawRow = [&](int i, float centerY, bool showCount, bool showAppsLabel) {
             const char* name = entries[i].d_name;
             const bool sel = (i == selectedIndex);
+            const bool isUncategorizedRow = (strcasecmp(name, "Uncategorized") == 0);
+            const bool isUncategorizedDisabled =
+                (isUncategorizedRow && !inOpCategorySelect &&
+                 !isUncategorizedEnabledForDevice(currentDevice));
             const bool disabled = (inOpCategorySelect &&
-                                   opDisabledCategories.find(name) != opDisabledCategories.end());
+                                   opDisabledCategories.find(name) != opDisabledCategories.end())
+                                   || isUncategorizedDisabled;
 
             const bool locked = isCategoryRowLocked(i);
             const bool isPicked = (catSortMode && catPickActive && i == catPickIndex && !locked);
 
-            unsigned baseCol = disabled ? COLOR_GRAY : COLOR_WHITE;
+            int appCount = -1;
+            if (showCount || (!inOpCategorySelect && !isUncategorizedRow)) {
+                if (isUncategorizedRow) {
+                    appCount = (int)uncategorized.size();
+                } else {
+                    auto it = categories.find(name);
+                    if (it != categories.end()) appCount = (int)it->second.size();
+                    else {
+                        for (const auto &kv : categories) {
+                            if (!strcasecmp(kv.first.c_str(), name)) { appCount = (int)kv.second.size(); break; }
+                        }
+                    }
+                }
+            }
+
+            const bool emptyFade = (!inOpCategorySelect && !isUncategorizedRow && appCount == 0);
+            const bool dimmed = (disabled || emptyFade);
+
+            unsigned baseCol = dimmed ? COLOR_GRAY : COLOR_WHITE;
             unsigned textCol = sel ? COLOR_BLACK : baseCol;
             unsigned shadowCol = sel ? COLOR_WHITE : 0x40000000;
             if (isPicked) shadowCol = pickedGlowCol;
@@ -2790,12 +2844,12 @@ private:
                     float iconW = (float)folderIcon->width * (iconHCat / (float)folderIcon->height);
                     float iconX = textLeftX - iconGap - iconW + 5.0f;
                     float iconY = centerY - (iconHCat * 0.5f) - 4.0f;
-                    drawTextureScaled(folderIcon, iconX, iconY, iconHCat, disabled ? 0x66FFFFFF : 0xFFFFFFFF);
+                    drawTextureScaled(folderIcon, iconX, iconY, iconHCat, dimmed ? 0x66FFFFFF : 0xFFFFFFFF);
                     // Overlay C
                     const float cX = (float)(int)(iconX + (iconW * 0.25f) - 4.0f + 0.5f);
                     const float cY = (float)(int)(iconY + 13.0f + 0.5f);
                     drawTextStyled(cX, cY, "C",
-                                   0.5f, disabled ? COLOR_GRAY : COLOR_BLACK, 0, INTRAFONT_ALIGN_LEFT, false);
+                                   0.5f, dimmed ? COLOR_GRAY : COLOR_BLACK, 0, INTRAFONT_ALIGN_LEFT, false);
                 }
             }
 
@@ -2843,18 +2897,7 @@ private:
             }
 
             if (showCount) {
-                int appCount = 0;
-                if (!strcasecmp(name, "Uncategorized")) {
-                    appCount = (int)uncategorized.size();
-                } else {
-                    auto it = categories.find(name);
-                    if (it != categories.end()) appCount = (int)it->second.size();
-                    else {
-                        for (const auto &kv : categories) {
-                            if (!strcasecmp(kv.first.c_str(), name)) { appCount = (int)kv.second.size(); break; }
-                        }
-                    }
-                }
+                if (appCount < 0) appCount = 0;
                 char cnt[16];
                 snprintf(cnt, sizeof(cnt), "%d", appCount);
                 intraFontSetStyle(font, scale, COLOR_GRAY, 0, 0.0f, INTRAFONT_ALIGN_CENTER);

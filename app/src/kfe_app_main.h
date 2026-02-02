@@ -35,11 +35,23 @@ int LoadStartModule(const char *path) {
 int RunKernelFileExplorer(const char* execPath) {
     gExecPath = execPath;
     std::string baseDir = getBaseDir(execPath);
+    gLogBaseDir = baseDir;
+    logInit();
+    logf("boot: RunKernelFileExplorer start");
+    logf("boot: execPath=%s", execPath ? execPath : "(null)");
+    logf("boot: baseDir=%s", baseDir.c_str());
     std::string fsDriverPath = baseDir + "fs_driver.prx";
+    logf("boot: LoadStartModule %s", fsDriverPath.c_str());
     if (LoadStartModule(fsDriverPath.c_str()) < 0) {
+        logf("boot: LoadStartModule failed, retrying fs_driver.prx");
         LoadStartModule("fs_driver.prx");
     }
+    logf("boot: SetupCallbacks");
     SetupCallbacks();
+
+    auto logTex = [](const char* label, const std::string& p, Texture* t) {
+        logf("boot: load %s %s -> %p", label, p.c_str(), (void*)t);
+    };
 
     std::string pngPath  = baseDir + "resources/bkg.png";
     std::string crossPath= baseDir + "resources/cross.png";
@@ -70,39 +82,43 @@ int RunKernelFileExplorer(const char* execPath) {
     std::string homebrewPath = baseDir + "resources/homebrew.png";
     std::string isoPath    = baseDir + "resources/iso.png";
     std::string updatePath = baseDir + "resources/update.png";
+    std::string warningPath = baseDir + "resources/warning.png";
     std::string animRoot   = baseDir + "resources/animations";
 
-    backgroundTexture      = texLoadPNG(pngPath.c_str());
-    okIconTexture          = texLoadPNG(crossPath.c_str());
-    circleIconTexture      = texLoadPNG(circlePath.c_str());
-    triangleIconTexture    = texLoadPNG(trianglePath.c_str());
-    squareIconTexture      = texLoadPNG(squarePath.c_str());
-    selectIconTexture      = texLoadPNG(selectPath.c_str());
-    startIconTexture       = texLoadPNG(startPath.c_str());
-    placeholderIconTexture = texLoadPNG(icon0Path.c_str());
-    checkTexUnchecked = texLoadPNG(boxOffPath.c_str());
-    checkTexChecked   = texLoadPNG(boxOnPath.c_str());
-    rootMemIcon       = texLoadPNG(memPath.c_str());
-    rootInternalIcon  = texLoadPNG(intPath.c_str());
-    rootUsbIcon       = texLoadPNG(usbPath.c_str());
-    rootCategoriesIcon= texLoadPNG(catPath.c_str());
-    rootArk4Icon      = texLoadPNG(ark4Path.c_str());
-    rootProMeIcon     = texLoadPNG(proPath.c_str());
-    rootOffBulbIcon   = texLoadPNG(offPath.c_str());
-    catFolderIcon     = texLoadPNG(folderPath.c_str());
-    catFolderIconGray = texLoadPNG(folderGrayPath.c_str());
-    catSettingsIcon   = texLoadPNG(catSettingsPath.c_str());
-    blacklistIcon     = texLoadPNG(blacklistPath.c_str());
-    lIconTexture      = texLoadPNG(lPath.c_str());
-    rIconTexture      = texLoadPNG(rPath.c_str());
-    memcardSmallIcon  = texLoadPNG(memSmallPath.c_str());
-    internalSmallIcon = texLoadPNG(intSmallPath.c_str());
-    ps1IconTexture    = texLoadPNG(ps1Path.c_str());
-    homebrewIconTexture = texLoadPNG(homebrewPath.c_str());
-    isoIconTexture    = texLoadPNG(isoPath.c_str());
-    updateIconTexture = texLoadPNG(updatePath.c_str());
+    backgroundTexture      = texLoadPNG(pngPath.c_str()); logTex("background", pngPath, backgroundTexture);
+    okIconTexture          = texLoadPNG(crossPath.c_str()); logTex("ok", crossPath, okIconTexture);
+    circleIconTexture      = texLoadPNG(circlePath.c_str()); logTex("circle", circlePath, circleIconTexture);
+    triangleIconTexture    = texLoadPNG(trianglePath.c_str()); logTex("triangle", trianglePath, triangleIconTexture);
+    squareIconTexture      = texLoadPNG(squarePath.c_str()); logTex("square", squarePath, squareIconTexture);
+    selectIconTexture      = texLoadPNG(selectPath.c_str()); logTex("select", selectPath, selectIconTexture);
+    startIconTexture       = texLoadPNG(startPath.c_str()); logTex("start", startPath, startIconTexture);
+    placeholderIconTexture = texLoadPNG(icon0Path.c_str()); logTex("icon0", icon0Path, placeholderIconTexture);
+    checkTexUnchecked = texLoadPNG(boxOffPath.c_str()); logTex("check_off", boxOffPath, checkTexUnchecked);
+    checkTexChecked   = texLoadPNG(boxOnPath.c_str()); logTex("check_on", boxOnPath, checkTexChecked);
+    rootMemIcon       = texLoadPNG(memPath.c_str()); logTex("root_mem", memPath, rootMemIcon);
+    rootInternalIcon  = texLoadPNG(intPath.c_str()); logTex("root_internal", intPath, rootInternalIcon);
+    rootUsbIcon       = texLoadPNG(usbPath.c_str()); logTex("root_usb", usbPath, rootUsbIcon);
+    rootCategoriesIcon= texLoadPNG(catPath.c_str()); logTex("root_categories", catPath, rootCategoriesIcon);
+    rootArk4Icon      = texLoadPNG(ark4Path.c_str()); logTex("root_ark4", ark4Path, rootArk4Icon);
+    rootProMeIcon     = texLoadPNG(proPath.c_str()); logTex("root_pro", proPath, rootProMeIcon);
+    rootOffBulbIcon   = texLoadPNG(offPath.c_str()); logTex("root_off", offPath, rootOffBulbIcon);
+    catFolderIcon     = texLoadPNG(folderPath.c_str()); logTex("cat_folder", folderPath, catFolderIcon);
+    catFolderIconGray = texLoadPNG(folderGrayPath.c_str()); logTex("cat_folder_gray", folderGrayPath, catFolderIconGray);
+    catSettingsIcon   = texLoadPNG(catSettingsPath.c_str()); logTex("cat_settings", catSettingsPath, catSettingsIcon);
+    blacklistIcon     = texLoadPNG(blacklistPath.c_str()); logTex("blacklist", blacklistPath, blacklistIcon);
+    lIconTexture      = texLoadPNG(lPath.c_str()); logTex("L", lPath, lIconTexture);
+    rIconTexture      = texLoadPNG(rPath.c_str()); logTex("R", rPath, rIconTexture);
+    memcardSmallIcon  = texLoadPNG(memSmallPath.c_str()); logTex("mem_small", memSmallPath, memcardSmallIcon);
+    internalSmallIcon = texLoadPNG(intSmallPath.c_str()); logTex("int_small", intSmallPath, internalSmallIcon);
+    ps1IconTexture    = texLoadPNG(ps1Path.c_str()); logTex("ps1", ps1Path, ps1IconTexture);
+    homebrewIconTexture = texLoadPNG(homebrewPath.c_str()); logTex("homebrew", homebrewPath, homebrewIconTexture);
+    isoIconTexture    = texLoadPNG(isoPath.c_str()); logTex("iso", isoPath, isoIconTexture);
+    updateIconTexture = texLoadPNG(updatePath.c_str()); logTex("update", updatePath, updateIconTexture);
+    warningIconTexture = texLoadPNG(warningPath.c_str()); logTex("warning", warningPath, warningIconTexture);
 
+    logf("boot: initHomeAnimations %s", animRoot.c_str());
     initHomeAnimations(animRoot);
+    logf("boot: initHomeAnimations done");
 
     if (gEnablePopAnimations) {
         if (dirExists(animRoot)) {
@@ -125,9 +141,11 @@ int RunKernelFileExplorer(const char* execPath) {
         }
     }
 
+    logf("boot: computeDominantColor");
     if (backgroundTexture && backgroundTexture->data) {
         gOskBgColorABGR = computeDominantColorABGRFromTexture(backgroundTexture);
     }
+    logf("boot: computeDominantColor done");
 
     if (!backgroundTexture) {
         pspDebugScreenInit();
@@ -135,7 +153,9 @@ int RunKernelFileExplorer(const char* execPath) {
         sceKernelDelayThread(800 * 1000);
     }
 
+    logf("boot: construct app");
     KernelFileExplorer app;
+    logf("boot: app.run");
     app.run();
     return 0;
 }

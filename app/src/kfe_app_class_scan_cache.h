@@ -152,6 +152,7 @@
                 sumDirBytes(gi.path, folderBytes);
                 gi.sizeBytes = folderBytes;
                 gi.isUpdateDlc = isUpdateDlcFolder(gi.path);
+                fillEbootIconPaths(gi);
 
                 std::string t; if (getFolderTitle(gi.path, t)) gi.title = t;
                 uncategorized.push_back(gi);
@@ -185,6 +186,7 @@
                             sumDirBytes(gi.path, folderBytes);
                             gi.sizeBytes = folderBytes;
                             gi.isUpdateDlc = isUpdateDlcFolder(gi.path);
+                            fillEbootIconPaths(gi);
 
                             std::string t; if (getFolderTitle(gi.path, t)) gi.title = t;
                             categories[name].push_back(gi);
@@ -212,7 +214,8 @@
             for (size_t i=0;i<sizeof(gameRoots)/sizeof(gameRoots[0]);++i) scanGameRootDir(dev + std::string(gameRoots[i]));
 
 
-            if (!categories.empty()) hasCategories = true;
+            // Show categories view when Game Categories is enabled OR when category folders exist
+            if (!categories.empty() || gclArkOn || gclProOn) hasCategories = true;
 
             if (!hasCategories){
                 flatAll = uncategorized;
@@ -350,6 +353,7 @@
                         sumDirBytes(gi.path, folderBytes);
                         gi.sizeBytes = folderBytes;
                         gi.isUpdateDlc = isUpdateDlcFolder(gi.path);
+                        fillEbootIconPaths(gi);
 
                         std::string t; if (getFolderTitle(gi.path, t)) gi.title = t;
                         items.push_back(gi);
@@ -472,6 +476,7 @@
                             sumDirBytes(gi.path, folderBytes);
                             gi.sizeBytes = folderBytes;
                             gi.isUpdateDlc = isUpdateDlcFolder(gi.path);
+                            fillEbootIconPaths(gi);
 
                             std::string t; if (getFolderTitle(gi.path, t)) gi.title = t;
                             items.push_back(gi);
@@ -1620,6 +1625,8 @@
         }
 
         showRoots = true; moving = false;
+        currentCategory.clear(); // forget last highlighted category when backing out to devices
+        armHomeAnimationForRoot();
 
         selectedIndex = 0; scrollOffset = 0;
         if (preselect >= 0 && (rowFlags[preselect] & ROW_DISABLED) == 0) {
@@ -1694,8 +1701,9 @@
 
 
         std::vector<std::string> catsSorted = categoryNames;
-        bool hasUnc = (categories.find("Uncategorized") != categories.end());
-        if (hasUnc && gclCfg.uncategorized) catsSorted.push_back("Uncategorized");
+        // Always add Uncategorized to the categories list (even if disabled)
+        // The UI will show it as faded/disabled when gclCfg.uncategorized is false
+        catsSorted.push_back("Uncategorized");
 
 
         // Add an entry to open the plugin settings here
@@ -1823,6 +1831,8 @@
     }
 
     void openDevice(const std::string& dev){
+        setMsLedSuppressed(false);
+        suspendHomeAnimation();
         currentDevice = dev;
         scanAnimActive = false;
         scanAnimNextUs = 0;
@@ -1856,11 +1866,14 @@
             msgBox = new MessageBox(popText, nullptr, SCREEN_WIDTH, SCREEN_HEIGHT,
                                     popScale, 0, "", popPadX, popPadY, popWrapTweak, popForcedPxPerChar,
                                     popPanelW, popPanelH);
+            pauseHomeAnimationKeepFrame(); // freeze current frame while modal is visible
+            unsigned long long animStartUs = 0;
             if (gEnablePopAnimations && !gPopAnimDirs.empty()) {
                 const std::string* animDir = nextPopAnimDir();
                 if (animDir && ensurePopAnimLoaded(*animDir)) {
                     msgBox->setAnimation(gPopAnimFrames.data(), gPopAnimFrames.size(), POP_ANIM_TARGET_H);
                     scanAnimActive = true;
+                    animStartUs = (unsigned long long)sceKernelGetSystemTimeWide();
                 }
             }
             renderOneFrame();
@@ -1876,6 +1889,15 @@
             }
             snapshotCurrentScan(dc.snap);               // cache the fresh results
             dc.dirty = false;
+
+            // Ensure at least one full animation cycle plays before closing
+            if (scanAnimActive && animStartUs > 0 && gPopAnimTotalCycleUs > 0) {
+                unsigned long long animEndUs = animStartUs + gPopAnimTotalCycleUs;
+                while ((unsigned long long)sceKernelGetSystemTimeWide() < animEndUs) {
+                    renderOneFrame();
+                    sceKernelDelayThread(10000); // 10ms between frames to avoid busy-waiting
+                }
+            }
 
             moving = false;
             scanAnimActive = false;
@@ -1921,12 +1943,9 @@
                     gclSchemeApplied.insert(rootKey);
                 }
             }
-            if (!hasCategories) {
-                // No category folders present; fall back to a flat list so games are visible.
-                rebuildFlatFromCache();
-            } else {
-                buildCategoryRows();
-            }
+            // Always show Categories view when Game Categories is enabled
+            // (even if no category folders exist, we still show Settings + Uncategorized)
+            buildCategoryRows();
         } else {
             // Categories Lite is Off → bypass categories and list only "Uncategorized"
             workingList = uncategorized;

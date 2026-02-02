@@ -53,16 +53,32 @@ bool KfeFileOps::copyFile(const std::string& src, const std::string& dst, Kernel
 
     if (self && self->msgBox) { self->msgBox->showProgress(basenameOf(src).c_str(), 0, fileSize); self->renderOneFrame(); }
 
-    const int READ_BUF = 512 * 1024;
+    size_t readBuf = 512 * 1024;
+    uint8_t* buf = (uint8_t*)malloc(readBuf);
+    if (!buf) {
+        readBuf = 128 * 1024;
+        buf = (uint8_t*)malloc(readBuf);
+    }
+    if (!buf) {
+        readBuf = 32 * 1024;
+        buf = (uint8_t*)malloc(readBuf);
+    }
+    if (!buf) {
+        logf("  alloc read buffer failed");
+        sceIoClose(in);
+        sceIoClose(out);
+        return false;
+    }
+    logf("  read buffer = %u bytes", (unsigned)readBuf);
+
     int maxWriteChunk  = 64  * 1024;   // start at 64 KiB, we may shrink on trouble
     const int MIN_WRITE_CHUNK = 4 * 1024;
 
-    std::vector<uint8_t> buf(READ_BUF);
     bool ok = true; uint64_t total = 0; int lastErr = 0;
 
     auto destDev = std::string(dst.substr(0, 4)); // "ms0:" / "ef0:" (dst is "ef0:/...")
     for (;;) {
-        int r = sceIoRead(in, buf.data(), READ_BUF);
+        int r = sceIoRead(in, buf, (int)readBuf);
         if (r < 0) { lastErr = r; logf("  read err %d", r); ok = false; break; }
         if (r == 0) break;
 
@@ -71,14 +87,14 @@ bool KfeFileOps::copyFile(const std::string& src, const std::string& dst, Kernel
             int chunk = r - off;
             if (chunk > maxWriteChunk) chunk = maxWriteChunk;
 
-            int w = sceIoWrite(out, buf.data() + off, chunk);
+            int w = sceIoWrite(out, buf + off, chunk);
             if (w <= 0) {
                 // If 0 or negative, try shrinking the chunk a few times before giving up
                 int attemptChunk = chunk;
                 for (int tries = 0; tries < 4 && w <= 0 && attemptChunk > MIN_WRITE_CHUNK; ++tries) {
                     attemptChunk >>= 1; // half it
                     sceKernelDelayThread(500);
-                    w = sceIoWrite(out, buf.data() + off, attemptChunk);
+                    w = sceIoWrite(out, buf + off, attemptChunk);
                     if (w > 0) {
                         maxWriteChunk = attemptChunk;
                         break;
@@ -111,6 +127,7 @@ bool KfeFileOps::copyFile(const std::string& src, const std::string& dst, Kernel
 
     sceIoClose(in);
     sceIoClose(out);
+    free(buf);
 
     if (!ok) {
         logf("copyFile: FAIL after %llu/%llu bytes (err=%d)",

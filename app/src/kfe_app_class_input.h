@@ -20,7 +20,7 @@
                 if (gUsbBox) { delete gUsbBox; gUsbBox = nullptr; }
                 const char* usbMsg = connected
                     ? "Connected to PC\nOn PSP Go, sometimes both devices don't mount to the PC immediately. It may take 30sec-1min."
-                    : "Connect to PC...\nOn PSP Go, Bluetooth must be turned off in the System Settings.";
+                    : "Connect to PC...\nOn PSP Go, Bluetooth must be turned off in the System Settings.\nwarning.png Not Vita-compatible.";
                 const int usbPanelH = 110;
                 gUsbBox = new MessageBox(
                     usbMsg,
@@ -32,14 +32,16 @@
                 gUsbBox->setOkTextOffset(-2, -1);
                 gUsbBox->setSubtitleStyle(0.7f, 0xFFBBBBBB);
                 gUsbBox->setSubtitleGapAdjust(-8);
+                gUsbBox->setInlineIcon(warningIconTexture, "warning.png");
                 gUsbShownConnected = connected;
             }
         }
-        bool analogUpNow = (pad.Ly <= 30);
-        if (analogUpNow && !analogUpHeld) {
-            showDebugTimes = !showDebugTimes;
-        }
-        analogUpHeld = analogUpNow;
+        // Disabled: thumbstick-up timestamp toggle
+        // bool analogUpNow = (pad.Ly <= 30);
+        // if (analogUpNow && !analogUpHeld) {
+        //     showDebugTimes = !showDebugTimes;
+        // }
+        // analogUpHeld = analogUpNow;
 
         bool repeatUp = false, repeatDown = false;
         if (pad.Buttons & PSP_CTRL_UP) {
@@ -168,7 +170,7 @@
 
             // Confirm/cancel flow
             if (pressed & PSP_CTRL_CIRCLE) {
-                if (!showRoots && opPhase == OP_SelectCategory && !opDestDevice.empty()) {
+                if (!showRoots && opPhase == OP_SelectCategory && !opDestDevice.empty() && roots.size() > 1) {
                     opDestCategory.clear();
                     buildRootRowsForDevicePicker();
                     return;
@@ -621,6 +623,26 @@
                             if (selectedIndex > lastVisible) scrollOffset = selectedIndex - (visible - 1);
                         }
                     } else {
+                        // Check if navigating down would land on disabled Uncategorized in Categories view
+                        if (!showRoots && view == View_Categories && actionMode == AM_None &&
+                            !isUncategorizedEnabledForDevice(currentDevice) && selectedIndex + 1 < (int)entries.size()) {
+                            const char* nextName = entries[selectedIndex + 1].d_name;
+                            if (strcasecmp(nextName, "Uncategorized") == 0) {
+                                // Show modal and don't move selection
+                                msgBox = new MessageBox(
+                                    "Uncategorized Disabled\n"
+                                    "To enable the \"Uncategorized\" folder, select \"Game Categories Settings\" at the top of the list, then turn on the \"Show Uncategorized\" option.",
+                                    okIconTexture, SCREEN_WIDTH, SCREEN_HEIGHT, 1.0f, 15, "OK",
+                                    10, 18, 106, 9, 280, 120, PSP_CTRL_CROSS);
+                                msgBox->setOkAlignLeft(true);
+                                msgBox->setOkPosition(10, 7);
+                                msgBox->setOkStyle(0.7f, 0xFFBBBBBB);
+                                msgBox->setOkTextOffset(-2, -1);
+                                msgBox->setSubtitleStyle(0.7f, 0xFFBBBBBB);
+                                msgBox->setSubtitleGapAdjust(-8);
+                                return; // Block navigation
+                            }
+                        }
                         if (selectedIndex + 1 < (int)entries.size()){
                             selectedIndex++;
                             const int visible = (!showRoots && view == View_Categories)
@@ -686,7 +708,7 @@
                         gUsbShownConnected = false;
                         markAllDevicesDirty();
                         gUsbBox = new MessageBox(
-                            "Connect to PC...\nOn PSP Go, Bluetooth must be turned off in the System Settings.",
+                            "Connect to PC...\nOn PSP Go, Bluetooth must be turned off in the System Settings.\nwarning.png Not Vita-compatible.",
                             circleIconTexture, SCREEN_WIDTH, SCREEN_HEIGHT, 1.0f, 15, "Disconnect",
                             10, 18, 60, 9, 280, 110, PSP_CTRL_CIRCLE);
                         gUsbBox->setOkAlignLeft(true);
@@ -695,6 +717,7 @@
                         gUsbBox->setOkTextOffset(-2, -1);
                         gUsbBox->setSubtitleStyle(0.7f, 0xFFBBBBBB);
                         gUsbBox->setSubtitleGapAdjust(-8);
+                        gUsbBox->setInlineIcon(warningIconTexture, "warning.png");
                     }
                     return; // don’t fall through to openDevice()
                 }
@@ -1166,6 +1189,28 @@
                                     continue;
                                 }
 
+                                const char* createText = "Creating...";
+                                const char* returnText = "Returning...";
+                                const float popScale = 1.0f;
+                                const int popPadX = 10;
+                                const int popPadY = 24;
+                                const int popLineH = (int)(24.0f * popScale + 0.5f);
+                                const float popTextW = measureTextWidth(popScale, returnText);
+                                const int popExtraW = 4;
+                                int popPanelW = (int)(popTextW + popPadX * 2 + popExtraW + 0.5f);
+                                popPanelW -= 6;
+                                const int popBottom = 14;
+                                const int popPanelH = popPadY + popLineH + popBottom - 24;
+                                const int popWrapTweak = 32;
+                                const int popForcedPxPerChar = 8;
+                                const int createPanelW = popPanelW + 4;
+                                const int createPanelH = popPanelH;
+                                msgBox = new MessageBox(createText, nullptr, SCREEN_WIDTH, SCREEN_HEIGHT,
+                                                        popScale, 0, "", popPadX, popPadY,
+                                                        popWrapTweak, popForcedPxPerChar,
+                                                        createPanelW, createPanelH);
+                                renderOneFrame();
+
                                 // Create as BASE across roots…
                                 createCategoryDirs(currentDevice, typed);
                                 // Apply CAT_/XX scheme to category directories
@@ -1192,6 +1237,7 @@
                                 }
 
                                 buildCategoryRows();
+                                delete msgBox; msgBox = nullptr;
 
                                 auto sameBase = [&](const char* disp){
                                     return !strcasecmp(stripCategoryPrefixes(disp).c_str(), typed.c_str());

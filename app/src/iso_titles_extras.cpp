@@ -9,6 +9,7 @@
 // PSP/PSPSDK-friendly (sceIo*, SceUID, etc.)
 
 #include <pspiofilemgr.h>
+#include <pspthreadman.h>
 #include <string>
 #include <vector>
 #include <string.h>
@@ -31,19 +32,33 @@ extern "C" int cmfe_titles_extras_present() { return 0x4A534F44; } // 'JSOD'
 // ================================================================
 // Small IO helpers
 // ================================================================
+// Retry count for file I/O operations (helps on Adrenaline/Vita)
+#define IO_MAX_RETRIES 5
+
 static bool readAll(SceUID fd, void* buf, size_t n) {
     uint8_t* p = (uint8_t*)buf;
     size_t got = 0;
+    int retries = 0;
     while (got < n) {
         int r = sceIoRead(fd, p + got, (uint32_t)(n - got));
-        if (r <= 0) return false;
+        if (r <= 0) {
+            if (++retries >= IO_MAX_RETRIES) return false;
+            sceKernelDelayThread(10000); // 10ms delay before retry
+            continue;
+        }
+        retries = 0;
         got += r;
     }
     return true;
 }
 static bool readAt(SceUID fd, uint32_t off, void* buf, size_t n) {
-    if (sceIoLseek32(fd, (int)off, PSP_SEEK_SET) < 0) return false;
-    return readAll(fd, buf, n);
+    for (int retries = 0; retries < IO_MAX_RETRIES; ++retries) {
+        if (sceIoLseek32(fd, (int)off, PSP_SEEK_SET) >= 0) {
+            return readAll(fd, buf, n);
+        }
+        sceKernelDelayThread(10000); // 10ms delay before retry
+    }
+    return false;
 }
 static uint32_t fileSize32(SceUID fd) {
     int cur = sceIoLseek32(fd, 0, PSP_SEEK_CUR);

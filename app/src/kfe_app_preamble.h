@@ -51,6 +51,7 @@
 #include <psppower.h>
 #include <psputility.h>
 #include <psputility_osk.h>
+#include <psploadexec.h>
 #include <pspthreadman.h>   // thread priority tweaks
 #include <kubridge.h>
 #include <intraFont.h>
@@ -193,6 +194,9 @@ extern "C" {
     int pspIoDevctl(const char* dev, unsigned int cmd,
                     void* indata, int inlen,
                     void* outdata, int outlen);
+    int pspSysconCtrlLED(int led, int state);
+    int pspLedSuppressStart(void);
+    int pspLedSuppressStop(void);
 }
 
 static SceUID kfeIoOpenDir(const char* path);
@@ -324,6 +328,7 @@ static Texture* ps1IconTexture = nullptr;
 static Texture* homebrewIconTexture = nullptr;
 static Texture* isoIconTexture = nullptr;
 static Texture* updateIconTexture = nullptr;
+static Texture* warningIconTexture = nullptr;
 static bool gEnablePopAnimations = false; // Toggle Populating animation
 static std::vector<std::string> gPopAnimDirs;
 static std::vector<size_t> gPopAnimOrder;
@@ -331,5 +336,6 @@ static size_t gPopAnimOrderIndex = 0;
 static std::string gPopAnimLoadedDir;
 static std::vector<MBAnimFrame> gPopAnimFrames;
 static unsigned long long gPopAnimMinDelayUs = 0;
+static unsigned long long gPopAnimTotalCycleUs = 0; // Total duration of one full animation cycle
 static const int POP_ANIM_TARGET_H = 60;
 static const char* POP_ANIM_PREF = ""; // Set to a folder name to force a specific animation

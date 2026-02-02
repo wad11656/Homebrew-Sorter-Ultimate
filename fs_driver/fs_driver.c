@@ -1,5 +1,7 @@
 #include <pspsdk.h>
 #include <pspiofilemgr_kernel.h>
+#include <pspsyscon.h>
+#include <pspthreadman.h>
 
 #include "systemctrl.h"
 
@@ -178,6 +180,70 @@ int pspIoDevctl(const char *dev, unsigned int cmd, void *indata, int inlen, void
 	pspSdkSetK1(k1);
 	sctrlKernelSetUserLevel(level);
 	return ret;
+}
+
+int pspSysconCtrlLED(int led, int state) {
+	u32 k1 = pspSdkSetK1(0);
+	int level = sctrlKernelSetUserLevel(8);
+
+	int ret = sceSysconCtrlLED(led, state);
+
+	pspSdkSetK1(k1);
+	sctrlKernelSetUserLevel(level);
+	return ret;
+}
+
+static volatile int g_ledStop = 0;
+static SceUID g_ledThread = -1;
+
+static int ledThread(SceSize, void*) {
+	while (!g_ledStop) {
+		sceSysconCtrlLED(0, 0); // MS LED off
+		sceKernelDelayThreadCB(1000);
+	}
+	sceSysconCtrlLED(0, 1); // restore on exit
+	return 0;
+}
+
+int pspLedSuppressStart(void) {
+	u32 k1 = pspSdkSetK1(0);
+	int level = sctrlKernelSetUserLevel(8);
+
+	if (g_ledThread >= 0) {
+		pspSdkSetK1(k1);
+		sctrlKernelSetUserLevel(level);
+		return 0;
+	}
+	g_ledStop = 0;
+	g_ledThread = sceKernelCreateThread("kfe_led", ledThread, 0x30, 0x1000, 0, NULL);
+	if (g_ledThread >= 0) {
+		sceKernelStartThread(g_ledThread, 0, NULL);
+	} else {
+		g_ledThread = -1;
+	}
+
+	pspSdkSetK1(k1);
+	sctrlKernelSetUserLevel(level);
+	return 0;
+}
+
+int pspLedSuppressStop(void) {
+	u32 k1 = pspSdkSetK1(0);
+	int level = sctrlKernelSetUserLevel(8);
+
+	if (g_ledThread < 0) {
+		pspSdkSetK1(k1);
+		sctrlKernelSetUserLevel(level);
+		return 0;
+	}
+	g_ledStop = 1;
+	sceKernelWaitThreadEnd(g_ledThread, NULL);
+	sceKernelDeleteThread(g_ledThread);
+	g_ledThread = -1;
+
+	pspSdkSetK1(k1);
+	sctrlKernelSetUserLevel(level);
+	return 0;
 }
 
 int module_start(SceSize args, void *argp) {

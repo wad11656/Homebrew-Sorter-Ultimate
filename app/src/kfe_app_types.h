@@ -4,10 +4,26 @@ struct HomeAnimEntry {
 };
 static std::vector<HomeAnimEntry> gHomeAnimEntries;
 static int gHomeAnimIndex = -1;
-static std::vector<MBAnimFrame> gHomeAnimFrames;
+static std::vector<MBAnimFrame> gHomeAnimFrames;  // Preloaded frames (PSP mode)
 static size_t gHomeAnimFrameIndex = 0;
 static unsigned long long gHomeAnimNextUs = 0;
 static unsigned long long gHomeAnimMinDelayUs = 0;
+
+// Streaming mode for Vita (to save memory) - stores paths/delays, loads one frame at a time
+struct StreamFrameInfo { std::string path; uint32_t delayMs; };
+static std::vector<StreamFrameInfo> gHomeAnimStreamInfo;  // Frame paths/delays for streaming/chunked
+static Texture* gHomeAnimStreamTex = nullptr;             // Current streamed texture
+static bool gHomeAnimStreaming = false;                   // True if using streaming mode (Vita)
+static bool gHomeAnimChunked = false;                     // PSP: chunked preload mode
+static int gHomeAnimChunkCur = -1;
+static int gHomeAnimChunkNext = -1;
+static int gHomeAnimChunkNextPos = -1;
+
+// Legacy variables (kept for compatibility with unused helper functions)
+static int gHomeAnimDeferFrames = 0;
+static bool gHomeAnimPaused = false;
+static int gHomeAnimLastGoodIndex = -1;
+
 static const int CHECKBOX_PX      = 11;
 
 // Reserve ~4–5 chars for sizes (e.g., "123M") so it clears the left tag.
@@ -32,6 +48,18 @@ static std::string oppositeRootOf(const std::string& dev){
     return "";
 }
 
+// PSP exit callback APIs (psploadexec.h) — add explicit prototypes to avoid toolchain/header quirks.
+#include <psploadexec.h>
+#include <systemctrl.h>
+#ifdef __cplusplus
+extern "C" {
+#endif
+void sceKernelExitGame(void);
+int sceKernelRegisterExitCallback(int cbid);
+#ifdef __cplusplus
+}
+#endif
+
 // ===== Exit callback (HOME menu) =====
 static int ExitCallback(int, int, void*) { sceKernelExitGame(); return 0; }
 static int CallbackThread(SceSize, void*) {
@@ -45,13 +73,51 @@ static void SetupCallbacks() {
     if (th >= 0) sceKernelStartThread(th, 0, nullptr);
 }
 
+static bool isAdrenaline() {
+    // Adrenaline/TN report 0x00001000; treat that as Vita PSPemu.
+    return sctrlHENGetVersion() == 0x00001000;
+}
+
+static int cachedPspModel() {
+    static int model = -2;
+    if (model == -2) {
+        int m = kuKernelGetModel();
+        model = m;
+    }
+    return model;
+}
+
+static bool isPspGoModel() {
+    return cachedPspModel() == 4;
+}
+
+static bool gMsLedSuppressed = false;
+static void setMsLedSuppressed(bool off) {
+    if (isAdrenaline()) return; // no PSP LEDs on Vita PSPemu
+    if (gMsLedSuppressed == off) return;
+    if (off) {
+        pspLedSuppressStart();
+    } else {
+        pspLedSuppressStop();
+    }
+    gMsLedSuppressed = off;
+}
+static void updateMsLedForHomeAnim() {
+    setMsLedSuppressed(gHomeAnimStreaming);
+}
+
 static constexpr bool kfeLoggingEnabled = false;
 static SceUID gLogFd = -1;
+static std::string gLogBaseDir;
 static inline void trimTrailingSpaces(char* s);
 static void logInit() {
     if (!kfeLoggingEnabled) return;
     if (gLogFd >= 0) return;
-    gLogFd = sceIoOpen("ms0:/KFE_move.log", PSP_O_WRONLY | PSP_O_CREAT | PSP_O_APPEND, 0666);
+    if (!gLogBaseDir.empty()) {
+        std::string p = gLogBaseDir + "KFE_move.log";
+        gLogFd = sceIoOpen(p.c_str(), PSP_O_WRONLY | PSP_O_CREAT | PSP_O_APPEND, 0666);
+    }
+    if (gLogFd < 0) gLogFd = sceIoOpen("ms0:/KFE_move.log", PSP_O_WRONLY | PSP_O_CREAT | PSP_O_APPEND, 0666);
     if (gLogFd < 0) gLogFd = sceIoOpen("ef0:/KFE_move.log", PSP_O_WRONLY | PSP_O_CREAT | PSP_O_APPEND, 0666);
 }
 static void logWrite(const char* s) { if (kfeLoggingEnabled && gLogFd >= 0) sceIoWrite(gLogFd, s, (int)strlen(s)); }
@@ -599,22 +665,23 @@ static std::string findEbootCaseInsensitive(const std::string& dirMaybeSlash){
     SceUID d = kfeIoOpenDir(dpath.c_str());
     if (d < 0) return {};
     SceIoDirent ent; memset(&ent, 0, sizeof(ent));
-    static const char* kPbpNames[] = { "EBOOT.PBP", "PARAM.PBP", "PBOOT.PBP" };
+    std::string eboot, pboot, param;
     while (kfeIoReadDir(d, &ent) > 0) {
         trimTrailingSpaces(ent.d_name);
         if (!FIO_S_ISDIR(ent.d_stat.st_mode)) {
-            for (auto name : kPbpNames) {
-                if (strcasecmp(ent.d_name, name) == 0) {
-                    std::string full = joinDirFile(dpath, ent.d_name);
-                    kfeIoCloseDir(d);
-                    return full;
-                }
-            }
+            if (eboot.empty() && strcasecmp(ent.d_name, "EBOOT.PBP") == 0)
+                eboot = joinDirFile(dpath, ent.d_name);
+            else if (pboot.empty() && strcasecmp(ent.d_name, "PBOOT.PBP") == 0)
+                pboot = joinDirFile(dpath, ent.d_name);
+            else if (param.empty() && strcasecmp(ent.d_name, "PARAM.PBP") == 0)
+                param = joinDirFile(dpath, ent.d_name);
         }
         memset(&ent, 0, sizeof(ent));
     }
     kfeIoCloseDir(d);
-    return {};
+    if (!eboot.empty()) return eboot;
+    if (!pboot.empty()) return pboot;
+    return param;
 }
 
 // Legacy-style date string
@@ -745,8 +812,10 @@ static void bleedTextureAlpha(Texture* t) {
 
 static bool loadAnimationFrames(const std::string& dir,
                                 std::vector<MBAnimFrame>& outFrames,
-                                unsigned long long& outMinDelayUs) {
+                                unsigned long long& outMinDelayUs,
+                                unsigned long long& outTotalCycleUs) {
     outMinDelayUs = 0;
+    outTotalCycleUs = 0;
     std::vector<AnimFileInfo> files;
     forEachEntry(dir, [&](const SceIoDirent& e){
         if (FIO_S_ISDIR(e.d_stat.st_mode)) return;
@@ -767,17 +836,20 @@ static bool loadAnimationFrames(const std::string& dir,
     outFrames.clear();
     outFrames.reserve(files.size());
     uint32_t minDelayMs = 0;
+    uint32_t totalDelayMs = 0;
     for (const auto& f : files) {
         Texture* tex = texLoadPNG(f.path.c_str());
         if (!tex || !tex->data) { if (tex) texFree(tex); continue; }
         bleedTextureAlpha(tex);
         outFrames.push_back({tex, f.delayMs});
         if (minDelayMs == 0 || f.delayMs < minDelayMs) minDelayMs = f.delayMs;
+        totalDelayMs += f.delayMs;
     }
 
     if (outFrames.empty()) return false;
     if (minDelayMs == 0) minDelayMs = 100;
     outMinDelayUs = (unsigned long long)minDelayMs * 1000ULL;
+    outTotalCycleUs = (unsigned long long)totalDelayMs * 1000ULL;
     return true;
 }
 
@@ -786,6 +858,113 @@ static void freeAnimationFrames(std::vector<MBAnimFrame>& frames) {
         if (f.tex) { texFree(f.tex); f.tex = nullptr; }
     }
     frames.clear();
+}
+
+static constexpr size_t kHomeAnimChunkSize = 15;
+static constexpr int kHomeAnimChunkPrefetchSteps = 2;
+
+static void clearHomeAnimChunks() {
+    gHomeAnimChunkCur = -1;
+    gHomeAnimChunkNext = -1;
+    gHomeAnimChunkNextPos = -1;
+}
+
+static void freeHomeAnimChunk(int start) {
+    if (start < 0 || gHomeAnimFrames.empty()) return;
+    size_t count = gHomeAnimFrames.size();
+    size_t end = std::min(count, (size_t)start + kHomeAnimChunkSize);
+    for (size_t i = (size_t)start; i < end; ++i) {
+        if (gHomeAnimFrames[i].tex) {
+            texFree(gHomeAnimFrames[i].tex);
+            gHomeAnimFrames[i].tex = nullptr;
+        }
+    }
+}
+
+static void loadHomeAnimChunk(int start) {
+    if (start < 0 || gHomeAnimFrames.empty()) return;
+    size_t count = gHomeAnimFrames.size();
+    size_t end = std::min(count, (size_t)start + kHomeAnimChunkSize);
+    for (size_t i = (size_t)start; i < end; ++i) {
+        if (gHomeAnimFrames[i].tex) continue;
+        if (i >= gHomeAnimStreamInfo.size()) break;
+        Texture* tex = texLoadPNG(gHomeAnimStreamInfo[i].path.c_str());
+        if (!tex || !tex->data) { if (tex) texFree(tex); continue; }
+        bleedTextureAlpha(tex);
+        gHomeAnimFrames[i].tex = tex;
+    }
+}
+
+static int chunkStartForIndex(size_t idx, size_t count) {
+    if (count == 0) return -1;
+    return (int)((idx / kHomeAnimChunkSize) * kHomeAnimChunkSize);
+}
+
+static void preloadNextHomeAnimChunkStep(int steps) {
+    if (!gHomeAnimChunked || gHomeAnimChunkNext < 0 || gHomeAnimFrames.empty()) return;
+    size_t count = gHomeAnimFrames.size();
+    size_t start = (size_t)gHomeAnimChunkNext;
+    if (start >= count) return;
+    size_t end = std::min(count, start + kHomeAnimChunkSize);
+
+    if (gHomeAnimChunkNextPos < 0) gHomeAnimChunkNextPos = (int)start;
+    for (int s = 0; s < steps; ++s) {
+        size_t i = (size_t)gHomeAnimChunkNextPos;
+        while (i < end && gHomeAnimFrames[i].tex) ++i;
+        if (i >= end) { gHomeAnimChunkNextPos = -1; return; }
+        if (i < gHomeAnimStreamInfo.size()) {
+            Texture* tex = texLoadPNG(gHomeAnimStreamInfo[i].path.c_str());
+            if (tex && tex->data) {
+                bleedTextureAlpha(tex);
+                gHomeAnimFrames[i].tex = tex;
+            } else if (tex) {
+                texFree(tex);
+            }
+        }
+        gHomeAnimChunkNextPos = (int)(i + 1);
+    }
+}
+
+static void ensureHomeAnimChunkForIndex(size_t idx) {
+    if (!gHomeAnimChunked || gHomeAnimFrames.empty()) return;
+    size_t count = gHomeAnimFrames.size();
+    int chunkStart = chunkStartForIndex(idx, count);
+    if (chunkStart < 0) return;
+
+    if (chunkStart == gHomeAnimChunkCur) {
+        // nothing
+    } else if (chunkStart == gHomeAnimChunkNext) {
+        // Promote next to current, drop old current
+        freeHomeAnimChunk(gHomeAnimChunkCur);
+        gHomeAnimChunkCur = gHomeAnimChunkNext;
+        gHomeAnimChunkNext = -1;
+        gHomeAnimChunkNextPos = -1;
+    } else {
+        // Jumped to a chunk we don't have
+        freeHomeAnimChunk(gHomeAnimChunkCur);
+        freeHomeAnimChunk(gHomeAnimChunkNext);
+        gHomeAnimChunkCur = chunkStart;
+        gHomeAnimChunkNext = -1;
+        gHomeAnimChunkNextPos = -1;
+        loadHomeAnimChunk(gHomeAnimChunkCur);
+    }
+
+    if (count <= kHomeAnimChunkSize) return;
+    size_t cur = (gHomeAnimChunkCur >= 0) ? (size_t)gHomeAnimChunkCur : 0;
+    size_t nextStart = cur + kHomeAnimChunkSize;
+    if (nextStart >= count) nextStart = 0;
+    if ((int)nextStart != gHomeAnimChunkCur && (int)nextStart != gHomeAnimChunkNext) {
+        freeHomeAnimChunk(gHomeAnimChunkNext);
+        gHomeAnimChunkNext = (int)nextStart;
+        gHomeAnimChunkNextPos = (int)nextStart;
+    }
+    preloadNextHomeAnimChunkStep(kHomeAnimChunkPrefetchSteps);
+}
+
+// Convert MBAnimFrame delay to microseconds, using minDelayUs as fallback
+static inline unsigned long long frameDelayUs(const MBAnimFrame& f, unsigned long long minDelayUs) {
+    if (f.delayMs > 0) return (unsigned long long)f.delayMs * 1000ULL;
+    return minDelayUs ? minDelayUs : 100000ULL;  // default 100ms
 }
 
 static uint32_t popAnimRand() {
@@ -825,18 +1004,13 @@ static bool ensurePopAnimLoaded(const std::string& dir) {
     }
     freeAnimationFrames(gPopAnimFrames);
     gPopAnimMinDelayUs = 0;
-    if (!loadAnimationFrames(dir, gPopAnimFrames, gPopAnimMinDelayUs)) {
+    gPopAnimTotalCycleUs = 0;
+    if (!loadAnimationFrames(dir, gPopAnimFrames, gPopAnimMinDelayUs, gPopAnimTotalCycleUs)) {
         gPopAnimLoadedDir.clear();
         return false;
     }
     gPopAnimLoadedDir = dir;
     return true;
-}
-
-static unsigned long long frameDelayUs(const MBAnimFrame& f, unsigned long long fallbackUs) {
-    if (f.delayMs > 0) return (unsigned long long)f.delayMs * 1000ULL;
-    if (fallbackUs > 0) return fallbackUs;
-    return 100000ULL;
 }
 
 static void collectHomeAnimations(const std::string& animRoot) {
@@ -866,24 +1040,121 @@ static void collectHomeAnimations(const std::string& animRoot) {
               });
 }
 
+// Load a single streaming frame texture
+static Texture* loadStreamingFrameTexture(const std::string& path) {
+    Texture* tex = texLoadPNG(path.c_str());
+    if (tex && tex->data) bleedTextureAlpha(tex);
+    return tex;
+}
+
+// Free streaming resources
+static void freeHomeAnimStreaming() {
+    if (gHomeAnimStreamTex) { texFree(gHomeAnimStreamTex); gHomeAnimStreamTex = nullptr; }
+    gHomeAnimStreamInfo.clear();
+}
+
+// Collect frame info for streaming mode (paths and delays, no textures)
+static bool collectStreamingFrameInfo(const std::string& dir, std::vector<StreamFrameInfo>& outInfo, unsigned long long& outMinDelayUs) {
+    outMinDelayUs = 0;
+    outInfo.clear();
+
+    std::vector<AnimFileInfo> files;
+    forEachEntry(dir, [&](const SceIoDirent& e){
+        if (FIO_S_ISDIR(e.d_stat.st_mode)) return;
+        int idx = 0;
+        uint32_t delayMs = 0;
+        if (!parseAnimFrameName(e.d_name, idx, delayMs)) return;
+        AnimFileInfo info;
+        info.path = joinDirFile(dir, e.d_name);
+        info.index = idx;
+        info.delayMs = delayMs;
+        files.push_back(info);
+    });
+
+    if (files.empty()) return false;
+    std::sort(files.begin(), files.end(),
+              [](const AnimFileInfo& a, const AnimFileInfo& b){ return a.index < b.index; });
+
+    uint32_t minDelayMs = 0;
+    outInfo.reserve(files.size());
+    for (const auto& f : files) {
+        outInfo.push_back({f.path, f.delayMs});
+        if (minDelayMs == 0 || f.delayMs < minDelayMs) minDelayMs = f.delayMs;
+    }
+
+    if (minDelayMs == 0) minDelayMs = 100;
+    outMinDelayUs = (unsigned long long)minDelayMs * 1000ULL;
+    return !outInfo.empty();
+}
+
 static bool loadHomeAnimationAt(int index) {
     if (index < 0 || index >= (int)gHomeAnimEntries.size()) return false;
 
-    std::vector<MBAnimFrame> frames;
+    const std::string& dir = gHomeAnimEntries[index].dir;
+
+    freeHomeAnimStreaming();
+    freeAnimationFrames(gHomeAnimFrames);
+    gHomeAnimStreaming = false;
+    gHomeAnimChunked = false;
+    clearHomeAnimChunks();
+    updateMsLedForHomeAnim();
+
+    std::vector<StreamFrameInfo> info;
     unsigned long long minDelay = 0;
-    if (!loadAnimationFrames(gHomeAnimEntries[index].dir, frames, minDelay) || frames.empty()) {
-        freeAnimationFrames(frames);
+    if (!collectStreamingFrameInfo(dir, info, minDelay) || info.empty()) {
         return false;
     }
 
+    gHomeAnimStreamInfo.swap(info);
+    gHomeAnimFrames.clear();
+    gHomeAnimFrames.resize(gHomeAnimStreamInfo.size());
+    gHomeAnimLastGoodIndex = -1;
+    bool anyMissing = false;
+    for (size_t i = 0; i < gHomeAnimFrames.size(); ++i) {
+        gHomeAnimFrames[i].tex = nullptr;
+        gHomeAnimFrames[i].delayMs = gHomeAnimStreamInfo[i].delayMs;
+        Texture* tex = texLoadPNG(gHomeAnimStreamInfo[i].path.c_str());
+        if (tex && tex->data) {
+            bleedTextureAlpha(tex);
+            gHomeAnimFrames[i].tex = tex;
+            if (gHomeAnimLastGoodIndex < 0) gHomeAnimLastGoodIndex = (int)i;
+        } else if (tex) {
+            texFree(tex);
+            anyMissing = true;
+        } else {
+            anyMissing = true;
+        }
+    }
+
+    if (!anyMissing) {
+        gHomeAnimMinDelayUs = minDelay;
+        gHomeAnimFrameIndex = 0;
+        gHomeAnimIndex = index;
+        unsigned long long now = (unsigned long long)sceKernelGetSystemTimeWide();
+        gHomeAnimNextUs = now + frameDelayUs(gHomeAnimFrames[0], gHomeAnimMinDelayUs);
+        return true;
+    }
+
+    // Fall back to streaming if we couldn't preload all frames.
     freeAnimationFrames(gHomeAnimFrames);
-    gHomeAnimFrames.swap(frames);
+    gHomeAnimLastGoodIndex = -1;
+    gHomeAnimStreaming = false;
+
+    if (gHomeAnimStreamInfo.empty()) return false;
+    Texture* firstTex = loadStreamingFrameTexture(gHomeAnimStreamInfo[0].path);
+    if (!firstTex || !firstTex->data) {
+        if (firstTex) texFree(firstTex);
+        return false;
+    }
+    gHomeAnimStreamTex = firstTex;
+    gHomeAnimStreaming = true;
+    updateMsLedForHomeAnim();
     gHomeAnimMinDelayUs = minDelay;
     gHomeAnimFrameIndex = 0;
     gHomeAnimIndex = index;
-
     unsigned long long now = (unsigned long long)sceKernelGetSystemTimeWide();
-    gHomeAnimNextUs = now + frameDelayUs(gHomeAnimFrames[0], gHomeAnimMinDelayUs);
+    uint32_t delayMs = gHomeAnimStreamInfo[0].delayMs;
+    gHomeAnimNextUs = now + (delayMs > 0 ? (unsigned long long)delayMs * 1000ULL : gHomeAnimMinDelayUs);
     return true;
 }
 
@@ -903,6 +1174,11 @@ static void pickHomeAnimation(int preferredIndex) {
     gHomeAnimNextUs = 0;
     gHomeAnimMinDelayUs = 0;
     freeAnimationFrames(gHomeAnimFrames);
+    freeHomeAnimStreaming();
+    gHomeAnimStreaming = false;
+    gHomeAnimChunked = false;
+    clearHomeAnimChunks();
+    updateMsLedForHomeAnim();
 }
 
 static void initHomeAnimations(const std::string& animRoot) {
@@ -910,6 +1186,55 @@ static void initHomeAnimations(const std::string& animRoot) {
     if (gHomeAnimEntries.empty()) return;
     int start = (int)(popAnimRand() % gHomeAnimEntries.size());
     pickHomeAnimation(start);
+}
+
+static void maybeStartHomeAnimation() {
+    if (gHomeAnimPaused) return;
+    if (gHomeAnimIndex >= 0 || gHomeAnimEntries.empty()) return;
+    if (gHomeAnimDeferFrames > 0) { --gHomeAnimDeferFrames; return; }
+    if (gHomeAnimDeferFrames < 0) return;
+    int start = (int)(popAnimRand() % gHomeAnimEntries.size());
+    pickHomeAnimation(start);
+    if (gHomeAnimIndex < 0) gHomeAnimDeferFrames = -1;
+}
+
+static void resetHomeAnimationState(bool armForRoot) {
+    freeAnimationFrames(gHomeAnimFrames);
+    freeHomeAnimStreaming();
+    gHomeAnimIndex = -1;
+    gHomeAnimFrameIndex = 0;
+    gHomeAnimNextUs = 0;
+    gHomeAnimMinDelayUs = 0;
+    gHomeAnimPaused = false;
+    gHomeAnimLastGoodIndex = -1;
+    gHomeAnimStreaming = false;
+    gHomeAnimChunked = false;
+    clearHomeAnimChunks();
+    updateMsLedForHomeAnim();
+    gHomeAnimDeferFrames = (armForRoot && !gHomeAnimEntries.empty()) ? 2 : 0;
+}
+
+static void armHomeAnimationForRoot() {
+    resetHomeAnimationState(true);
+}
+
+static void suspendHomeAnimation() {
+    freeAnimationFrames(gHomeAnimFrames);
+    freeHomeAnimStreaming();
+    gHomeAnimNextUs = 0;
+    gHomeAnimMinDelayUs = 0;
+    gHomeAnimFrameIndex = 0;
+    gHomeAnimPaused = false;
+    gHomeAnimLastGoodIndex = -1;
+    gHomeAnimStreaming = false;
+    gHomeAnimChunked = false;
+    clearHomeAnimChunks();
+    updateMsLedForHomeAnim();
+}
+
+static void pauseHomeAnimationKeepFrame() {
+    // With preloaded frames, just pause - all textures stay in memory
+    gHomeAnimPaused = true;
 }
 
 static void cycleHomeAnimation(int dir) {
@@ -925,12 +1250,75 @@ static void cycleHomeAnimation(int dir) {
 }
 
 static void advanceHomeAnimationFrame() {
-    if (gHomeAnimFrames.empty()) return;
-    if (gHomeAnimFrameIndex >= gHomeAnimFrames.size()) gHomeAnimFrameIndex = 0;
-    unsigned long long now = (unsigned long long)sceKernelGetSystemTimeWide();
-    if (gHomeAnimNextUs == 0 || now >= gHomeAnimNextUs) {
+    if (gHomeAnimIndex < 0) {
+        maybeStartHomeAnimation();
+        if (gHomeAnimIndex < 0) return;
+    }
+    if (gHomeAnimPaused) return;
+    if (gHomeAnimStreaming) {
+        // Streaming mode (Vita): load frames one at a time
+        if (gHomeAnimStreamInfo.empty()) return;
+        size_t frameCount = gHomeAnimStreamInfo.size();
+        if (gHomeAnimFrameIndex >= frameCount) gHomeAnimFrameIndex = 0;
+
+        unsigned long long now = (unsigned long long)sceKernelGetSystemTimeWide();
+        if (gHomeAnimNextUs == 0) {
+            uint32_t delayMs = gHomeAnimStreamInfo[gHomeAnimFrameIndex].delayMs;
+            gHomeAnimNextUs = now + (delayMs > 0 ? (unsigned long long)delayMs * 1000ULL : gHomeAnimMinDelayUs);
+            return;
+        }
+        if (now < gHomeAnimNextUs) return;
+
+        // Advance to next frame
+        size_t nextIndex = (gHomeAnimFrameIndex + 1) % frameCount;
+
+        // Load next frame texture
+        Texture* nextTex = loadStreamingFrameTexture(gHomeAnimStreamInfo[nextIndex].path);
+        if (nextTex && nextTex->data) {
+            // Free old texture only after successfully loading new one
+            if (gHomeAnimStreamTex) texFree(gHomeAnimStreamTex);
+            gHomeAnimStreamTex = nextTex;
+            gHomeAnimFrameIndex = nextIndex;
+        }
+        // If load failed, keep showing current frame
+
+        uint32_t delayMs = gHomeAnimStreamInfo[gHomeAnimFrameIndex].delayMs;
+        gHomeAnimNextUs = now + (delayMs > 0 ? (unsigned long long)delayMs * 1000ULL : gHomeAnimMinDelayUs);
+    } else {
+        // Preload mode (PSP): all frames already in memory
+        if (gHomeAnimFrames.empty()) return;
+        if (gHomeAnimFrameIndex >= gHomeAnimFrames.size()) gHomeAnimFrameIndex = 0;
+        ensureHomeAnimChunkForIndex(gHomeAnimFrameIndex);
+
+        unsigned long long now = (unsigned long long)sceKernelGetSystemTimeWide();
+        if (gHomeAnimNextUs == 0) {
+            gHomeAnimNextUs = now + frameDelayUs(gHomeAnimFrames[gHomeAnimFrameIndex], gHomeAnimMinDelayUs);
+            return;
+        }
+        if (now < gHomeAnimNextUs) return;
+
         gHomeAnimFrameIndex = (gHomeAnimFrameIndex + 1) % gHomeAnimFrames.size();
+        ensureHomeAnimChunkForIndex(gHomeAnimFrameIndex);
         gHomeAnimNextUs = now + frameDelayUs(gHomeAnimFrames[gHomeAnimFrameIndex], gHomeAnimMinDelayUs);
+    }
+}
+
+// Get current home animation texture (works for both streaming and preload modes)
+static Texture* getCurrentHomeAnimTexture() {
+    if (gHomeAnimStreaming) {
+        return gHomeAnimStreamTex;
+    } else {
+        if (gHomeAnimFrameIndex < gHomeAnimFrames.size()) {
+            Texture* tex = gHomeAnimFrames[gHomeAnimFrameIndex].tex;
+            if (tex && tex->data) {
+                gHomeAnimLastGoodIndex = (int)gHomeAnimFrameIndex;
+                return tex;
+            }
+            if (gHomeAnimLastGoodIndex >= 0 && gHomeAnimLastGoodIndex < (int)gHomeAnimFrames.size()) {
+                return gHomeAnimFrames[gHomeAnimLastGoodIndex].tex;
+            }
+        }
+        return nullptr;
     }
 }
 
@@ -1024,19 +1412,33 @@ struct SFOIndex {
 };
 #pragma pack(pop)
 
+// Retry count for file I/O operations (helps on Adrenaline/Vita)
+#define IO_MAX_RETRIES 5
+
 static bool readAll(SceUID fd, void* buf, size_t n) {
     uint8_t* p = (uint8_t*)buf;
     size_t got = 0;
+    int retries = 0;
     while (got < n) {
         int r = sceIoRead(fd, p + got, (uint32_t)(n - got));
-        if (r <= 0) return false;
+        if (r <= 0) {
+            if (++retries >= IO_MAX_RETRIES) return false;
+            sceKernelDelayThread(10000); // 10ms delay before retry
+            continue;
+        }
+        retries = 0;
         got += r;
     }
     return true;
 }
 static bool readAt(SceUID fd, uint32_t off, void* buf, size_t n) {
-    if (sceIoLseek32(fd, (int)off, PSP_SEEK_SET) < 0) return false;
-    return readAll(fd, buf, n);
+    for (int retries = 0; retries < IO_MAX_RETRIES; ++retries) {
+        if (sceIoLseek32(fd, (int)off, PSP_SEEK_SET) >= 0) {
+            return readAll(fd, buf, n);
+        }
+        sceKernelDelayThread(10000); // 10ms delay before retry
+    }
+    return false;
 }
 
 bool sfoExtractTitle(const uint8_t* data, size_t size, std::string& outTitle) {
@@ -1409,7 +1811,19 @@ struct GameItem {
     std::string    sortKey;    // legacy sort string (desc)
     uint64_t       sizeBytes = 0;  // <--- NEW: bytes for size column
     bool           isUpdateDlc = false; // folder has PBOOT/PARAM but no EBOOT
+    std::string    iconPath;   // cached ICON0.PNG path (if any)
+    std::string    pbpPath;    // cached EBOOT/PBOOT/PARAM path (if any)
 };
+
+static void fillEbootIconPaths(GameItem& gi) {
+    if (gi.kind != GameItem::EBOOT_FOLDER) return;
+    gi.iconPath = findFileCaseInsensitive(gi.path, "ICON0.PNG");
+    if (gi.iconPath.empty()) {
+        gi.pbpPath = findEbootCaseInsensitive(gi.path);
+    } else {
+        gi.pbpPath.clear();
+    }
+}
 
 
 // Verbose, unified "need" calculator for Move/Copy
@@ -1590,6 +2004,11 @@ public:
                 int screenW, int screenH, int w, int h)
     : _title(title ? title : ""), _items(items), _screenW(screenW), _screenH(screenH) {
         _w = w; _h = h; _x = (_screenW - _w)/2; _y = (_screenH - _h)/2;
+        if (!_items.empty() && _items[_sel].disabled) {
+            for (int i = 0; i < (int)_items.size(); ++i) {
+                if (!_items[i].disabled) { _sel = i; break; }
+            }
+        }
     }
     void primeButtons(unsigned buttons) { _lastButtons = buttons; }
     
@@ -1905,6 +2324,30 @@ public:
                 float itemY = (float)(startY + (i - startIdx) * lineH);
                 intraFontPrint(font, (float)(_x + 16), itemY, _items[i].label);
                 if (sel && !disabled) intraFontPrint(font, (float)(_x + 17), itemY, _items[i].label);
+
+                if (_title && !strcmp(_title, "Game Categories") &&
+                    _items[i].label && !strcmp(_items[i].label, "PRO/ME")) {
+                    const char* warnText = "On Vita, enable \"Category Prefix\"";
+                    const float warnScale = descScale;
+                    const float warnIconH = 12.0f;
+                    float warnTextW = _measureText(font, warnScale, warnText);
+                    float warnIconW = 0.0f;
+                    if (warningIconTexture && warningIconTexture->data && warningIconTexture->height > 0) {
+                        warnIconW = (float)warningIconTexture->width * (warnIconH / (float)warningIconTexture->height);
+                    }
+                    float totalW = warnTextW + (warnIconW > 0.0f ? (warnIconW + 4.0f) : 0.0f);
+                    float rightEdge = (float)(_x + _w - 44);
+                    float warnX = rightEdge - totalW;
+                    float minX = (float)(_x + 88);
+                    if (warnX < minX) warnX = minX;
+                    float warnTextY = itemY - 1.0f;
+                    if (warnIconW > 0.0f) {
+                        _drawTextureScaled(warningIconTexture, warnX, warnTextY - 10.0f, warnIconH, 0xFFFFFFFF);
+                        warnX += warnIconW + 4.0f;
+                    }
+                    intraFontSetStyle(font, warnScale, COLOR_DESC, 0, 0.f, INTRAFONT_ALIGN_LEFT);
+                    intraFontPrint(font, warnX, warnTextY, warnText);
+                }
             }
 
             if ((int)_items.size() > visibleRows) {

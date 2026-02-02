@@ -2,7 +2,7 @@
 
 #include "pspstub.s"
 
-	STUB_START "fs_driver",0x40090000,0x00100005
+	STUB_START "fs_driver",0x40090000,0x00130005
 	STUB_FUNC  0xE1D0113C,pspIoOpenDir
 	STUB_FUNC  0x7DF710E6,pspIoReadDir
 	STUB_FUNC  0xE62D03DB,pspIoCloseDir
@@ -19,4 +19,7 @@
 	STUB_FUNC  0x7C2BE9CF,pspIoRename
 	STUB_FUNC  0x00BDD1B3,pspIoRemoveFile
 	STUB_FUNC  0x6E870CE2,pspIoDevctl
+	STUB_FUNC  0x77A8BF21,pspSysconCtrlLED
+	STUB_FUNC  0x2F905F1F,pspLedSuppressStart
+	STUB_FUNC  0xEA9ACE57,pspLedSuppressStop
 	STUB_END

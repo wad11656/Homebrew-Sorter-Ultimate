@@ -37,6 +37,7 @@ class MessageBox {
         void setOkTextOffset(int dx, int dy);
         void setSubtitleStyle(float scale, unsigned color);
         void setSubtitleGapAdjust(int px);
+        void setInlineIcon(Texture* icon, const char* token);
         void setCancel(Texture* icon, const char* label, unsigned button = PSP_CTRL_CIRCLE);
 
         bool isVisible() const { return _visible; }
@@ -90,6 +91,8 @@ private:
     unsigned _subtitleColor = 0xFFFFFFFF;
     bool _useSubtitleStyle = false;
     int _subtitleGapAdjust = 0;
+    Texture* _inlineIcon = nullptr;
+    const char* _inlineToken = nullptr;
 
     // ---- Animation state ----
     const MBAnimFrame* _animFrames = nullptr;

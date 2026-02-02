@@ -25,7 +25,7 @@ LIBDIR = ../libs/lib
 LIBS = -lintrafont \
        -lpsputility \
        -lpspgu -lpspgum -lpsprtc -lpspctrl -lpsppower \
-       -lpspdisplay -lpspkubridge -lpspusb -lpspusbstor \
+       -lpspdisplay -lpspkubridge -lpspsystemctrl_user -lpspusb -lpspusbstor \
        -lpspdebug -lstdc++ -lm -lz
 
 # PSP EBOOT metadata
@@ -37,8 +37,8 @@ PSP_EBOOT_ICON  = ../ICON0.png
 include $(PSPSDK)/lib/build.mak
 
 # Regenerate your exports stub
-fs_driver.S:
-	psp-build-exports -s ../fs_driver/exports.exp > fs_driver.S
+fs_driver.S: ../fs_driver/exports.exp
+	psp-build-exports -s ../fs_driver/exports.exp
 
 # Ensure the stub exists before compiling the core + stub objects
 src/kfe_app.o: fs_driver.S

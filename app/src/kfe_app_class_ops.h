@@ -514,6 +514,7 @@
 public:
     KernelFileExplorer(){ detectRoots(); buildRootRows(); }
     ~KernelFileExplorer(){
+        setMsLedSuppressed(false);
         if (font) intraFontUnload(font);
         if (fontJpn) intraFontUnload(fontJpn);
         if (fontKr) intraFontUnload(fontKr);
@@ -541,12 +542,15 @@ public:
         if (ps1IconTexture) { texFree(ps1IconTexture); ps1IconTexture = nullptr; }
         if (homebrewIconTexture) { texFree(homebrewIconTexture); homebrewIconTexture = nullptr; }
         if (isoIconTexture) { texFree(isoIconTexture); isoIconTexture = nullptr; }
+        if (warningIconTexture) { texFree(warningIconTexture); warningIconTexture = nullptr; }
         if (!gPopAnimFrames.empty()) { freeAnimationFrames(gPopAnimFrames); gPopAnimMinDelayUs = 0; }
         if (!gHomeAnimFrames.empty()) { freeAnimationFrames(gHomeAnimFrames); gHomeAnimMinDelayUs = 0; }
+        freeHomeAnimStreaming();  // Free streaming mode resources
         gHomeAnimEntries.clear();
         gHomeAnimIndex = -1;
         gHomeAnimFrameIndex = 0;
         gHomeAnimNextUs = 0;
+        gHomeAnimStreaming = false;
         gPopAnimLoadedDir.clear();
         gPopAnimDirs.clear();
         gPopAnimOrder.clear();
