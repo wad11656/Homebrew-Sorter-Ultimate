@@ -43,4 +43,4 @@ Sort Categories & Apps on PSP (Go) & Adrenaline (Vita). Includes alphabetize fun
 - A [personally-updated build of the Categories Lite plugin](https://github.com/wad11656/game-categories-lite) was created and integrated with this app to restore the functionality of hiding Categories from the XMB.
 
 <ins>Credits</ins>:
-[CMFileManager by joel16](https://github.com/joel16/CMFileManager-PSP) was used as the base for this app to help with file operations and compiling with the modern PSP SDK.
+- [CMFileManager by joel16](https://github.com/joel16/CMFileManager-PSP) was used as the base for this app to help with file operations and compiling with the modern PSP SDK.
