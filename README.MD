@@ -36,3 +36,7 @@ Sort Categories & Apps on PSP (Go) & Adrenaline (Vita). Includes alphabetize fun
 - In-app USB Mode not supported on Adrenaline.
 - The integrated Categories Lite plugin on vanilla (non-ARK) Adrenaline requires "Category prefix" to be enabled.
 - The Categories Lite plugin on vanilla (non-ARK) Adrenaline and LME CFW does not merge Category folders with the same name between `/ISO` and `/PSP/GAME`.
+
+<ins>Additional Info</ins>:
+- You can disable the main screen animations by removing all the folders in the `/resources/animations` folder. (Or even add your own animation folders with animation `.png` frames named the same way as in the existing folders.)
+- 
