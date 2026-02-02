@@ -39,4 +39,4 @@ Sort Categories & Apps on PSP (Go) & Adrenaline (Vita). Includes alphabetize fun
 
 <ins>Additional Info</ins>:
 - You can disable the main screen animations by removing all the folders in the `/resources/animations` folder. (Or even add your own animation folders with animation `.png` frames named the same way as in the existing folders.)
-- 
+- You can change the app background by swapping out `/resources/bkg.png`
