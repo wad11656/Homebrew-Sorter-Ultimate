@@ -5,7 +5,7 @@
 </div>
 <br/>
 <div>
-Sort Categories & Apps on PSP (Go) & Adrenaline (Vita). Includes alphabetize function, full Categories Lite integration, and file operations.
+Successor to [HomeBrew Sorter](https://github.com/FPSUsername/HomeBrew_Sorter). Sort Categories & Apps on PSP (Go) & Adrenaline (Vita). Includes alphabetize function, full Categories Lite integration, and file operations.
 </div>
 
 ---
