@@ -35,7 +35,7 @@ Successor to [HomeBrew Sorter](https://github.com/FPSUsername/HomeBrew_Sorter). 
 - On PSP Go, you must run the app from Memory Stick to access Memory Stick storage.
 - On Adrenaline, in-app USB Mode is not supported.
 - On vanilla (non-ARK) Adrenaline, the integrated Categories Lite plugin requires the "Category prefix" plugin setting to be enabled.
-- On vanilla (non-ARK) Adrenaline and LME CFW, the Categories Lite plugin does not merge Category folders that share the same name stored in both `/ISO` and `/PSP/GAME`.
+- On vanilla (non-ARK) Adrenaline and LME CFW, the Categories Lite plugin does not merge Category folders that share the same name across `/ISO` and `/PSP/GAME`.
 
 <ins>Additional Info</ins>:
 - You can disable the main screen's animations by removing all the folders in the `/resources/animations` folder. (Or even add your own animation folders with animation `.png` frames named the same way as in the existing folders.)
