@@ -262,7 +262,7 @@
         const bool goMs0Mode = dualDeviceAvailableFromMs0();
 
         if (mode == AM_Move || mode == AM_Copy) {
-            if (goMs0Mode) {
+            if (mode == AM_Copy || goMs0Mode) {
                 opPhase = OP_SelectDevice;
 
                 // NEW: transient feedback while we do the first free-space probe

@@ -135,6 +135,7 @@
         if (actionMode != AM_None) {
             // Movement in lists (Up/Down)
             if ((pressed & PSP_CTRL_UP) || repeatUp) {
+                if (selectedIndex < 0) return;
                 if (selectedIndex > 0) {
                     int j = selectedIndex - 1;
                     if (!showRoots && opPhase == OP_SelectCategory) {
@@ -148,6 +149,7 @@
                 }
             }
             if ((pressed & PSP_CTRL_DOWN) || repeatDown) {
+                if (selectedIndex < 0) return;
                 if (selectedIndex + 1 < (int)entries.size()) {
                     int j = selectedIndex + 1;
                     if (!showRoots && opPhase == OP_SelectCategory) {
@@ -170,7 +172,8 @@
 
             // Confirm/cancel flow
             if (pressed & PSP_CTRL_CIRCLE) {
-                if (!showRoots && opPhase == OP_SelectCategory && !opDestDevice.empty() && roots.size() > 1) {
+                if (!showRoots && opPhase == OP_SelectCategory && !opDestDevice.empty() &&
+                    (actionMode == AM_Copy || roots.size() > 1)) {
                     opDestCategory.clear();
                     buildRootRowsForDevicePicker();
                     return;
@@ -216,6 +219,7 @@
 
             if (pressed & PSP_CTRL_CROSS) {
                 if (opPhase == OP_SelectDevice) {
+                    if (selectedIndex < 0 || selectedIndex >= (int)entries.size()) return;
                     if (showRoots &&
                         selectedIndex < (int)rowFlags.size() &&
                         (rowFlags[selectedIndex] & ROW_DISABLED)) {

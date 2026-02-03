@@ -1629,11 +1629,18 @@
         armHomeAnimationForRoot();
 
         selectedIndex = 0; scrollOffset = 0;
+        bool anySelectable = false;
         if (preselect >= 0 && (rowFlags[preselect] & ROW_DISABLED) == 0) {
             selectedIndex = preselect;
+            anySelectable = true;
         } else {
-            for (int i = 0; i < (int)entries.size(); ++i)
-                if ((rowFlags[i] & ROW_DISABLED) == 0) { selectedIndex = i; break; }
+            for (int i = 0; i < (int)entries.size(); ++i) {
+                if ((rowFlags[i] & ROW_DISABLED) == 0) { selectedIndex = i; anySelectable = true; break; }
+            }
+        }
+        if (!anySelectable) {
+            selectedIndex = -1;
+            scrollOffset = 0;
         }
 
         if (opPhase == OP_SelectDevice && !opDestDevice.empty()) {
