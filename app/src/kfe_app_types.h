@@ -78,19 +78,6 @@ static bool isAdrenaline() {
     return sctrlHENGetVersion() == 0x00001000;
 }
 
-static int cachedPspModel() {
-    static int model = -2;
-    if (model == -2) {
-        int m = kuKernelGetModel();
-        model = m;
-    }
-    return model;
-}
-
-static bool isPspGoModel() {
-    return cachedPspModel() == 4;
-}
-
 static bool gMsLedSuppressed = false;
 static void setMsLedSuppressed(bool off) {
     if (isAdrenaline()) return; // no PSP LEDs on Vita PSPemu
@@ -475,15 +462,18 @@ static int FreeSpaceThread(SceSize, void*) {
             gFSC.pausedAck = 0;
         }
 
-        // Wait until asked, but also wake up occasionally (fallback: 3 seconds)
-        for (int i = 0; i < 300; ++i) {
-            if (gFSC.pending || gFSC.paused) break;
+        // Wait until asked (no periodic wakeups).
+        if (!gFSC.pending && !gFSC.paused) {
             if (gFSC.semId >= 0) {
-                // (no-op try-wait; we just nap briefly)
+                sceKernelWaitSema(gFSC.semId, 1, nullptr);
+            } else {
+                while (!gFSC.pending && !gFSC.paused) {
+                    sceKernelDelayThread(10000); // 10ms
+                }
             }
-            sceKernelDelayThread(10000); // 10ms
         }
         if (gFSC.paused) { gFSC.pausedAck = 1; continue; }
+        if (!gFSC.pending) continue;
 
         gFSC.pending = 0;
 

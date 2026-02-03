@@ -46,7 +46,7 @@
 
         data.desc          = title16.data();
         data.intext        = init16.data();
-        data.outtextlength = maxChars;
+        data.outtextlength = maxChars + 1; // include space for terminator
         data.outtextlimit  = maxChars;
         data.outtext       = out16.data();
 
@@ -247,7 +247,17 @@
             std::string base = basenameOf(gi.path);
 
             std::string typed;
-            if (!promptTextOSK("Rename", base.c_str(), 64, typed)) return;
+            int maxChars = 64;
+            std::string initial = base;
+            const int ebootMaxBytes = 31;
+            if (gi.kind == GameItem::EBOOT_FOLDER) {
+                maxChars = ebootMaxBytes;
+                if ((int)initial.size() > ebootMaxBytes) initial = initial.substr(0, ebootMaxBytes);
+            }
+            if (!promptTextOSK("Rename", initial.c_str(), maxChars, typed)) return;
+            if (gi.kind == GameItem::EBOOT_FOLDER && (int)typed.size() > ebootMaxBytes) {
+                typed = typed.substr(0, ebootMaxBytes);
+            }
             if (typed == base) return;
 
             // after OSK
@@ -362,13 +372,6 @@
     }
 
     void renderOneFrame() {
-        // Clear category cache every few frames to avoid stale data
-        static int frameCount = 0;
-        frameCount++;
-        if (frameCount % 60 == 0) {  // Clear every 60 frames (~1 second at 60fps)
-            categoryCache.clear();
-        }
-
         sceGuStart(GU_DIRECT, list);
         sceGuDisable(GU_DEPTH_TEST);
         sceGuDepthMask(GU_TRUE);
