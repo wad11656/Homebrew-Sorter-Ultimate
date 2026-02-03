@@ -2343,7 +2343,10 @@ private:
                                    lines[l], scale, textCol, shadowCol, INTRAFONT_ALIGN_CENTER, true);
                 }
 
-                if (present) {
+                const bool hideCopyMsInfo =
+                    (actionMode == AM_Copy && runningFromEf0 && !strcmp(name, "ms0:/"));
+                const bool showStorageInfo = present && !hideCopyMsInfo;
+                if (showStorageInfo) {
                     const float pieR = 22.0f;
                     const float pieX = panelX + 60.0f + deviceShiftX;
                     const float infoX = pieX + pieR + 8.0f;
