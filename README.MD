@@ -40,7 +40,7 @@ Successor to [HomeBrew Sorter](https://github.com/FPSUsername/HomeBrew_Sorter). 
 <ins>Additional Info</ins>:
 - You can disable the main screen's animations by removing all the folders in the `/resources/animations` folder. (Or even add your own animation folders with animation `.png` frames named the same way as in the existing folders.)
 - You can change the app background by swapping out `/resources/bkg.png`.
-- A [personally-updated build of the Game Categories plugin](https://github.com/wad11656/game-categories-lite) was created and integrated with this app to restore the functionality of hiding Categories from the XMB.
+- A [personally-updated build of the Game Categories Lite plugin](https://github.com/wad11656/game-categories-lite) was created and integrated with this app to restore the functionality of hiding Categories from the XMB.
 
 <ins>Credits</ins>:
 
