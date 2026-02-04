@@ -1,7 +1,7 @@
 # Homebrew Sorter Ultimate
 <div align="right">
   <a href="#vibe-code-acknowledgement">
-    <img width="25" alt="Image" src="https://github.com/user-attachments/assets/07f38ccc-07f1-4bf7-819c-e88a36b39a79" />
+    <img width="25" alt="Image" src="https://github.com/user-attachments/assets/a2474b23-8cff-4ee9-96e3-b7c9d94ee3a4" />
   </a>
 </div>
 <div align="center">
@@ -51,12 +51,14 @@ Successor to [HomeBrew Sorter](https://github.com/FPSUsername/HomeBrew_Sorter). 
 
 - [CMFileManager by joel16](https://github.com/joel16/CMFileManager-PSP) was used as the base for this app to help with file operations and compiling with the modern PSP SDK.
 
-<div id="vibe-code-acknowledgement" style="padding-left: 20px;">
-  <img
-    width="25"
-    alt="Image"
-    src="https://github.com/user-attachments/assets/07f38ccc-07f1-4bf7-819c-e88a36b39a79"
-    style="margin-right: 8px; vertical-align: middle;"
-  />
-  This app was "vibe-coded" as a hobby project by someone technically-minded with ample pre-LLM-era coding and debugging experience.
-</div>
+<table cellspacing="0">
+  <tr>
+    <td style="padding:0;"></td>
+    <td cellpadding="20">
+      <a id="vibe-code-acknowledgement"></a>
+      <img width="25" alt="Image" src="https://github.com/user-attachments/assets/a2474b23-8cff-4ee9-96e3-b7c9d94ee3a4" />
+      &#8194;
+      This app was "vibe-coded" as a hobby project by someone technically-minded with ample pre-LLM-era coding and debugging experience.
+    </td>
+  </tr>
+</table>
