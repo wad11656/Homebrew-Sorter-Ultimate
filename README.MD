@@ -54,7 +54,7 @@ Successor to [HomeBrew Sorter](https://github.com/FPSUsername/HomeBrew_Sorter). 
 <div id="vibe-code-acknowledgement">
   &#8194;
   <img
-    width="25"
+    width="15"
     alt="Image"
     src="https://github.com/user-attachments/assets/a2474b23-8cff-4ee9-96e3-b7c9d94ee3a4"
     style="vertical-align: middle;"
