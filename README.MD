@@ -56,7 +56,7 @@ Successor to [HomeBrew Sorter](https://github.com/FPSUsername/HomeBrew_Sorter). 
     width="25"
     alt="Image"
     src="https://github.com/user-attachments/assets/a2474b23-8cff-4ee9-96e3-b7c9d94ee3a4"
-    style="margin-left: 20px; margin-right: 8px;"
+    style="margin-left: 50px; margin-right: 20px;"
   />
   This app was "vibe-coded" as a hobby project by someone technically-minded with ample pre-LLM-era coding and debugging experience.
 </div>
