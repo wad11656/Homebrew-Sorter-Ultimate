@@ -53,11 +53,11 @@ Successor to [HomeBrew Sorter](https://github.com/FPSUsername/HomeBrew_Sorter). 
 
 <table role="presentation" style="border:0; border-collapse:collapse; border-spacing:0;">
   <tr>
-    <td style="border:0; padding:0 0 0 8px; vertical-align:middle; white-space:nowrap;">
+    <td style="border:0; padding:0 0 0 8px; vertical-align:middle; white-space:nowrap; outline:0; box-shadow:none;">
       <a id="vibe-code-acknowledgement"></a>
       <img width="25" alt="Image" src="https://github.com/user-attachments/assets/a2474b23-8cff-4ee9-96e3-b7c9d94ee3a4" />
     </td>
-    <td style="border:0; padding:0 0 0 5px; vertical-align:middle;">
+    <td style="border:0; padding:0 0 0 5px; vertical-align:middle outline:0; box-shadow:none;">
       This app was "vibe-coded" as a hobby project by someone technically-minded with ample pre-LLM-era coding and debugging experience.
     </td>
   </tr>
