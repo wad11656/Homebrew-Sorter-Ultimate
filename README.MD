@@ -52,8 +52,13 @@ Successor to [HomeBrew Sorter](https://github.com/FPSUsername/HomeBrew_Sorter). 
 - [CMFileManager by joel16](https://github.com/joel16/CMFileManager-PSP) was used as the base for this app to help with file operations and compiling with the modern PSP SDK.
 
 <div id="vibe-code-acknowledgement">
-  &#8195;
-  <img width="25" alt="Image" src="https://github.com/user-attachments/assets/a2474b23-8cff-4ee9-96e3-b7c9d94ee3a4" style="vertical-align: middle;" />
   &#8194;
+  <img
+    width="25"
+    alt="Image"
+    src="https://github.com/user-attachments/assets/a2474b23-8cff-4ee9-96e3-b7c9d94ee3a4"
+    style="vertical-align: middle;"
+  />
+  &#8202;
   This app was "vibe-coded" as a hobby project by someone technically-minded with ample pre-LLM-era coding and debugging experience.
 </div>
