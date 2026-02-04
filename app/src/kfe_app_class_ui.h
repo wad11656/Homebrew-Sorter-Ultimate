@@ -3129,7 +3129,7 @@ private:
             };
             if (drawIcon(squareIconTexture) > 0.0f) x += plusGap;
             const float plusScale = 0.6f;
-            drawTextStyled(x, y + 2.0f, "+", plusScale, 0xFFFFFFFF, 0, INTRAFONT_ALIGN_LEFT, false);
+            drawTextStyled(x, y + 1.0f, "+", plusScale, 0xFFFFFFFF, 0, INTRAFONT_ALIGN_LEFT, false);
             x += measureTextWidth(plusScale, "+") + plusGap;
             if (drawIcon(updownIconTexture) > 0.0f) x += iconGap;
             drawTextStyled(x, y + 2.0f, label, 0.7f, textCol, 0, INTRAFONT_ALIGN_LEFT, false);
