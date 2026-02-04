@@ -384,6 +384,14 @@
             std::string other = oppositeRootOf(dev);
             if (!other.empty()) markDeviceDirty(other);
         }
+
+        // Keep snapshot in sync when this refresh touches the current device
+        if (!currentDevice.empty() &&
+            !strcasecmp(rootPrefix(currentDevice).c_str(), rootPrefix(dev).c_str())) {
+            auto &dc = deviceCache[rootPrefix(dev)];
+            snapshotCurrentScan(dc.snap);
+            dc.dirty = false;
+        }
     }
 
     // Targeted refresh for a set of BASE names that were just un-blacklisted.
@@ -493,6 +501,14 @@
         const char* gameRoots[] = {"PSP/GAME/","PSP/GAME150/"}; // drop PSX/ and Utility/ as roots
         for (auto r : isoRoots)  refreshIso(r,   dev + std::string(r));
         for (auto r : gameRoots) refreshGame(r, dev + std::string(r));
+
+        // Keep snapshot in sync when this refresh touches the current device
+        if (!currentDevice.empty() &&
+            !strcasecmp(rootPrefix(currentDevice).c_str(), rootPrefix(dev).c_str())) {
+            auto &dc = deviceCache[rootPrefix(dev)];
+            snapshotCurrentScan(dc.snap);
+            dc.dirty = false;
+        }
     }
 
 
