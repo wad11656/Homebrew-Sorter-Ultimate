@@ -83,6 +83,7 @@ int RunKernelFileExplorer(const char* execPath) {
     std::string isoPath    = baseDir + "resources/iso.png";
     std::string updatePath = baseDir + "resources/update.png";
     std::string warningPath = baseDir + "resources/warning.png";
+    std::string updownPath = baseDir + "resources/updown.png";
     std::string animRoot   = baseDir + "resources/animations";
 
     backgroundTexture      = texLoadPNG(pngPath.c_str()); logTex("background", pngPath, backgroundTexture);
@@ -115,6 +116,7 @@ int RunKernelFileExplorer(const char* execPath) {
     isoIconTexture    = texLoadPNG(isoPath.c_str()); logTex("iso", isoPath, isoIconTexture);
     updateIconTexture = texLoadPNG(updatePath.c_str()); logTex("update", updatePath, updateIconTexture);
     warningIconTexture = texLoadPNG(warningPath.c_str()); logTex("warning", warningPath, warningIconTexture);
+    updownIconTexture = texLoadPNG(updownPath.c_str()); logTex("updown", updownPath, updownIconTexture);
 
     logf("boot: initHomeAnimations %s", animRoot.c_str());
     initHomeAnimations(animRoot);

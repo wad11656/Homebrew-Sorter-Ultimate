@@ -2114,6 +2114,7 @@ private:
         const int h = t->height;
         const int tbw = t->stride;
         if (w <= 0 || h <= 0) return;
+        int th = 1; while (th < h) th <<= 1;
         float s = targetH / (float)h;
         float dw = (float)w * s;
         float dh = targetH;
@@ -2122,7 +2123,7 @@ private:
         sceGuTexFlush();
         sceGuTexMode(GU_PSM_8888, 0, 0, GU_FALSE);
         sceGuTexFunc(GU_TFX_MODULATE, GU_TCC_RGBA);
-        sceGuTexImage(0, tbw, tbw, tbw, t->data);
+        sceGuTexImage(0, tbw, th, tbw, t->data);
         sceGuTexFilter(GU_NEAREST, GU_NEAREST);
         sceGuTexWrap(GU_CLAMP, GU_CLAMP);
         sceGuEnable(GU_TEXTURE_2D);
@@ -2441,6 +2442,7 @@ private:
         const int h = t->height;
         const int tbw = t->stride;
         if (w <= 0 || h <= 0) return;
+        int th = 1; while (th < h) th <<= 1;
         float s = targetH / (float)h;
         float dw = (float)w * s;
         float dh = targetH;
@@ -2449,7 +2451,7 @@ private:
         sceGuTexFlush();
         sceGuTexMode(GU_PSM_8888, 0, 0, GU_FALSE);
         sceGuTexFunc(GU_TFX_MODULATE, GU_TCC_RGBA);
-        sceGuTexImage(0, tbw, tbw, tbw, t->data);
+        sceGuTexImage(0, tbw, th, tbw, t->data);
         sceGuTexFilter(GU_NEAREST, GU_NEAREST);
         sceGuTexWrap(GU_CLAMP, GU_CLAMP);
         sceGuEnable(GU_TEXTURE_2D);

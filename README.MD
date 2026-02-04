@@ -1,5 +1,7 @@
 # Homebrew Sorter Ultimate
-
+<div align="right">
+<img width="40" alt="Image" src="https://github.com/user-attachments/assets/a2474b23-8cff-4ee9-96e3-b7c9d94ee3a4" />
+</div>
 <div align="center">
 <img width="650" src="https://github.com/user-attachments/assets/b1ef3b48-57ac-45e3-aecc-64b13e5f4901" />
 </div>
@@ -43,6 +45,7 @@ Successor to [HomeBrew Sorter](https://github.com/FPSUsername/HomeBrew_Sorter). 
 - You can change the app background by swapping out `/resources/bkg.png`.
 - A [personally-updated build of the Game Categories Lite plugin](https://github.com/wad11656/game-categories-lite) was created and integrated with this app to restore the functionality of hiding Categories from the XMB.
 
-<ins>Credits</ins>:
+<ins>Acknowledgements</ins>:
 
 [CMFileManager by joel16](https://github.com/joel16/CMFileManager-PSP) was used as the base for this app to help with file operations and compiling with the modern PSP SDK.
+

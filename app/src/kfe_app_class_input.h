@@ -56,6 +56,10 @@
             else { downHoldStartUS = nowUS(); downLastRepeatUS = 0; }
         } else { downHoldStartUS = 0; downLastRepeatUS = 0; }
 
+        if ((pad.Buttons & PSP_CTRL_SQUARE) == 0) {
+            bulkSquareUncheck = false;
+        }
+
         lastButtons = pad.Buttons;
 
         // ===== Bulk select while holding Square =====
@@ -77,12 +81,12 @@
 
             // Square + Up    => Bulk select upward from current row until a checked barrier
             if ((pressed & PSP_CTRL_UP) || repeatUp) {
-                bulkSelect(-1);
+                bulkSelect(-1, bulkSquareUncheck);
                 return;  // swallow navigation while painting
             }
             // Square + Down  => Bulk select downward from current row until a checked barrier
             if ((pressed & PSP_CTRL_DOWN) || repeatDown) {
-                bulkSelect(+1);
+                bulkSelect(+1, bulkSquareUncheck);
                 return;  // swallow navigation while painting
             }
         }
@@ -394,8 +398,13 @@
                 selectedIndex >= 0 && selectedIndex < (int)workingList.size()) {
                 const std::string& p = workingList[selectedIndex].path;
                 auto it = checked.find(p);
-                if (it == checked.end()) checked.insert(p);
-                else                     checked.erase(it);
+                if (it == checked.end()) {
+                    checked.insert(p);
+                    bulkSquareUncheck = false;
+                } else {
+                    checked.erase(it);
+                    bulkSquareUncheck = true;
+                }
             }
             return;
         }

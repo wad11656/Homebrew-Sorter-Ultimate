@@ -457,23 +457,30 @@
     }
 
     // --- add near other small helpers in the class (optional, but tidy) ---
-    void bulkSelect(int dir) {
+    void bulkSelect(int dir, bool uncheck) {
         if (showRoots) return;
         if (!(view == View_AllFlat || view == View_CategoryContents)) return;
         if (selectedIndex < 0 || selectedIndex >= (int)workingList.size()) return;
 
-        // Always mark the current row first
         const std::string& cur = workingList[selectedIndex].path;
-        checked.insert(cur);
-
-        // dir = -1 for up, +1 for down
-        int j = selectedIndex + dir;
-        while (j >= 0 && j < (int)workingList.size()) {
-            const std::string& p = workingList[j].path;
-            // Stop at the first row that's already checked (barrier)
-            if (checked.find(p) != checked.end()) break;
-            checked.insert(p);
-            j += dir;
+        if (uncheck) {
+            checked.erase(cur);
+            int j = selectedIndex + dir;
+            while (j >= 0 && j < (int)workingList.size()) {
+                const std::string& p = workingList[j].path;
+                if (checked.find(p) == checked.end()) break;
+                checked.erase(p);
+                j += dir;
+            }
+        } else {
+            checked.insert(cur);
+            int j = selectedIndex + dir;
+            while (j >= 0 && j < (int)workingList.size()) {
+                const std::string& p = workingList[j].path;
+                if (checked.find(p) != checked.end()) break;
+                checked.insert(p);
+                j += dir;
+            }
         }
     }
 

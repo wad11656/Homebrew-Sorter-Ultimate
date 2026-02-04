@@ -543,6 +543,7 @@ public:
         if (homebrewIconTexture) { texFree(homebrewIconTexture); homebrewIconTexture = nullptr; }
         if (isoIconTexture) { texFree(isoIconTexture); isoIconTexture = nullptr; }
         if (warningIconTexture) { texFree(warningIconTexture); warningIconTexture = nullptr; }
+        if (updownIconTexture) { texFree(updownIconTexture); updownIconTexture = nullptr; }
         if (!gPopAnimFrames.empty()) { freeAnimationFrames(gPopAnimFrames); gPopAnimMinDelayUs = 0; }
         if (!gHomeAnimFrames.empty()) { freeAnimationFrames(gHomeAnimFrames); gHomeAnimMinDelayUs = 0; }
         freeHomeAnimStreaming();  // Free streaming mode resources

@@ -602,6 +602,7 @@ private:
     static bool rootPickGcl;             // ← declaration only; no in-class initializer
     static bool rootKeepGclSelection;    // keep selection on "Game Categories:" after toggle
     bool inputWaitRelease = false;
+    bool bulkSquareUncheck = false;
 
     // Which Categories Lite setting is currently being edited
     enum GclSettingKey { GCL_SK_None = -1, GCL_SK_Mode = 0, GCL_SK_Prefix = 1, GCL_SK_Uncat = 2, GCL_SK_Sort = 3, GCL_SK_Blacklist = 4 };
@@ -1761,6 +1762,7 @@ private:
         const int h = t->height;
         const int tbw = t->stride;
         if (w <= 0 || h <= 0) return;
+        int th = 1; while (th < h) th <<= 1;
         float s = targetH / (float)h;
         float dw = (float)w * s;
         float dh = targetH;
@@ -1769,7 +1771,7 @@ private:
         sceGuTexFlush();
         sceGuTexMode(GU_PSM_8888, 0, 0, GU_FALSE);
         sceGuTexFunc(GU_TFX_MODULATE, GU_TCC_RGBA);
-        sceGuTexImage(0, tbw, tbw, tbw, t->data);
+        sceGuTexImage(0, tbw, th, tbw, t->data);
         sceGuTexFilter(GU_LINEAR, GU_LINEAR);
         sceGuTexWrap(GU_CLAMP, GU_CLAMP);
         sceGuEnable(GU_TEXTURE_2D);
@@ -1788,6 +1790,7 @@ private:
         const int h = t->height;
         const int tbw = t->stride;
         if (w <= 0 || h <= 0) return;
+        int th = 1; while (th < h) th <<= 1;
         float s = targetH / (float)h;
         float dw = (float)w * s;
         float dh = targetH;
@@ -1796,7 +1799,7 @@ private:
         sceGuTexFlush();
         sceGuTexMode(GU_PSM_8888, 0, 0, GU_FALSE);
         sceGuTexFunc(GU_TFX_MODULATE, GU_TCC_RGBA);
-        sceGuTexImage(0, tbw, tbw, tbw, t->data);
+        sceGuTexImage(0, tbw, th, tbw, t->data);
         sceGuTexFilter(GU_LINEAR, GU_LINEAR);
         sceGuTexWrap(GU_CLAMP, GU_CLAMP);
         sceGuEnable(GU_TEXTURE_2D);
@@ -3112,6 +3115,26 @@ private:
             drawTextStyled(x + labelPad, y + 2.0f, label, 0.7f, textCol, 0, INTRAFONT_ALIGN_LEFT, false);
             y += 17.0f;
         };
+        auto drawKeyRowSquarePlusUpDown = [&](float baseX, float& y, const char* label, unsigned textCol){
+            float x = baseX; // align with start/select
+            const float iconH = 15.0f;
+            const float iconGap = 6.0f;
+            const float plusGap = 3.0f;
+            auto drawIcon = [&](Texture* icon){
+                if (!icon || !icon->data || icon->height <= 0) return 0.0f;
+                const float w = (float)icon->width * (iconH / (float)icon->height);
+                drawTextureScaled(icon, x, y - 10.0f, iconH, 0xFFFFFFFF);
+                x += w;
+                return w;
+            };
+            if (drawIcon(squareIconTexture) > 0.0f) x += plusGap;
+            const float plusScale = 0.6f;
+            drawTextStyled(x, y + 2.0f, "+", plusScale, 0xFFFFFFFF, 0, INTRAFONT_ALIGN_LEFT, false);
+            x += measureTextWidth(plusScale, "+") + plusGap;
+            if (drawIcon(updownIconTexture) > 0.0f) x += iconGap;
+            drawTextStyled(x, y + 2.0f, label, 0.7f, textCol, 0, INTRAFONT_ALIGN_LEFT, false);
+            y += 17.0f;
+        };
 
         float keyY = ctrlY + 13.0f;
         const float keyX = ctrlX + 5.0f;
@@ -3121,7 +3144,7 @@ private:
         drawKeyRowLeft(keyX, keyY, rIconTexture, "Alphabetize", true, keyTextCol);
         drawKeyRowLeft(keyX, keyY, startIconTexture, "Save List", false, saveTextCol);
         drawKeyRowLeft(keyX, keyY, selectIconTexture, "Rename", false, keyTextCol);
-        drawKeyRowLeft(keyX, keyY, squareIconTexture, "Mark for App Ops.", true, keyTextCol);
+        drawKeyRowSquarePlusUpDown(keyX, keyY, "Mark for App Ops.", keyTextCol);
         drawKeyRowLeft(keyX, keyY, triangleIconTexture, "App Operations", true, keyTextCol);
         drawKeyRowLeft(keyX, keyY, circleIconTexture, "Back", true, keyTextCol);
 
