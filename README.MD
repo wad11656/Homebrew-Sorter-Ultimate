@@ -60,5 +60,5 @@ Successor to [HomeBrew Sorter](https://github.com/FPSUsername/HomeBrew_Sorter). 
     style="vertical-align: middle;"
   />
   &#8202;
-  This app was "vibe-coded" as a hobby project by someone technically-minded with ample pre-LLM-era coding and debugging experience.
+  This app was "vibe-coded" as a hobby project by someone with lots of pre-LLM-era coding and debugging experience.
 </div>
