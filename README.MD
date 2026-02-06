@@ -9,7 +9,7 @@
 </div>
 <br/>
 
-Successor to [HomeBrew Sorter](https://github.com/FPSUsername/HomeBrew_Sorter). Sort Categories & Apps on PSP (Go) & Adrenaline (Vita). Includes alphabetize function, full Game Categories (Lite) plugin integration, and file operations.
+Successor to [HomeBrew Sorter GUI](https://www.gamebrew.org/wiki/HomeBrew_Sorter_GUI_PSP). Sort Categories & Apps on PSP (Go) & Adrenaline (Vita). Includes alphabetize function, full Game Categories (Lite) plugin integration, and file operations.
 
 ---
 
