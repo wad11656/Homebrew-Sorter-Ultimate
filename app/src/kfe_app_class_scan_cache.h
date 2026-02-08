@@ -1942,6 +1942,41 @@
         }
     }
 
+    void gclHardCheckPrxIfEnabled() {
+        if (!gclArkOn && !gclProOn) return;
+
+        // Prefer ARK-4 if both are enabled (matches UI precedence)
+        const bool wantArk = gclArkOn;
+        const bool wantPro = (!gclArkOn && gclProOn);
+
+        std::string pluginsSe;
+        std::string vshSe;
+        std::string plugins = gclFindArkPluginsFile(pluginsSe);
+        std::string vsh = gclFindProVshFile(vshSe);
+        (void)plugins;
+        (void)vsh;
+
+        std::string targetSeplugins;
+        if (wantArk && !pluginsSe.empty()) {
+            targetSeplugins = pluginsSe;
+        } else if (wantPro && !vshSe.empty()) {
+            targetSeplugins = vshSe;
+        }
+
+        if (targetSeplugins.empty()) {
+            gclDevice = gclPickDeviceRoot();
+            targetSeplugins = gclSepluginsDirForRoot(gclDevice);
+        } else {
+            gclDevice = rootPrefix(targetSeplugins);
+        }
+        if (targetSeplugins.empty()) return;
+        if (!dirExists(targetSeplugins)) sceIoMkdir(targetSeplugins.c_str(), 0777);
+
+        // Ensure the PRX exists and refresh it if needed.
+        if (!gclEnsurePrxPresent(targetSeplugins)) return;
+        gclMaybeUpdatePrx();
+    }
+
     void buildRootRows(){
         clearUI();
         int preselect = -1;

@@ -755,6 +755,7 @@ private:
     enum GclSettingKey { GCL_SK_None = -1, GCL_SK_Mode = 0, GCL_SK_Prefix = 1, GCL_SK_Uncat = 2, GCL_SK_Sort = 3, GCL_SK_Blacklist = 4 };
     static GclSettingKey gclPending;
     bool gclBlacklistDirty = false;
+    bool gclHardCheckDone = false;
 
     // Track which kind of menu is open (content vs categories)
     enum MenuContext { MC_ContentOps, MC_CategoryOps };

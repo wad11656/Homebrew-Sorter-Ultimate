@@ -888,6 +888,20 @@
         while (1) {
             renderOneFrame();
 
+            // One-shot: after main screen + home animation are ready, hard-check plugin file if enabled
+            if (!gclHardCheckDone && showRoots && opPhase == OP_None && !msgBox) {
+                bool animReady = gHomeAnimEntries.empty();
+                if (!animReady) {
+                    Texture* animTex = getCurrentHomeAnimTexture();
+                    animReady = animTex && animTex->data && animTex->width > 0 && animTex->height > 0;
+                }
+                if (animReady) {
+                    gclHardCheckDone = true;
+                    gclComputeInitial();
+                    gclHardCheckPrxIfEnabled();
+                }
+            }
+
             // Global debounce: wait for full release before any modal eats input
             if (inputWaitRelease) {
                 SceCtrlData pad{}; sceCtrlReadBufferPositive(&pad, 1);
