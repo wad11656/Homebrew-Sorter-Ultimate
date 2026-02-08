@@ -1,16 +1,16 @@
 // kfe_app.cpp
 // ----------------------------------------------------------------
-// KernelFileExplorer — Folder-time-only sorter (XMB-accurate)
+// KernelFileExplorer — XMB-updated-time sorter
 // Reorder flow: X = Pick/Drop, while picked use ↑/↓ to swap.
 // START commits mtimes for the *current visual list*
 //   - Bottom item gets "start" time, then +10s per step up,
-//   - EBOOT entries: update **only the parent folder mtime**
-//   - ISO entries:   update the ISO file mtime
-//   - Initial list order = descending by chosen timestamp (folder time).
+//   - EBOOT entries: update **parent folder mtime**
+//   - ISO entries:   update ISO file timestamps (mtime/ctime/atime)
+//   - Initial list order = descending by chosen timestamp (folder mtime / ISO ctime).
 // HOME menu via exit callback.
 //
 // Debug UI:
-//   - □ toggles timestamp overlay (shows the folder/file mtime used to sort).
+//   - Thumbstick up toggles timestamp overlay (shows the timestamp used to sort).
 // Tips:
 //   - Hold ↑ or ↓ to fast-scroll (after a short delay).
 //   - △ toggles label: File/Folder vs App Title

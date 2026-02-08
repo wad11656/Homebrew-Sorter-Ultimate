@@ -69,7 +69,7 @@
                             gi.path  = joinDirFile(catDir, fn.c_str());
                             SceIoStat st;
                             if (getStat(gi.path, st)){
-                                gi.time     = st.sce_st_mtime;
+                                gi.time     = st.sce_st_ctime;
                                 gi.sortKey  = buildLegacySortKey(gi.time);
                                 gi.sizeBytes= (uint64_t)st.st_size;
                             }
@@ -100,7 +100,7 @@
                     gi.path  = joinDirFile(base, name.c_str());
                     SceIoStat st;
                     if (getStat(gi.path, st)){
-                        gi.time     = st.sce_st_mtime;
+                        gi.time     = st.sce_st_ctime;
                         gi.sortKey  = buildLegacySortKey(gi.time);
                         gi.sizeBytes= (uint64_t)st.st_size;
                     }
@@ -296,7 +296,7 @@
                         gi.path  = joinDirFile(subAbs, fn.c_str());
                         SceIoStat st;
                         if (getStat(gi.path, st)){
-                            gi.time     = st.sce_st_mtime;
+                            gi.time     = st.sce_st_ctime;
                             gi.sortKey  = buildLegacySortKey(gi.time);
                             gi.sizeBytes= (uint64_t)st.st_size;
                         }
@@ -430,11 +430,11 @@
                             gi.label = fn;
                             gi.path  = joinDirFile(subAbs, fn.c_str());
                             SceIoStat st;
-                            if (getStat(gi.path, st)){
-                                gi.time     = st.sce_st_mtime;
-                                gi.sortKey  = buildLegacySortKey(gi.time);
-                                gi.sizeBytes= (uint64_t)st.st_size;
-                            }
+                        if (getStat(gi.path, st)){
+                            gi.time     = st.sce_st_ctime;
+                            gi.sortKey  = buildLegacySortKey(gi.time);
+                            gi.sizeBytes= (uint64_t)st.st_size;
+                        }
 
                             if (endsWithNoCase(fn, ".iso")) {
                                 std::string t; if (readIsoTitle(gi.path, t)) gi.title = t;
@@ -471,16 +471,16 @@
                         std::string title = e.d_name;
                         std::string folderNoSlash = joinDirFile(subAbs, title.c_str());
                         if (!dirExists(folderNoSlash)) return;
-                        if (!findEbootCaseInsensitive(folderNoSlash).empty()){
-                            GameItem gi; gi.kind = GameItem::EBOOT_FOLDER;
-                            gi.label = title;
-                            gi.path  = folderNoSlash;
-                            SceIoStat stF{};
-                            if (getStatDirNoSlash(gi.path, stF)) {
-                                gi.time     = stF.sce_st_mtime;
-                                gi.sortKey  = buildLegacySortKey(gi.time);
-                            }
-                            uint64_t folderBytes = 0;
+                    if (!findEbootCaseInsensitive(folderNoSlash).empty()){
+                        GameItem gi; gi.kind = GameItem::EBOOT_FOLDER;
+                        gi.label = title;
+                        gi.path  = folderNoSlash;
+                        SceIoStat stF{};
+                        if (getStatDirNoSlash(gi.path, stF)) {
+                            gi.time     = stF.sce_st_mtime;
+                            gi.sortKey  = buildLegacySortKey(gi.time);
+                        }
+                        uint64_t folderBytes = 0;
                             sumDirBytes(gi.path, folderBytes);
                             gi.sizeBytes = folderBytes;
                             gi.isUpdateDlc = isUpdateDlcFolder(gi.path);

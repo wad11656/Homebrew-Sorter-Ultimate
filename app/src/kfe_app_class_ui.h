@@ -1632,7 +1632,7 @@ private:
         SceIoStat st{};
         if (k == GameItem::ISO_FILE) {
             if (sceIoGetstat(newPath.c_str(), &st) >= 0) {
-                gi.time     = st.sce_st_mtime;
+                gi.time     = st.sce_st_ctime;
                 gi.sizeBytes= (uint64_t)st.st_size;
             }
         } else {
@@ -3488,7 +3488,8 @@ private:
                     const GameItem& gi = workingList[i];
                     char right[64], buf[32];
                     fmtDT(gi.time, buf, sizeof(buf));
-                    snprintf(right, sizeof(right), "%s [F]", buf);
+                    const char* tag = (gi.kind == GameItem::ISO_FILE) ? "C" : "F";
+                    snprintf(right, sizeof(right), "%s [%s]", buf, tag);
                     intraFontSetStyle(font,0.5f,COLOR_GRAY,0,0.0f,INTRAFONT_ALIGN_RIGHT);
                     intraFontPrint(font, debugRightX, baseline - 0.5f, right);
                 }
@@ -3687,7 +3688,8 @@ private:
                     const GameItem& gi = workingList[i];
                     char right[64], buf[32];
                     fmtDT(gi.time, buf, sizeof(buf));
-                    snprintf(right, sizeof(right), "%s [F]", buf);
+                    const char* tag = (gi.kind == GameItem::ISO_FILE) ? "C" : "F";
+                    snprintf(right, sizeof(right), "%s [%s]", buf, tag);
                     intraFontSetStyle(font,0.5f,COLOR_GRAY,0,0.0f,INTRAFONT_ALIGN_RIGHT);
                     intraFontPrint(font, SCREEN_WIDTH-20.0f, y+2, right);
                 }

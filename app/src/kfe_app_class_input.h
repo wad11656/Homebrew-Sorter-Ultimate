@@ -37,7 +37,7 @@
             }
         }
         // Disabled: thumbstick-up timestamp toggle
-        // bool analogUpNow = (pad.Ly <= 30);
+        // const bool analogUpNow = (pad.Ly <= 30);
         // if (analogUpNow && !analogUpHeld) {
         //     showDebugTimes = !showDebugTimes;
         // }

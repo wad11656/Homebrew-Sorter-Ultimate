@@ -1797,7 +1797,7 @@ struct GameItem {
     std::string    label;      // filename/folder name (default)
     std::string    title;      // app title (if found)
     std::string    path;       // ISO file OR ***EBOOT PARENT FOLDER PATH*** (no trailing slash)
-    ScePspDateTime time{};     // the time we sort by (folder for EBOOT, file for ISO)
+    ScePspDateTime time{};     // the time we sort by (EBOOT folder mtime; ISO ctime)
     std::string    sortKey;    // legacy sort string (desc)
     uint64_t       sizeBytes = 0;  // <--- NEW: bytes for size column
     bool           isUpdateDlc = false; // folder has PBOOT/PARAM but no EBOOT
