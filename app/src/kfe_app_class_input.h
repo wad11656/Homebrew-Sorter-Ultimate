@@ -746,6 +746,7 @@
                         UsbActivate();
                         gUsbActive = true;
                         gUsbShownConnected = false;
+                        disableHomeAnimationForUsb();
                         markAllDevicesDirty();
                         gUsbBox = new MessageBox(
                             "Connect to PC...\nOn PSP Go, Bluetooth must be turned off in the System Settings.\nwarning.png Not Vita-compatible.",

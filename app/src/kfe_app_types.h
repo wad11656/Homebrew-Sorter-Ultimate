@@ -1222,6 +1222,7 @@ static void suspendHomeAnimation() {
     updateMsLedForHomeAnim();
 }
 
+
 static void pauseHomeAnimationKeepFrame() {
     // With preloaded frames, just pause - all textures stay in memory
     gHomeAnimPaused = true;
@@ -1976,6 +1977,7 @@ void sortWorkingListAlpha(bool byTitle,
 // App
 // ---------------------------------------------------------------
 static const char *gExecPath = nullptr;
+static std::string gExecBaseOverride;
 
 static std::string getBaseDir(const char* execPath) {
     if (!execPath) return std::string("ms0:/");
@@ -1983,6 +1985,81 @@ static std::string getBaseDir(const char* execPath) {
     size_t pos = p.find_last_of("/\\");
     if (pos == std::string::npos) return p + "/";
     return p.substr(0, pos + 1);
+}
+
+static std::string currentExecBaseDir() {
+    if (!gExecBaseOverride.empty()) return gExecBaseOverride;
+    return getBaseDir(gExecPath);
+}
+
+static void setExecBaseOverrideFromAnimRoot(const std::string& animRoot) {
+    if (animRoot.empty()) return;
+    std::string resDir = parentOf(animRoot);
+    std::string appDir = parentOf(resDir);
+    if (appDir.empty()) return;
+    if (appDir.back() != '/') appDir.push_back('/');
+    gExecBaseOverride = appDir;
+}
+
+static void disableHomeAnimationForUsb() {
+    suspendHomeAnimation();
+    // Keep entries but prevent auto-start so UI shows "Loading..."
+    gHomeAnimPaused = true;
+    gHomeAnimDeferFrames = -1;
+}
+
+static void reloadHomeAnimationsForExec() {
+    gHomeAnimPaused = false;
+    gHomeAnimDeferFrames = 0;
+    std::string baseDir = currentExecBaseDir();
+    std::string animRoot = baseDir + "resources/animations";
+    if (dirExists(animRoot)) {
+        initHomeAnimations(animRoot);
+        setExecBaseOverrideFromAnimRoot(animRoot);
+        return;
+    }
+
+    // If the app folder was renamed, recursively search <dev>/PSP/GAME for a folder with our resources.
+    auto isAnimRootMatch = [&](const std::string& candidate)->bool{
+        std::string candAnim = joinDirFile(candidate, "resources/animations");
+        if (!dirExists(candAnim)) return false;
+        if (!pathExists(joinDirFile(candidate, "EBOOT.PBP"))) return false;
+        if (!pathExists(joinDirFile(candidate, "resources/bkg.png"))) return false;
+        return true;
+    };
+
+    std::string devRoot;
+    if (baseDir.size() >= 4 && baseDir[3] == ':') {
+        devRoot = baseDir.substr(0, (baseDir.size() >= 5 && baseDir[4] == '/') ? 5 : 4);
+        if (devRoot.size() == 4) devRoot.push_back('/');
+    }
+    std::string searchRoot = devRoot.empty() ? std::string() : (devRoot + "PSP/GAME");
+    std::string foundAnimRoot;
+    if (!searchRoot.empty() && dirExists(searchRoot)) {
+        std::vector<std::string> stack;
+        stack.push_back(searchRoot);
+        while (!stack.empty() && foundAnimRoot.empty()) {
+            std::string dir = stack.back();
+            stack.pop_back();
+            forEachEntry(dir, [&](const SceIoDirent& e){
+                if (!FIO_S_ISDIR(e.d_stat.st_mode) || !foundAnimRoot.empty()) return;
+                std::string candidate = joinDirFile(dir, e.d_name);
+                if (isAnimRootMatch(candidate)) {
+                    foundAnimRoot = joinDirFile(candidate, "resources/animations");
+                    return;
+                }
+                stack.push_back(candidate);
+            });
+        }
+    }
+
+    if (!foundAnimRoot.empty()) {
+        initHomeAnimations(foundAnimRoot);
+        setExecBaseOverrideFromAnimRoot(foundAnimRoot);
+        return;
+    }
+
+    // Fallback: leave entries as-is so UI stays in "Loading..." state.
 }
 
 // -------- Simple File Ops Menu (modal) --------

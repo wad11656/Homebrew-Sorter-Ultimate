@@ -272,6 +272,28 @@
             std::string dir  = dirnameOf(gi.path);
             std::string base = basenameOf(gi.path);
 
+            // Block renaming the currently running app folder.
+            if (gi.kind == GameItem::EBOOT_FOLDER) {
+                std::string appDir = currentExecBaseDir();
+                if (!appDir.empty() && appDir.back() == '/') appDir.pop_back();
+                std::string giDir = gi.path;
+                if (!giDir.empty() && giDir.back() == '/') giDir.pop_back();
+                if (!appDir.empty() && !strcasecmp(appDir.c_str(), giDir.c_str())) {
+                    msgBox = new MessageBox(
+                        "Rename Disabled\n"
+                        "The currently-running app can't be renamed from within the app.",
+                        okIconTexture, SCREEN_WIDTH, SCREEN_HEIGHT, 1.0f, 15, "Close",
+                        10, 18, 80, 9, 280, 90, PSP_CTRL_CROSS);
+                    msgBox->setOkAlignLeft(true);
+                    msgBox->setOkPosition(10, 7);
+                    msgBox->setOkStyle(0.7f, 0xFFBBBBBB);
+                    msgBox->setOkTextOffset(-2, -1);
+                    msgBox->setSubtitleStyle(0.7f, 0xFFBBBBBB);
+                    msgBox->setSubtitleGapAdjust(-8);
+                    return;
+                }
+            }
+
             std::string typed;
             int maxChars = 64;
             std::string initial = base;
@@ -377,13 +399,26 @@
                 cachePatchRenameItem(gi.path, newPath, gi.kind);
                 updateGameFilterOnItemRename(gi.path, newPath);
 
-                // Refresh just the current view
-                if (view == View_CategoryContents) {
-                    openCategory(currentCategory);
-                } else if (view == View_AllFlat) {
-                    rebuildFlatFromCache();
+                // Preserve the current unsaved order in this list.
+                bool updated = false;
+                for (auto &item : workingList) {
+                    if (item.path == gi.path) {
+                        item = makeItemFor(newPath, gi.kind);
+                        updated = true;
+                        break;
+                    }
+                }
+                if (updated) {
+                    refillRowsFromWorkingPreserveSel();
                 } else {
-                    buildCategoryRows();
+                    // Fallback: refresh just the current view
+                    if (view == View_CategoryContents) {
+                        openCategory(currentCategory);
+                    } else if (view == View_AllFlat) {
+                        rebuildFlatFromCache();
+                    } else {
+                        buildCategoryRows();
+                    }
                 }
 
                 // Re-select the renamed item; ensureSelectionIcon() will snap the carried ICON0 into place.
@@ -455,6 +490,7 @@
                 gUsbShownConnected = false;
                 delete gUsbBox; gUsbBox = nullptr;
                 inputWaitRelease = true;
+                reloadHomeAnimationsForExec();
             }
         }
 
