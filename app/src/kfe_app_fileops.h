@@ -443,6 +443,8 @@ void KfeFileOps::performDelete(KernelFileExplorer* self) {
     self->renderOneFrame();
 
     int ok = 0, fail = 0;
+    std::vector<std::string> deletedPaths;
+    deletedPaths.reserve(self->opSrcPaths.size());
     for (size_t i = 0; i < self->opSrcPaths.size(); ++i) {
         const std::string& p = self->opSrcPaths[i];
         const GameItem::Kind k = self->opSrcKinds[i];
@@ -461,6 +463,7 @@ void KfeFileOps::performDelete(KernelFileExplorer* self) {
         if (okOne) {
             ok++;
             self->checked.erase(p);
+            deletedPaths.push_back(p);
         } else {
             fail++;
         }
@@ -468,6 +471,11 @@ void KfeFileOps::performDelete(KernelFileExplorer* self) {
     }
 
     delete self->msgBox; self->msgBox = nullptr;
+
+    // Remove hidden filters for any paths we actually deleted
+    if (!deletedPaths.empty()) {
+        self->removeHiddenAppFiltersForPaths(deletedPaths);
+    }
 
     // Mutate the cache and stay right where we are — instantly.
     // 1) Ensure cache entry exists (scan once if truly missing)

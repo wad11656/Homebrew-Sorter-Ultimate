@@ -76,10 +76,11 @@ private:
     static GclConfig gclCfg;        // initialized out-of-class
     static bool      gclCfgLoaded;  // initialized out-of-class
     static std::unordered_map<std::string, std::vector<std::string>> gclBlacklistMap;        // key: root ("ms0:/", "ef0:/")
-    static std::unordered_map<std::string, bool> gclBlacklistLoadedMap;
     static std::unordered_map<std::string, std::vector<std::string>> gclPendingUnblacklistMap;
-    static std::unordered_map<std::string, std::vector<std::string>> gclFilterMap;           // key: filter root ("ms0:/", "ef0:/")
-    static std::unordered_map<std::string, bool> gclFilterLoadedMap;
+    static std::unordered_map<std::string, std::vector<std::string>> gclCategoryFilterMap;   // key: filter root ("ms0:/", "ef0:/")
+    static std::unordered_map<std::string, std::vector<std::string>> gclGameFilterMap;       // key: filter root ("ms0:/", "ef0:/")
+    static bool gclFiltersLoaded;
+    static bool gclFiltersScrubbed;
     static inline bool blacklistActive() { return gclCfg.prefix != 0; }
     bool isUncategorizedEnabledForDevice(const std::string& dev) const {
         if (gclCfg.uncategorized == 0) return false;
@@ -91,7 +92,7 @@ private:
     }
 
     // ---- Lightweight cache patch: update in-memory categories without rescanning disk ----
-    void patchCategoryCacheFromSettings(bool forceStripNumbers = false){
+    void patchCategoryCacheFromSettings(bool forceStripNumbers = false, bool preferOnDiskNames = false){
         const bool stripNumbers = forceStripNumbers || gclCfg.catsort;
         // 1) Collect bases and existing numbers from current cache keys (skip "Uncategorized")
         std::set<std::string, bool(*)(const std::string&, const std::string&)> baseSet(
@@ -173,6 +174,45 @@ private:
             for (const auto& base : baseList) if (!assigned.count(base)) assigned[base] = 0;
         }
 
+        // Optional: use on-disk names as the source of truth (prevents cache drift if renames fail).
+        std::unordered_map<std::string, std::string> diskNameByBase;
+        if (preferOnDiskNames && !currentDevice.empty()) {
+            auto chooseDiskName = [&](const std::string& base, const std::string& candidate){
+                std::string& cur = diskNameByBase[base];
+                if (cur.empty()) { cur = candidate; return; }
+
+                const std::string want = formatCategoryNameFromBase(base, assigned[base]);
+                if (!strcasecmp(candidate.c_str(), want.c_str())) { cur = candidate; return; }
+                if (!strcasecmp(cur.c_str(), want.c_str())) return;
+
+                const bool candNum = (extractLeadingXXAfterOptionalCAT(candidate.c_str()) > 0);
+                const bool curNum  = (extractLeadingXXAfterOptionalCAT(cur.c_str()) > 0);
+
+                if (gclCfg.catsort) {
+                    if (candNum && !curNum) { cur = candidate; return; }
+                } else {
+                    if (!candNum && curNum) { cur = candidate; return; }
+                }
+            };
+            auto scanRoot = [&](const char* r){
+                std::string abs = currentDevice + std::string(r);
+                std::vector<std::string> subs;
+                listSubdirs(abs, subs);
+                for (auto &sub : subs) {
+                    std::string subAbs = joinDirFile(abs, sub.c_str());
+                    if (!findEbootCaseInsensitive(subAbs).empty()) continue; // skip real games
+                    std::string base = stripCategoryPrefixes(sub, stripNumbers);
+                    if (base.empty()) continue;
+                    chooseDiskName(base, sub);
+                }
+            };
+            scanRoot("ISO/");
+            scanRoot("PSP/GAME/");
+            scanRoot("PSP/GAME/PSX/");
+            scanRoot("PSP/GAME/Utility/");
+            scanRoot("PSP/GAME150/");
+        }
+
         // 4) Re-key the categories map (and each GameItem.path), carrying "Uncategorized" through unchanged.
         std::map<std::string, std::vector<GameItem>> newCats;
         std::vector<std::pair<std::string, std::string>> oldToNew; // capture display-name rewrites
@@ -188,6 +228,10 @@ private:
             std::string base = stripCategoryPrefixes(oldCat, stripNumbers);
             if (isBlacklistedBaseNameFor(currentDevice, base)) continue;
             std::string want = formatCategoryNameFromBase(base, assigned[base]);
+            if (preferOnDiskNames) {
+                auto itDisk = diskNameByBase.find(base);
+                if (itDisk != diskNameByBase.end()) want = itDisk->second;
+            }
 
             if (strcasecmp(oldCat.c_str(), want.c_str()) != 0) {
                 // Category display name changed -> update each GameItem.path
@@ -453,12 +497,128 @@ private:
         });
     }
 
+    // Merge src -> dst, preferring existing entries in dst (src duplicates are deleted).
+    static bool mergeDirPreferDest(const std::string& srcDir, const std::string& dstDir){
+        if (!dirExists(srcDir) || !dirExists(dstDir)) return false;
+
+        SceUID d = kfeIoOpenDir(srcDir.c_str());
+        if (d < 0) return false;
+
+        bool ok = true;
+        SceIoDirent ent; memset(&ent, 0, sizeof(ent));
+        while (kfeIoReadDir(d, &ent) > 0) {
+            if (!strcmp(ent.d_name, ".") || !strcmp(ent.d_name, "..")) { memset(&ent,0,sizeof(ent)); continue; }
+
+            std::string s = joinDirFile(srcDir, ent.d_name);
+            std::string t = joinDirFile(dstDir, ent.d_name);
+
+            if (FIO_S_ISDIR(ent.d_stat.st_mode)) {
+                if (dirExists(t)) {
+                    if (!mergeDirPreferDest(s, t)) ok = false;
+                    int rr = sceIoRmdir(s.c_str());
+                    if (rr < 0) { ok = false; logf("cat merge: rmdir fail %s rc=%d", s.c_str(), rr); }
+                } else {
+                    int rr = sceIoRename(s.c_str(), t.c_str());
+                    if (rr < 0) { ok = false; logf("cat merge: rename dir fail %s -> %s rc=%d", s.c_str(), t.c_str(), rr); }
+                }
+            } else {
+                if (pathExists(t)) {
+                    logf("cat merge: conflict keep dst %s", t.c_str());
+                    int rr = sceIoRemove(s.c_str());
+                    if (rr < 0) { ok = false; logf("cat merge: remove src fail %s rc=%d", s.c_str(), rr); }
+                } else {
+                    int rr = sceIoRename(s.c_str(), t.c_str());
+                    if (rr < 0) { ok = false; logf("cat merge: rename file fail %s -> %s rc=%d", s.c_str(), t.c_str(), rr); }
+                }
+            }
+
+            memset(&ent, 0, sizeof(ent));
+            sceKernelDelayThread(0);
+        }
+        kfeIoCloseDir(d);
+
+        return ok;
+    }
+
+    static bool mergeCategoryFolders(const std::string& absRoot,
+                                     const std::string& from,
+                                     const std::string& to) {
+        std::string src = joinDirFile(absRoot, from.c_str());
+        std::string dst = joinDirFile(absRoot, to.c_str());
+        if (!dirExists(src) || !dirExists(dst)) return false;
+
+        logInit();
+        logf("cat merge: %s -> %s", src.c_str(), dst.c_str());
+        bool ok = mergeDirPreferDest(src, dst);
+        if (ok) updateHiddenAppPathsForFolderRename(absRoot, from, to);
+        int rr = sceIoRmdir(src.c_str());
+        if (rr < 0) { ok = false; logf("cat merge: source not empty %s rc=%d", src.c_str(), rr); }
+        logClose();
+
+        return ok;
+    }
+
+    static void normalizeCategoryFolderForBase(const std::string& absRoot,
+                                               const std::vector<std::string>& subs,
+                                               const std::string& base,
+                                               const std::string& want,
+                                               bool stripNumbers) {
+        std::vector<std::string> matches;
+        matches.reserve(subs.size());
+        for (const auto &sub : subs) {
+            if (strcasecmp(stripCategoryPrefixes(sub, stripNumbers).c_str(), base.c_str()) != 0) continue;
+            std::string subAbs = joinDirFile(absRoot, sub.c_str());
+            if (!findEbootCaseInsensitive(subAbs).empty()) continue; // skip real games
+            matches.push_back(sub);
+        }
+        if (matches.empty()) return;
+
+        auto isWant = [&](const std::string& s){ return !strcasecmp(s.c_str(), want.c_str()); };
+        bool haveWant = false;
+        for (const auto& m : matches) {
+            if (isWant(m)) { haveWant = true; break; }
+        }
+
+        std::string wantAbs = joinDirFile(absRoot, want.c_str());
+        if (!haveWant) {
+            if (dirExists(wantAbs)) {
+                haveWant = true;
+            } else {
+                std::string primary = matches[0];
+                renameIfExists(absRoot, primary, want);
+                if (dirExists(wantAbs)) haveWant = true;
+                else {
+                    logInit();
+                    logf("cat normalize: rename fail %s -> %s",
+                         joinDirFile(absRoot, primary.c_str()).c_str(), wantAbs.c_str());
+                    logClose();
+                }
+            }
+        }
+
+        if (haveWant) {
+            for (const auto& m : matches) {
+                if (isWant(m)) continue;
+                mergeCategoryFolders(absRoot, m, want);
+            }
+        }
+    }
+
     // Rename “from”→“to” if it exists and differs (ignores case-only changes)
     static void renameIfExists(const std::string& root, const std::string& from, const std::string& to){
         if (!strcasecmp(from.c_str(), to.c_str())) return;
         std::string a = joinDirFile(root, from.c_str());
         std::string b = joinDirFile(root, to.c_str());
-        if (dirExists(a)) sceIoRename(a.c_str(), b.c_str());
+        if (dirExists(a)) {
+            int rc = sceIoRename(a.c_str(), b.c_str());
+            if (rc >= 0) {
+                updateHiddenAppPathsForFolderRename(root, from, to);
+            } else {
+                logInit();
+                logf("renameIfExists FAIL: %s -> %s rc=%d", a.c_str(), b.c_str(), rc);
+                logClose();
+            }
+        }
     }
 
     // Enforce naming/numbering for category folders on a device, obeying rules:
@@ -470,7 +630,7 @@ private:
     // • Skip game folders (subdirs that contain an EBOOT.PBP) and ISO/VIDEO.
     static void enforceCategorySchemeForDevice(const std::string& dev, bool forceStripNumbers = false){
         const char* isoRoots[]  = {"ISO/"};                // drop ISO/PSP/ as a root
-        const char* gameRoots[] = {"PSP/GAME/","PSP/GAME150/"}; // drop PSX/ and Utility/ as roots
+        const char* gameRoots[] = {"PSP/GAME/","PSP/GAME/PSX/","PSP/GAME/Utility/","PSP/GAME150/"};
 
         // (absRoot, rootLabel)
         std::vector<std::pair<std::string,std::string>> roots;
@@ -551,7 +711,7 @@ private:
             }
         }
 
-        // 5) For each root, rename any present variant → desired formatted name
+        // 5) For each root, normalize any present variants → desired formatted name
         for (auto &rp : roots){
             const std::string& absRoot = rp.first;
             std::vector<std::string> subs;
@@ -560,20 +720,7 @@ private:
             for (const auto& base : baseList){
                 const int idx = assigned[base];
                 const std::string want = formatCategoryNameFromBase(base, idx);
-
-                // Find existing entry for this base on this root (any variant).
-                std::string found;
-                for (const auto &sub : subs){
-                    if (!strcasecmp(stripCategoryPrefixes(sub, stripNumbers).c_str(), base.c_str())) { found = sub; break; }
-                }
-                if (found.empty()) continue; // not present on this root
-                if (!strcasecmp(found.c_str(), want.c_str())) continue; // already correct
-
-                // Double-check: skip game folders (paranoia)
-                std::string subAbs = joinDirFile(absRoot, found.c_str());
-                if (!findEbootCaseInsensitive(subAbs).empty()) continue;
-
-                renameIfExists(absRoot, found, want);
+                normalizeCategoryFolderForBase(absRoot, subs, base, want, stripNumbers);
             }
         }
     }
@@ -629,6 +776,7 @@ private:
         if (row < 0 || row >= (int)entries.size()) return true;
         // Top row is Category Settings
         if (!strcasecmp(entries[row].d_name, kCatSettingsLabel)) return true;
+        if (!strcasecmp(entries[row].d_name, "__GCL_SETTINGS__")) return true;
         // Bottom row is Uncategorized (when present)
         if (!strcasecmp(entries[row].d_name, "Uncategorized"))     return true;
         return false;
@@ -779,14 +927,7 @@ private:
                 auto renameIn = [&](const char* r){
                     std::string abs = dev + std::string(r);
                     std::vector<std::string> subs; listSubdirs(abs, subs);
-                    for (auto& s : subs) {
-                        if (!strcasecmp(stripCategoryPrefixes(s).c_str(), base.c_str())) {
-                            // Skip real game folders (paranoia)
-                            std::string subAbs = joinDirFile(abs, s.c_str());
-                            if (!findEbootCaseInsensitive(subAbs).empty()) continue;
-                            renameIfExists(abs, s, want);
-                        }
-                    }
+                    normalizeCategoryFolderForBase(abs, subs, base, want, gclCfg.catsort);
                 };
                 for (const char* r : isoRoots)  renameIn(r);
                 for (const char* r : gameRoots) renameIn(r);
@@ -1353,9 +1494,11 @@ private:
         // EBOOT folder categories: ms0:/PSP/GAME/<cat>/..., ms0:/PSP/GAME150/<cat>/...
         const char* gameRoots[] = {
             "PSP/GAME/",
+            "PSP/GAME/PSX/",
+            "PSP/GAME/Utility/",
             "PSP/GAME150/"
-        };                                                    // drop PSX/ and Utility/ as roots
-        for (int i = 0; i < 2; ++i) {
+        };
+        for (int i = 0; i < 4; ++i) {
             if (replaceAfterRoot(gameRoots[i])) return;
         }
 
@@ -2651,7 +2794,7 @@ private:
         const bool opCategoryMode =
             (actionMode != AM_None && (opPhase == OP_SelectCategory || opPhase == OP_Confirm));
         const float ctrlHFull = 94.0f;
-        const float ctrlH = opCategoryMode ? 39.0f : (catSortMode ? (ctrlHFull - 17.0f) : ctrlHFull);
+        const float ctrlH = opCategoryMode ? 39.0f : (catSortMode ? (ctrlHFull - 17.0f - 19.0f) : (ctrlHFull - 19.0f));
         drawRect((int)ctrlX, (int)(ctrlY - 1.0f), (int)ctrlW, (int)(ctrlH + 1.0f), COLOR_BANNER);
 
         if (!opCategoryMode) {
@@ -2719,12 +2862,10 @@ private:
             drawKeyRowLeft(keyX, keyY, okIconTexture, "Select", true, keyTextCol, 18.0f);
             drawKeyRowLeft(keyX, keyY, selectIconTexture, "Rename", false, keyTextCol, 18.0f);
             drawKeyRowLeft(keyX, keyY, triangleIconTexture, "Category Ops.", true, keyTextCol, 18.0f);
-            drawKeyRowLeft(keyX, keyY, squareIconTexture, "(Un)Hide in XMB", true, keyTextCol, 18.0f);
             drawKeyRowLeft(keyX, keyY, circleIconTexture, "Back", true, keyTextCol, 18.0f);
         } else {
             drawKeyRowLeft(keyX, keyY, okIconTexture, "Pick Up/Drop", true, keyTextCol, 18.0f);
             drawKeyRowLeft(keyX, keyY, startIconTexture, "Save List", false, saveTextCol, 18.0f);
-            drawKeyRowLeft(keyX, keyY, squareIconTexture, "(Un)Hide in XMB", true, keyTextCol, 18.0f);
             drawKeyRowLeft(keyX, keyY, circleIconTexture, "Back", true, keyTextCol, 18.0f);
         }
 
@@ -2843,14 +2984,17 @@ private:
                     drawTextureScaled(catSettingsIcon, iconX, iconY, iconHCat, 0xFFFFFFFF);
                 }
             } else {
-                const bool isUncRow = (strcasecmp(name, "Uncategorized") == 0);
-                const bool isFiltered = (!isUncRow && isFilteredBaseName(stripCategoryPrefixes(name)));
-                Texture* folderIcon = (isFiltered && catFolderIconGray) ? catFolderIconGray : catFolderIcon;
+            const bool gclOn = (gclArkOn || gclProOn);
+            const bool isUncRow = (strcasecmp(name, "Uncategorized") == 0);
+            const bool isFiltered = gclOn && (!isUncRow && isFilteredBaseName(stripCategoryPrefixes(name)));
+            Texture* folderIcon = (isFiltered && catFolderIconGray) ? catFolderIconGray : catFolderIcon;
                 if (folderIcon && folderIcon->data && folderIcon->height > 0) {
                     float iconW = (float)folderIcon->width * (iconHCat / (float)folderIcon->height);
                     float iconX = textLeftX - iconGap - iconW + 5.0f;
                     float iconY = centerY - (iconHCat * 0.5f) - 4.0f;
-                    drawTextureScaled(folderIcon, iconX, iconY, iconHCat, dimmed ? 0x66FFFFFF : 0xFFFFFFFF);
+                    unsigned iconCol = dimmed ? 0x66FFFFFF : 0xFFFFFFFF;
+                    if (isFiltered) iconCol = (iconCol & 0x00FFFFFF) | 0xB3000000; // 70% opacity
+                    drawTextureScaled(folderIcon, iconX, iconY, iconHCat, iconCol);
                     // Overlay C
                     const float cX = (float)(int)(iconX + (iconW * 0.25f) - 4.0f + 0.5f);
                     const float cY = (float)(int)(iconY + 13.0f + 0.5f);
@@ -3215,6 +3359,11 @@ private:
             bool sel  = (i == selectedIndex);
             bool isDir= FIO_S_ISDIR(entries[i].d_stat.st_mode);
             const bool picked = moving && sel;
+            const GameItem* giPtr = (view == View_AllFlat || view == View_CategoryContents) &&
+                                    i >= 0 && i < (int)workingList.size()
+                                    ? &workingList[i] : nullptr;
+            const bool gclOn = (gclArkOn || gclProOn);
+            const bool isHidden = gclOn && giPtr ? isGameFilteredPath(giPtr->path) : false;
 
             unsigned baseCol = isDir ? COLOR_CYAN : COLOR_WHITE;
             unsigned textCol = sel ? COLOR_BLACK : baseCol;
@@ -3270,10 +3419,12 @@ private:
             const float baseline = centerY + (lineH * 0.25f) - 2.0f;
 
             Texture* labelIcon = nullptr;
-            if (!strcmp(labelText, "[PS1]")) labelIcon = ps1IconTexture;
-            else if (!strcmp(labelText, "[HB]")) labelIcon = homebrewIconTexture;
-            else if (!strcmp(labelText, "[UPD]")) labelIcon = updateIconTexture;
-            else if (!strcmp(labelText, "[FILE]")) labelIcon = isoIconTexture;
+            if (!strcmp(labelText, "[PS1]")) labelIcon = isHidden ? ps1IconTextureGray : ps1IconTexture;
+            else if (!strcmp(labelText, "[HB]")) labelIcon = isHidden ? homebrewIconTextureGray : homebrewIconTexture;
+            else if (!strcmp(labelText, "[UPD]")) labelIcon = isHidden ? updateIconTextureGray : updateIconTexture;
+            else if (!strcmp(labelText, "[FILE]")) labelIcon = isHidden ? isoIconTextureGray : isoIconTexture;
+            unsigned iconCol = labelColor;
+            if (isHidden) iconCol = (iconCol & 0x00FFFFFF) | 0xB3000000; // 70% opacity
 
             if (labelIcon && labelIcon->data && labelIcon->height > 0) {
                 float iconW = (float)labelIcon->width * (labelIconH / (float)labelIcon->height);
@@ -3282,7 +3433,7 @@ private:
                 // Snap to whole pixels to reduce shimmering/jagged edges.
                 iconX = (float)((int)(iconX + 0.5f));
                 iconY = (float)((int)(iconY + 0.5f));
-                drawTextureScaled(labelIcon, iconX, iconY, labelIconH, labelColor);
+                drawTextureScaled(labelIcon, iconX, iconY, labelIconH, iconCol);
             } else if (strcmp(labelText, "[UPD]") != 0) {
                 const float labelTextW = measureTextWidth(scale, labelText);
                 const float labelTextX = iconSlotX + (iconSlotW - labelTextW) * 0.5f;

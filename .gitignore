@@ -45,6 +45,7 @@ Thumbs.db
 *.hex
 *.PBP
 *.prx
+!/resources/category_lite.prx
 
 # Debug files
 *.dSYM/

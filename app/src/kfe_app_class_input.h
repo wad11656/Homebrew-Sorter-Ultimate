@@ -386,14 +386,6 @@
 
         // □ toggle checkmark on current item
         if (pressed & PSP_CTRL_SQUARE) {
-            if (!showRoots && view == View_Categories) {
-                if (selectedIndex < 0 || selectedIndex >= (int)entries.size()) return;
-                const char* nm = entries[selectedIndex].d_name;
-                if (!strcasecmp(nm, kCatSettingsLabel) || !strcasecmp(nm, "__GCL_SETTINGS__")) return;
-                if (!strcasecmp(nm, "Uncategorized")) return;
-                toggleGclFilterForCategory(nm);
-                return;
-            }
             if (!showRoots && (view == View_AllFlat || view == View_CategoryContents) &&
                 selectedIndex >= 0 && selectedIndex < (int)workingList.size()) {
                 const std::string& p = workingList[selectedIndex].path;
@@ -483,25 +475,60 @@
                     const bool canWithinDevice = hasCategories;
                     const bool canMoveCopy     = canCrossDevices || canWithinDevice;
 
+                    std::vector<std::string> hidePaths;
+                    if (!checked.empty()) {
+                        for (const auto& p : checked) hidePaths.push_back(p);
+                    } else if (selectedIndex >= 0 && selectedIndex < (int)workingList.size()) {
+                        hidePaths.push_back(workingList[selectedIndex].path);
+                    }
+                    int hiddenCount = 0, unhiddenCount = 0;
+                    for (const auto& p : hidePaths) {
+                        if (isGameFilteredPath(p)) hiddenCount++;
+                        else unhiddenCount++;
+                    }
+                    const bool gclOn = (gclArkOn || gclProOn);
+                    const bool hideInXmb = (unhiddenCount >= hiddenCount);
+                    bool hasIsoLike = false;
+                    for (const auto& p : hidePaths) {
+                        if (isIsoLike(p)) { hasIsoLike = true; break; }
+                    }
+                    const bool hideDisabled = hidePaths.empty() || hasIsoLike || !gclOn;
+                    const char* hideLabel = hideInXmb ? "Hide in XMB" : "Unhide in XMB";
+
                     std::vector<FileOpsItem> items = {
                         { "Move",   !canMoveCopy },
                         { "Copy",   !canMoveCopy },
+                        { hideLabel, hideDisabled },
                         { "Delete", false }
                     };
                     menuContext = MC_ContentOps;
-                    fileMenu = new FileOpsMenu("File Operations", items, SCREEN_WIDTH, SCREEN_HEIGHT, 250, 140);
+                    fileMenu = new FileOpsMenu("App Operations", items, SCREEN_WIDTH, SCREEN_HEIGHT, 250, 160);
 
                     // NEW: Prime & debounce
                     SceCtrlData now{}; sceCtrlReadBufferPositive(&now, 1);
                     fileMenu->primeButtons(now.Buttons);
                     inputWaitRelease = true;
                 } else if (view == View_Categories) {
+                    const bool gclOn = (gclArkOn || gclProOn);
+                    bool canHide = false;
+                    bool canDelete = false;
+                    bool catHidden = false;
+                    if (selectedIndex >= 0 && selectedIndex < (int)entries.size() &&
+                        !isCategoryRowLocked(selectedIndex)) {
+                        const char* nm = entries[selectedIndex].d_name;
+                        std::string base = stripCategoryPrefixes(nm);
+                        catHidden = isFilteredBaseName(base);
+                        canHide = gclOn;
+                        canDelete = true;
+                    }
+                    const char* catHideLabel = catHidden ? "Unhide in XMB" : "Hide in XMB";
                     std::vector<FileOpsItem> items = {
                         { "New",    false },
-                        { "Delete", false }
+                        { catHideLabel, !canHide },
+                        { "Delete", !canDelete }
                     };
                     menuContext = MC_CategoryOps;
-                    fileMenu = new FileOpsMenu("Category Operations", items, SCREEN_WIDTH, SCREEN_HEIGHT, 250, 120);
+                    fileMenu = new FileOpsMenu("Category Operations", items, SCREEN_WIDTH, SCREEN_HEIGHT, 250, 140);
 
                     // NEW: Prime & debounce
                     SceCtrlData now{}; sceCtrlReadBufferPositive(&now, 1);
@@ -925,6 +952,7 @@
 
                             std::string delCat = opDestCategory;
                             deleteCategoryDirs(currentDevice, delCat);
+                            removeHiddenFiltersForDeletedCategory(delCat);
 
                             // Patch cache & refresh UI without a rescan
                             cachePatchDeleteCategory(delCat);
@@ -1141,10 +1169,35 @@
                     delete fileMenu; fileMenu = nullptr; inputWaitRelease = true;
 
                     if (menuContext == MC_ContentOps) {
-                        // 0=Move,1=Copy,2=Delete
+                        // 0=Move,1=Copy,2=Hide/Unhide,3=Delete
                         if (choice == 0)      startAction(AM_Move);
                         else if (choice == 1) startAction(AM_Copy);
                         else if (choice == 2) {
+                            std::vector<std::string> hidePaths;
+                            if (!checked.empty()) {
+                                for (const auto& p : checked) hidePaths.push_back(p);
+                            } else if (selectedIndex >= 0 && selectedIndex < (int)workingList.size()) {
+                                hidePaths.push_back(workingList[selectedIndex].path);
+                            }
+
+                            if (hidePaths.empty()) {
+                                msgBox = new MessageBox("Nothing to hide/unhide.", okIconTexture, SCREEN_WIDTH, SCREEN_HEIGHT, 1.0f, 20, "OK", 16, 18, 8, 14);
+                            } else {
+                                int hiddenCount = 0, unhiddenCount = 0;
+                                for (const auto& p : hidePaths) {
+                                    if (isGameFilteredPath(p)) hiddenCount++;
+                                    else unhiddenCount++;
+                                }
+                                const bool hideInXmb = (unhiddenCount >= hiddenCount);
+                                setGameHiddenForPaths(hidePaths, hideInXmb);
+                                const int count = (int)hidePaths.size();
+                                const char* verb = hideInXmb ? "Hidden" : "Unhidden";
+                                char msg[96];
+                                snprintf(msg, sizeof(msg), "%s %d %s.", verb, count, (count == 1) ? "app" : "apps");
+                                drawMessage(msg, hideInXmb ? COLOR_CYAN : COLOR_GREEN);
+                                sceKernelDelayThread(600*1000);
+                            }
+                        } else if (choice == 3) {
                             // (existing content delete flow)
                             std::vector<std::string> delPaths;
                             std::vector<GameItem::Kind> delKinds;
@@ -1187,7 +1240,7 @@
                             }
                         }
                     } else {
-// MC_CategoryOps: 0=New, 1=Delete
+// MC_CategoryOps: 0=New, 1=Hide/Unhide, 2=Delete
                         if (choice == 0) {
                             // New category: OSK → create across roots
                             std::string typed;
@@ -1269,6 +1322,21 @@
                             }
 
                         } else if (choice == 1) {
+                            if (selectedIndex < 0 || selectedIndex >= (int)entries.size() ||
+                                isCategoryRowLocked(selectedIndex)) {
+                                msgBox = new MessageBox("Pick a category folder.", okIconTexture, SCREEN_WIDTH, SCREEN_HEIGHT, 1.0f, 20, "OK", 16, 18, 8, 14);
+                            } else {
+                                const char* nm = entries[selectedIndex].d_name;
+                                const std::string base = stripCategoryPrefixes(nm);
+                                const bool hideInXmb = !isFilteredBaseName(base);
+                                setCategoryHidden(nm, hideInXmb);
+                                const char* verb = hideInXmb ? "Hidden" : "Unhidden";
+                                char msg[96];
+                                snprintf(msg, sizeof(msg), "%s category in XMB.", verb);
+                                drawMessage(msg, hideInXmb ? COLOR_CYAN : COLOR_GREEN);
+                                sceKernelDelayThread(600*1000);
+                            }
+                        } else if (choice == 2) {
                             // Delete category: count games first and confirm
                             if (selectedIndex < 0 || selectedIndex >= (int)entries.size()) {
                                 msgBox = new MessageBox("No category selected.", okIconTexture, SCREEN_WIDTH, SCREEN_HEIGHT, 1.0f, 20, "OK", 16, 18, 8, 14);

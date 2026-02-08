@@ -3,10 +3,11 @@
 KernelFileExplorer::GclConfig KernelFileExplorer::gclCfg = {0,0,0,0,0};
 bool KernelFileExplorer::gclCfgLoaded = false;
 std::unordered_map<std::string, std::vector<std::string>> KernelFileExplorer::gclBlacklistMap;
-std::unordered_map<std::string, bool> KernelFileExplorer::gclBlacklistLoadedMap;
 std::unordered_map<std::string, std::vector<std::string>> KernelFileExplorer::gclPendingUnblacklistMap;
-std::unordered_map<std::string, std::vector<std::string>> KernelFileExplorer::gclFilterMap;
-std::unordered_map<std::string, bool> KernelFileExplorer::gclFilterLoadedMap;
+std::unordered_map<std::string, std::vector<std::string>> KernelFileExplorer::gclCategoryFilterMap;
+std::unordered_map<std::string, std::vector<std::string>> KernelFileExplorer::gclGameFilterMap;
+bool KernelFileExplorer::gclFiltersLoaded = false;
+bool KernelFileExplorer::gclFiltersScrubbed = false;
 KernelFileExplorer::GclSettingKey KernelFileExplorer::gclPending = KernelFileExplorer::GCL_SK_None;
 bool KernelFileExplorer::rootPickGcl = false;   // ← add this definition
 bool KernelFileExplorer::rootKeepGclSelection = false;
@@ -82,6 +83,10 @@ int RunKernelFileExplorer(const char* execPath) {
     std::string homebrewPath = baseDir + "resources/homebrew.png";
     std::string isoPath    = baseDir + "resources/iso.png";
     std::string updatePath = baseDir + "resources/update.png";
+    std::string ps1GrayPath    = baseDir + "resources/ps1_grayscale.png";
+    std::string homebrewGrayPath = baseDir + "resources/homebrew_grayscale.png";
+    std::string isoGrayPath    = baseDir + "resources/iso_grayscale.png";
+    std::string updateGrayPath = baseDir + "resources/update_grayscale.png";
     std::string warningPath = baseDir + "resources/warning.png";
     std::string updownPath = baseDir + "resources/updown.png";
     std::string animRoot   = baseDir + "resources/animations";
@@ -115,6 +120,10 @@ int RunKernelFileExplorer(const char* execPath) {
     homebrewIconTexture = texLoadPNG(homebrewPath.c_str()); logTex("homebrew", homebrewPath, homebrewIconTexture);
     isoIconTexture    = texLoadPNG(isoPath.c_str()); logTex("iso", isoPath, isoIconTexture);
     updateIconTexture = texLoadPNG(updatePath.c_str()); logTex("update", updatePath, updateIconTexture);
+    ps1IconTextureGray    = texLoadPNG(ps1GrayPath.c_str()); logTex("ps1_gray", ps1GrayPath, ps1IconTextureGray);
+    homebrewIconTextureGray = texLoadPNG(homebrewGrayPath.c_str()); logTex("homebrew_gray", homebrewGrayPath, homebrewIconTextureGray);
+    isoIconTextureGray    = texLoadPNG(isoGrayPath.c_str()); logTex("iso_gray", isoGrayPath, isoIconTextureGray);
+    updateIconTextureGray = texLoadPNG(updateGrayPath.c_str()); logTex("update_gray", updateGrayPath, updateIconTextureGray);
     warningIconTexture = texLoadPNG(warningPath.c_str()); logTex("warning", warningPath, warningIconTexture);
     updownIconTexture = texLoadPNG(updownPath.c_str()); logTex("updown", updownPath, updownIconTexture);
 

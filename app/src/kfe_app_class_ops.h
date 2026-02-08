@@ -411,6 +411,8 @@
         renderOneFrame();
 
         int okCount = 0, failCount = 0;
+        std::vector<std::pair<std::string,std::string>> movedPairs;
+        movedPairs.reserve(opSrcPaths.size());
         for (size_t i = 0; i < opSrcPaths.size(); ++i) {
             const std::string& src = opSrcPaths[i];
             const GameItem::Kind k = opSrcKinds[i];
@@ -434,7 +436,7 @@
                 msgBox->updateProgress(1, 1);
                 renderOneFrame();
             }
-            if (ok) { okCount++; checked.erase(src); }
+            if (ok) { okCount++; checked.erase(src); movedPairs.emplace_back(src, dst); }
             else    { failCount++; }
             sceKernelDelayThread(0);
         }
@@ -445,6 +447,11 @@
         logClose();
 
         // didCross already computed inside the loop
+
+        // Update gclite_filter for moved items only (never for copies)
+        for (const auto& mv : movedPairs) {
+            updateGameFilterOnItemRename(mv.first, mv.second);
+        }
 
         // --- Patch caches and jump instantly to destination ---
 
@@ -512,7 +519,7 @@
     // Input handling
     // -----------------------------------------------------------
 public:
-    KernelFileExplorer(){ detectRoots(); buildRootRows(); }
+    KernelFileExplorer(){ detectRoots(); scrubHiddenAppFiltersOnStartup(); buildRootRows(); }
     ~KernelFileExplorer(){
         setMsLedSuppressed(false);
         if (font) intraFontUnload(font);
@@ -542,6 +549,11 @@ public:
         if (ps1IconTexture) { texFree(ps1IconTexture); ps1IconTexture = nullptr; }
         if (homebrewIconTexture) { texFree(homebrewIconTexture); homebrewIconTexture = nullptr; }
         if (isoIconTexture) { texFree(isoIconTexture); isoIconTexture = nullptr; }
+        if (updateIconTexture) { texFree(updateIconTexture); updateIconTexture = nullptr; }
+        if (ps1IconTextureGray) { texFree(ps1IconTextureGray); ps1IconTextureGray = nullptr; }
+        if (homebrewIconTextureGray) { texFree(homebrewIconTextureGray); homebrewIconTextureGray = nullptr; }
+        if (isoIconTextureGray) { texFree(isoIconTextureGray); isoIconTextureGray = nullptr; }
+        if (updateIconTextureGray) { texFree(updateIconTextureGray); updateIconTextureGray = nullptr; }
         if (warningIconTexture) { texFree(warningIconTexture); warningIconTexture = nullptr; }
         if (updownIconTexture) { texFree(updownIconTexture); updownIconTexture = nullptr; }
         if (!gPopAnimFrames.empty()) { freeAnimationFrames(gPopAnimFrames); gPopAnimMinDelayUs = 0; }

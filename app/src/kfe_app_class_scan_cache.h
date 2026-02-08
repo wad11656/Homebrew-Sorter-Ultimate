@@ -324,7 +324,7 @@
         };
 
         const char* isoRoots[]  = {"ISO/"};                // drop ISO/PSP/ as a root
-        const char* gameRoots[] = {"PSP/GAME/","PSP/GAME150/"}; // drop PSX/ and Utility/ as roots
+        const char* gameRoots[] = {"PSP/GAME/","PSP/GAME/PSX/","PSP/GAME/Utility/","PSP/GAME150/"};
 
         auto addGameCategory = [&](const std::string& rootLabel, const std::string& absRoot, const std::string& sub){
             if (isBlacklistedCategoryFolder(rootLabel, sub, absRoot)) return;
@@ -498,7 +498,7 @@
         };
 
         const char* isoRoots[]  = {"ISO/"};                // drop ISO/PSP/ as a root
-        const char* gameRoots[] = {"PSP/GAME/","PSP/GAME150/"}; // drop PSX/ and Utility/ as roots
+        const char* gameRoots[] = {"PSP/GAME/","PSP/GAME/PSX/","PSP/GAME/Utility/","PSP/GAME150/"};
         for (auto r : isoRoots)  refreshIso(r,   dev + std::string(r));
         for (auto r : gameRoots) refreshGame(r, dev + std::string(r));
 
@@ -920,13 +920,6 @@
         return key;
     }
 
-    static std::string gclBlacklistPathFor(const std::string& root) {
-        std::string key = root.empty() ? defaultBlacklistRoot() : root;
-        std::string suffix = "ms0";
-        if (!key.empty() && toLowerC(key[0]) == 'e') suffix = "ef0";
-        return key + "seplugins/gclite_blacklist_" + suffix + ".txt";
-    }
-
     static std::string trimSpaces(const std::string& in) {
         size_t a = 0, b = in.size();
         while (a < b && (in[a] == ' ' || in[a] == '\t')) ++a;
@@ -942,114 +935,468 @@
         return "ms0:/";
     }
 
-    static std::string gclFilterPathFor(const std::string& root) {
-        return root + "seplugins/gclite_filter.txt";
+    static std::string gclFiltersRoot() {
+        if (isPspGo() && DeviceExists("ef0:/")) return "ef0:/";
+        if (DeviceExists("ms0:/")) return "ms0:/";
+        if (DeviceExists("ef0:/")) return "ef0:/";
+        return "ms0:/";
     }
 
-    static void gclLoadFilterFor(const std::string& dev) {
-        std::string root = gclFilterRootKeyFor(dev);
-        if (root.empty()) return;
-        if (gclFilterLoadedMap[root]) return;
+    static std::string gclFiltersPath() {
+        return gclFiltersRoot() + "seplugins/gclite_filter.txt";
+    }
 
-        gclFilterLoadedMap[root] = true;
-        std::vector<std::string> items;
+    void scrubHiddenAppFiltersOnStartup() {
+        if (gclFiltersScrubbed) return;
+        gclFiltersScrubbed = true;
 
-        std::string txt;
-        if (gclReadWholeText(gclFilterPathFor(root), txt)) {
-            size_t pos = 0, start = 0;
-            while (pos <= txt.size()) {
-                if (pos == txt.size() || txt[pos] == '\n' || txt[pos] == '\r') {
-                    std::string line = trimSpaces(txt.substr(start, pos - start));
-                    line = stripCategoryPrefixes(line);
-                    if (!line.empty()) {
-                        bool dup = false;
-                        for (const auto& w : items) {
-                            if (!strcasecmp(w.c_str(), line.c_str())) { dup = true; break; }
-                        }
-                        if (!dup) items.push_back(line);
-                    }
-                    if (pos + 1 < txt.size() && txt[pos] == '\r' && txt[pos+1] == '\n') ++pos;
-                    start = pos + 1;
-                }
-                ++pos;
+        gclLoadUnifiedFilters();
+        bool changed = false;
+
+        auto scrubForRoot = [&](const std::string& dev){
+            if (dev.empty() || !DeviceExists(dev.c_str())) return;
+            const std::string root = gclFilterRootKeyFor(dev);
+            auto& fl = gclGameFilterMap[root];
+            for (auto it = fl.begin(); it != fl.end(); ) {
+                if (it->empty()) { it = fl.erase(it); changed = true; continue; }
+                std::string full = dev.substr(0, 4) + *it; // "ms0:" + "/path"
+                if (!pathExists(full)) { it = fl.erase(it); changed = true; }
+                else ++it;
+            }
+        };
+
+        scrubForRoot("ms0:/");
+        scrubForRoot("ef0:/");
+
+        if (changed) gclSaveUnifiedFilters();
+    }
+
+    static std::string normalizeGameFilterPath(const std::string& raw) {
+        std::string t = trimSpaces(raw);
+        if (t.empty()) return {};
+        for (char& c : t) if (c == '\\') c = '/';
+        if (t.size() >= 4 && t[3] == ':') t = t.substr(4);
+        if (!t.empty() && t[0] != '/') t = std::string("/") + t;
+        for (char& c : t) c = toLowerC(c);
+        return t;
+    }
+
+    static bool updateGameFilterEntryExact(std::vector<std::string>& list,
+                                           const std::string& oldNorm,
+                                           const std::string& newNorm) {
+        if (oldNorm.empty() || newNorm.empty() || oldNorm == newNorm) return false;
+        bool changed = false;
+        for (auto& w : list) {
+            if (w == oldNorm) {
+                w = newNorm;
+                changed = true;
             }
         }
-        gclFilterMap[root] = std::move(items);
+        if (changed) {
+            std::vector<std::string> dedup;
+            dedup.reserve(list.size());
+            for (const auto& w : list) {
+                bool dup = false;
+                for (const auto& d : dedup) { if (d == w) { dup = true; break; } }
+                if (!dup) dedup.push_back(w);
+            }
+            list.swap(dedup);
+        }
+        return changed;
     }
 
-    static bool gclSaveFilterFor(const std::string& dev,
-                                 const std::unordered_map<std::string, std::string>& baseToDisplay) {
-        std::string root = gclFilterRootKeyFor(dev);
-        if (root.empty()) return false;
-        gclFilterLoadedMap[root] = true;
-        std::vector<std::string>& fl = gclFilterMap[root];
+    static bool updateGameFilterEntryPrefix(std::vector<std::string>& list,
+                                            const std::string& oldPrefix,
+                                            const std::string& newPrefix) {
+        if (oldPrefix.empty() || newPrefix.empty() || oldPrefix == newPrefix) return false;
+        bool changed = false;
+        for (auto& w : list) {
+            if (w.size() < oldPrefix.size()) continue;
+            if (strncmp(w.c_str(), oldPrefix.c_str(), oldPrefix.size()) != 0) continue;
+            if (w.size() > oldPrefix.size() && w[oldPrefix.size()] != '/') continue;
+            w = newPrefix + w.substr(oldPrefix.size());
+            changed = true;
+        }
+        if (changed) {
+            std::vector<std::string> dedup;
+            dedup.reserve(list.size());
+            for (const auto& w : list) {
+                bool dup = false;
+                for (const auto& d : dedup) { if (d == w) { dup = true; break; } }
+                if (!dup) dedup.push_back(w);
+            }
+            list.swap(dedup);
+        }
+        return changed;
+    }
 
+    static bool removeGameFilterEntryExact(std::vector<std::string>& list,
+                                           const std::string& key) {
+        if (key.empty()) return false;
+        bool changed = false;
+        for (auto it = list.begin(); it != list.end(); ) {
+            if (*it == key) { it = list.erase(it); changed = true; }
+            else ++it;
+        }
+        return changed;
+    }
+
+    static bool removeGameFilterEntriesByPrefix(std::vector<std::string>& list,
+                                                const std::string& prefix) {
+        if (prefix.empty()) return false;
+        bool changed = false;
+        for (auto it = list.begin(); it != list.end(); ) {
+            if (it->size() < prefix.size()) { ++it; continue; }
+            if (strncmp(it->c_str(), prefix.c_str(), prefix.size()) != 0) { ++it; continue; }
+            if (it->size() > prefix.size() && (*it)[prefix.size()] != '/') { ++it; continue; }
+            it = list.erase(it);
+            changed = true;
+        }
+        return changed;
+    }
+
+    static bool updateListEntryCaseInsensitive(std::vector<std::string>& list,
+                                               const std::string& oldValue,
+                                               const std::string& newValue) {
+        if (oldValue.empty() || newValue.empty()) return false;
+        if (!strcasecmp(oldValue.c_str(), newValue.c_str())) return false;
+        bool had = false;
+        for (auto it = list.begin(); it != list.end(); ++it) {
+            if (!strcasecmp(it->c_str(), oldValue.c_str())) {
+                list.erase(it);
+                had = true;
+                break;
+            }
+        }
+        if (!had) return false;
+        for (const auto& w : list) {
+            if (!strcasecmp(w.c_str(), newValue.c_str())) return true;
+        }
+        list.push_back(newValue);
+        return true;
+    }
+
+    static bool removeListEntryCaseInsensitive(std::vector<std::string>& list,
+                                               const std::string& value) {
+        if (value.empty()) return false;
+        bool changed = false;
+        for (auto it = list.begin(); it != list.end(); ) {
+            if (!strcasecmp(it->c_str(), value.c_str())) { it = list.erase(it); changed = true; }
+            else ++it;
+        }
+        return changed;
+    }
+
+    static bool updateHiddenAppPathsForFolderRename(const std::string& absRoot,
+                                                    const std::string& fromName,
+                                                    const std::string& toName) {
+        if (fromName.empty() || toName.empty()) return false;
+        if (!strcasecmp(fromName.c_str(), toName.c_str())) return false;
+        const std::string devRoot = rootPrefix(absRoot);
+        if (devRoot.empty()) return false;
+
+        gclLoadUnifiedFilters();
+        const std::string filterRoot = gclFilterRootKeyFor(devRoot);
+        auto& fl = gclGameFilterMap[filterRoot];
+
+        std::string oldPrefix = normalizeGameFilterPath(joinDirFile(absRoot, fromName.c_str()));
+        std::string newPrefix = normalizeGameFilterPath(joinDirFile(absRoot, toName.c_str()));
+        if (oldPrefix.empty() || newPrefix.empty()) return false;
+
+        bool changed = updateGameFilterEntryPrefix(fl, oldPrefix, newPrefix);
+        if (changed) gclSaveUnifiedFilters();
+        return changed;
+    }
+
+    bool updateGameFilterOnItemRename(const std::string& oldPath, const std::string& newPath) {
+        std::string oldNorm = normalizeGameFilterPath(oldPath);
+        std::string newNorm = normalizeGameFilterPath(newPath);
+        if (oldNorm.empty() || newNorm.empty()) return false;
+        if (oldNorm == newNorm) return false;
+
+        const std::string oldRoot = rootPrefix(oldPath);
+        const std::string newRoot = rootPrefix(newPath);
+        if (oldRoot.empty()) return false;
+
+        gclLoadUnifiedFilters();
+        const std::string oldFilterRoot = gclFilterRootKeyFor(oldRoot);
+        auto& oldList = gclGameFilterMap[oldFilterRoot];
+
+        bool changed = false;
+        if (newRoot.empty() || !strcasecmp(oldRoot.c_str(), newRoot.c_str())) {
+            changed = updateGameFilterEntryExact(oldList, oldNorm, newNorm);
+        } else {
+            bool found = false;
+            for (auto it = oldList.begin(); it != oldList.end(); ++it) {
+                if (*it == oldNorm) { oldList.erase(it); found = true; break; }
+            }
+            if (found) {
+                const std::string newFilterRoot = gclFilterRootKeyFor(newRoot);
+                auto& newList = gclGameFilterMap[newFilterRoot];
+                bool dup = false;
+                for (const auto& w : newList) { if (w == newNorm) { dup = true; break; } }
+                if (!dup) newList.push_back(newNorm);
+                changed = true;
+            }
+        }
+        if (changed) gclSaveUnifiedFilters();
+        return changed;
+    }
+
+    void removeHiddenAppFiltersForPaths(const std::vector<std::string>& paths) {
+        if (paths.empty()) return;
+        gclLoadUnifiedFilters();
+        bool changed = false;
+        for (const auto& p : paths) {
+            std::string key = normalizeGameFilterPath(p);
+            if (key.empty()) continue;
+            std::string dev = rootPrefix(p);
+            if (dev.empty()) dev = currentDevice;
+            const std::string root = gclFilterRootKeyFor(dev);
+            changed |= removeGameFilterEntryExact(gclGameFilterMap[root], key);
+        }
+        if (changed) gclSaveUnifiedFilters();
+    }
+
+    void removeHiddenFiltersForDeletedCategory(const std::string& displayName) {
+        if (displayName.empty()) return;
+        std::string base = stripCategoryPrefixes(displayName);
+        if (base.empty()) return;
+        gclLoadUnifiedFilters();
+
+        const std::string root = gclFilterRootKeyFor(currentDevice);
+        bool changed = false;
+
+        changed |= removeListEntryCaseInsensitive(gclCategoryFilterMap[root], base);
+
+        const char* roots[] = {"ISO/","PSP/GAME/","PSP/GAME/PSX/","PSP/GAME/Utility/","PSP/GAME150/"};
+        for (auto r : roots) {
+            std::string abs = currentDevice + std::string(r);
+            std::string prefix = normalizeGameFilterPath(joinDirFile(abs, displayName.c_str()));
+            if (!prefix.empty()) {
+                changed |= removeGameFilterEntriesByPrefix(gclGameFilterMap[root], prefix);
+            }
+        }
+
+        if (changed) gclSaveUnifiedFilters();
+    }
+
+    static void gclLoadUnifiedFilters() {
+        if (gclFiltersLoaded) return;
+        gclFiltersLoaded = true;
+
+        gclBlacklistMap["ms0:/"].clear();
+        gclBlacklistMap["ef0:/"].clear();
+        gclCategoryFilterMap["ms0:/"].clear();
+        gclCategoryFilterMap["ef0:/"].clear();
+        gclGameFilterMap["ms0:/"].clear();
+        gclGameFilterMap["ef0:/"].clear();
+
+        std::string txt;
+        if (!gclReadWholeText(gclFiltersPath(), txt)) return;
+
+        enum Section { SEC_None, SEC_Blacklist, SEC_HiddenCats, SEC_HiddenApps };
+        Section sec = SEC_None;
+
+        auto parseDeviceToken = [&](std::string tok, std::string& outRoot)->bool {
+            tok = trimSpaces(tok);
+            if (tok.size() >= 4 && tok[3] == ':') tok = tok.substr(0, 3);
+            for (char& c : tok) c = toLowerC(c);
+            if (tok == "ms0") { outRoot = "ms0:/"; return true; }
+            if (tok == "ef0") { outRoot = "ef0:/"; return true; }
+            return false;
+        };
+
+        auto addUniqueCaseInsensitive = [&](std::vector<std::string>& list, const std::string& v){
+            for (const auto& w : list) {
+                if (!strcasecmp(w.c_str(), v.c_str())) return;
+            }
+            list.push_back(v);
+        };
+
+        auto addUniqueExact = [&](std::vector<std::string>& list, const std::string& v){
+            for (const auto& w : list) {
+                if (w == v) return;
+            }
+            list.push_back(v);
+        };
+
+        size_t pos = 0, start = 0;
+        while (pos <= txt.size()) {
+            if (pos == txt.size() || txt[pos] == '\n' || txt[pos] == '\r') {
+                std::string raw = trimSpaces(txt.substr(start, pos - start));
+                if (!raw.empty()) {
+                    std::string low = raw;
+                    for (char& c : low) c = toLowerC(c);
+                    if (low.rfind("===", 0) == 0 && low.size() >= 6 && low.find("===") != std::string::npos) {
+                        if (low == "===categories rename blacklist===") sec = SEC_Blacklist;
+                        else if (low == "===hidden categories===") sec = SEC_HiddenCats;
+                        else if (low == "===hidden apps===") sec = SEC_HiddenApps;
+                        else sec = SEC_None;
+                    } else if (sec == SEC_Blacklist || sec == SEC_HiddenCats) {
+                        size_t comma = raw.find(',');
+                        bool parsed = false;
+                        if (comma != std::string::npos) {
+                            std::string devTok = raw.substr(0, comma);
+                            std::string val = trimSpaces(raw.substr(comma + 1));
+                            std::string root;
+                            if (parseDeviceToken(devTok, root) && !val.empty()) {
+                                parsed = true;
+                                if (sec == SEC_Blacklist) {
+                                    val = normalizeBlacklistInput(val);
+                                    if (!val.empty()) addUniqueCaseInsensitive(gclBlacklistMap[root], val);
+                                } else {
+                                    val = stripCategoryPrefixes(val);
+                                    if (!val.empty()) addUniqueCaseInsensitive(gclCategoryFilterMap[root], val);
+                                }
+                            }
+                        } else if (raw.size() >= 4 && (raw[3] == ':' || raw[3] == ' ' || raw[3] == '\t')) {
+                            std::string devTok = raw.substr(0, 3);
+                            std::string val = trimSpaces(raw.substr(4));
+                            std::string root;
+                            if (parseDeviceToken(devTok, root) && !val.empty()) {
+                                parsed = true;
+                                if (sec == SEC_Blacklist) {
+                                    val = normalizeBlacklistInput(val);
+                                    if (!val.empty()) addUniqueCaseInsensitive(gclBlacklistMap[root], val);
+                                } else {
+                                    val = stripCategoryPrefixes(val);
+                                    if (!val.empty()) addUniqueCaseInsensitive(gclCategoryFilterMap[root], val);
+                                }
+                            }
+                        }
+                        if (!parsed) {
+                            std::string val = raw;
+                            if (sec == SEC_Blacklist) {
+                                val = normalizeBlacklistInput(val);
+                                if (!val.empty()) {
+                                    addUniqueCaseInsensitive(gclBlacklistMap["ms0:/"], val);
+                                    addUniqueCaseInsensitive(gclBlacklistMap["ef0:/"], val);
+                                }
+                            } else {
+                                val = stripCategoryPrefixes(val);
+                                if (!val.empty()) {
+                                    addUniqueCaseInsensitive(gclCategoryFilterMap["ms0:/"], val);
+                                    addUniqueCaseInsensitive(gclCategoryFilterMap["ef0:/"], val);
+                                }
+                            }
+                        }
+                    } else if (sec == SEC_HiddenApps) {
+                        std::string devTok, pathPart;
+                        size_t comma = raw.find(',');
+                        if (comma != std::string::npos) {
+                            devTok = raw.substr(0, comma);
+                            pathPart = trimSpaces(raw.substr(comma + 1));
+                        } else if (raw.size() >= 4 && raw[3] == ':') {
+                            devTok = raw.substr(0, 3);
+                            pathPart = raw;
+                        }
+                        std::string root;
+                        if (!devTok.empty() && parseDeviceToken(devTok, root)) {
+                            std::string norm = normalizeGameFilterPath(pathPart);
+                            if (!norm.empty()) addUniqueExact(gclGameFilterMap[root], norm);
+                        } else if (devTok.empty()) {
+                            std::string norm = normalizeGameFilterPath(raw);
+                            if (!norm.empty()) {
+                                addUniqueExact(gclGameFilterMap["ms0:/"], norm);
+                                addUniqueExact(gclGameFilterMap["ef0:/"], norm);
+                            }
+                        }
+                    }
+                }
+                if (pos + 1 < txt.size() && txt[pos] == '\r' && txt[pos+1] == '\n') ++pos;
+                start = pos + 1;
+            }
+            ++pos;
+        }
+    }
+
+    static bool gclSaveUnifiedFilters() {
+        if (!gclFiltersLoaded) gclLoadUnifiedFilters();
+        std::string root = gclFiltersRoot();
         std::string dir = root + "seplugins";
         sceIoMkdir(dir.c_str(), 0777);
+        std::string path = gclFiltersPath();
+
+        std::string existing;
+        if (gclReadWholeText(path, existing)) {
+            if (existing.find("===") == std::string::npos) {
+                std::string oldPath = root + "seplugins/gclite_filter_old.txt";
+                if (!pathExists(oldPath)) {
+                    sceIoRename(path.c_str(), oldPath.c_str());
+                }
+            }
+        }
+
+        auto emitDeviceList = [&](const char* label,
+                                  const std::vector<std::string>& ms,
+                                  const std::vector<std::string>& ef,
+                                  bool isPath){
+            std::string out;
+            out += std::string("===") + label + "===\r\n";
+            auto emit = [&](const char* dev, const std::vector<std::string>& list){
+                for (const auto& v : list) {
+                    if (v.empty()) continue;
+                    if (isPath) out += std::string(dev) + ":" + v;
+                    else out += std::string(dev) + ", " + v;
+                    out += "\r\n";
+                }
+            };
+            emit("ms0", ms);
+            emit("ef0", ef);
+            return out;
+        };
+
+        const auto& blMs = gclBlacklistMap["ms0:/"];
+        const auto& blEf = gclBlacklistMap["ef0:/"];
+        const auto& catMs = gclCategoryFilterMap["ms0:/"];
+        const auto& catEf = gclCategoryFilterMap["ef0:/"];
+        const auto& appMs = gclGameFilterMap["ms0:/"];
+        const auto& appEf = gclGameFilterMap["ef0:/"];
 
         std::string out;
-        for (size_t i = 0; i < fl.size(); ++i) {
-            const std::string& base = fl[i];
-            auto it = baseToDisplay.find(base);
-            const std::string& line = (it != baseToDisplay.end()) ? it->second : base;
-            out += line;
-            if (i + 1 < fl.size()) out += "\r\n";
-        }
-        if (!out.empty()) out += "\r\n";
-        return gclWriteWholeText(gclFilterPathFor(root), out);
+        out += emitDeviceList("CATEGORIES RENAME BLACKLIST", blMs, blEf, false);
+        out += emitDeviceList("HIDDEN CATEGORIES", catMs, catEf, false);
+        out += emitDeviceList("HIDDEN APPS", appMs, appEf, true);
+
+        return gclWriteWholeText(path, out);
+    }
+
+    static void gclLoadCategoryFilterFor(const std::string& dev) {
+        (void)dev;
+        gclLoadUnifiedFilters();
+    }
+
+    static bool gclSaveCategoryFilterFor(const std::string& dev,
+                                         const std::unordered_map<std::string, std::string>& baseToDisplay) {
+        (void)dev;
+        (void)baseToDisplay;
+        return gclSaveUnifiedFilters();
+    }
+
+    static void gclLoadGameFilterFor(const std::string& dev) {
+        (void)dev;
+        gclLoadUnifiedFilters();
+    }
+
+    static bool gclSaveGameFilterFor(const std::string& dev) {
+        (void)dev;
+        return gclSaveUnifiedFilters();
     }
 
     static void gclLoadBlacklistFor(const std::string& dev) {
-        std::string root = blacklistRootKey(dev);
-        if (root.empty()) return;
-        if (gclBlacklistLoadedMap[root]) return;
-
-        gclBlacklistLoadedMap[root] = true;
-        std::vector<std::string> items;
-
-        std::string txt;
-        if (gclReadWholeText(gclBlacklistPathFor(root), txt)) {
-            size_t pos = 0, start = 0;
-            while (pos <= txt.size()) {
-                if (pos == txt.size() || txt[pos] == '\n' || txt[pos] == '\r') {
-                    std::string line = trimSpaces(txt.substr(start, pos - start));
-                    line = stripCategoryPrefixes(sanitizeFilename(line));
-                    if (!line.empty()) {
-                        bool dup = false;
-                        for (auto &w : items) {
-                            if (!strcasecmp(w.c_str(), line.c_str())) { dup = true; break; }
-                        }
-                        if (!dup) items.push_back(line);
-                    }
-                    if (pos + 1 < txt.size() && txt[pos] == '\r' && txt[pos+1] == '\n') ++pos;
-                    start = pos + 1;
-                }
-                ++pos;
-            }
-        }
-        gclBlacklistMap[root] = std::move(items);
+        (void)dev;
+        gclLoadUnifiedFilters();
     }
 
     static bool gclSaveBlacklistFor(const std::string& dev) {
-        std::string root = blacklistRootKey(dev);
-        if (root.empty()) return false;
-        gclBlacklistLoadedMap[root] = true;
-        std::vector<std::string>& bl = gclBlacklistMap[root];
-
-        std::string dir = root + "seplugins";
-        sceIoMkdir(dir.c_str(), 0777);
-
-        std::string out;
-        for (size_t i = 0; i < bl.size(); ++i) {
-            out += bl[i];
-            if (i + 1 < bl.size()) out += "\r\n";
-        }
-        return gclWriteWholeText(gclBlacklistPathFor(root), out);
+        (void)dev;
+        return gclSaveUnifiedFilters();
     }
 
     static bool isBlacklistedBaseNameFor(const std::string& root, const std::string& base) {
         if (base.empty() || !blacklistActive()) return false;
-        gclLoadBlacklistFor(root);
+        gclLoadUnifiedFilters();
         const auto& bl = gclBlacklistMap[blacklistRootKey(root)];
         for (const auto& w : bl) {
             if (w.empty()) continue;
@@ -1084,9 +1431,9 @@
 
     bool isFilteredBaseName(const std::string& base) {
         if (base.empty()) return false;
-        gclLoadFilterFor(currentDevice);
+        gclLoadCategoryFilterFor(currentDevice);
         const std::string root = gclFilterRootKeyFor(currentDevice);
-        const auto& fl = gclFilterMap[root];
+        const auto& fl = gclCategoryFilterMap[root];
         for (const auto& w : fl) {
             if (!strcasecmp(w.c_str(), base.c_str())) return true;
         }
@@ -1094,16 +1441,16 @@
     }
 
     void refreshGclFilterFile() {
-        gclLoadFilterFor(currentDevice);
-        gclSaveFilterFor(currentDevice, buildCategoryBaseToDisplayMap());
+        gclLoadCategoryFilterFor(currentDevice);
+        gclSaveCategoryFilterFor(currentDevice, buildCategoryBaseToDisplayMap());
     }
 
     void toggleGclFilterForCategory(const std::string& displayName) {
         std::string base = stripCategoryPrefixes(displayName);
         if (base.empty()) return;
-        gclLoadFilterFor(currentDevice);
+        gclLoadCategoryFilterFor(currentDevice);
         const std::string root = gclFilterRootKeyFor(currentDevice);
-        auto& fl = gclFilterMap[root];
+        auto& fl = gclCategoryFilterMap[root];
         for (auto it = fl.begin(); it != fl.end(); ++it) {
             if (!strcasecmp(it->c_str(), base.c_str())) {
                 fl.erase(it);
@@ -1115,28 +1462,80 @@
         refreshGclFilterFile();
     }
 
+    void setCategoryHidden(const std::string& displayName, bool hide) {
+        std::string base = stripCategoryPrefixes(displayName);
+        if (base.empty()) return;
+        gclLoadCategoryFilterFor(currentDevice);
+        const std::string root = gclFilterRootKeyFor(currentDevice);
+        auto& fl = gclCategoryFilterMap[root];
+        bool exists = false;
+        for (auto it = fl.begin(); it != fl.end(); ++it) {
+            if (!strcasecmp(it->c_str(), base.c_str())) {
+                exists = true;
+                if (!hide) {
+                    fl.erase(it);
+                    refreshGclFilterFile();
+                }
+                return;
+            }
+        }
+        if (hide && !exists) {
+            fl.push_back(base);
+            refreshGclFilterFile();
+        }
+    }
+
     void updateFilterOnCategoryRename(const std::string& oldDisplay, const std::string& newDisplay) {
         std::string oldBase = stripCategoryPrefixes(oldDisplay);
         std::string newBase = stripCategoryPrefixes(newDisplay);
         if (oldBase.empty() || newBase.empty()) return;
-        gclLoadFilterFor(currentDevice);
+        gclLoadUnifiedFilters();
+        bool changed = false;
+
+        const std::string catRoot = gclFilterRootKeyFor(currentDevice);
+        changed |= updateListEntryCaseInsensitive(gclCategoryFilterMap[catRoot], oldBase, newBase);
+
+        const std::string blRoot = blacklistRootKey(currentDevice);
+        changed |= updateListEntryCaseInsensitive(gclBlacklistMap[blRoot], oldBase, newBase);
+
+        if (changed) gclSaveUnifiedFilters();
+    }
+
+    bool isGameFilteredPath(const std::string& path) {
+        std::string key = normalizeGameFilterPath(path);
+        if (key.empty()) return false;
+        gclLoadGameFilterFor(currentDevice);
         const std::string root = gclFilterRootKeyFor(currentDevice);
-        auto& fl = gclFilterMap[root];
-        bool had = false;
-        for (auto it = fl.begin(); it != fl.end(); ++it) {
-            if (!strcasecmp(it->c_str(), oldBase.c_str())) {
-                fl.erase(it);
-                had = true;
-                break;
+        const auto& fl = gclGameFilterMap[root];
+        for (const auto& w : fl) {
+            if (w == key) return true;
+        }
+        return false;
+    }
+
+    void setGameHiddenForPaths(const std::vector<std::string>& paths, bool hide) {
+        if (paths.empty()) return;
+        gclLoadGameFilterFor(currentDevice);
+        const std::string root = gclFilterRootKeyFor(currentDevice);
+        auto& fl = gclGameFilterMap[root];
+
+        for (const auto& p : paths) {
+            std::string key = normalizeGameFilterPath(p);
+            if (key.empty()) continue;
+            if (hide) {
+                bool exists = false;
+                for (const auto& w : fl) {
+                    if (w == key) { exists = true; break; }
+                }
+                if (!exists) fl.push_back(key);
+            } else {
+                for (auto it = fl.begin(); it != fl.end(); ) {
+                    if (*it == key) it = fl.erase(it);
+                    else ++it;
+                }
             }
         }
-        if (!had) return;
-        bool dup = false;
-        for (const auto& w : fl) {
-            if (!strcasecmp(w.c_str(), newBase.c_str())) { dup = true; break; }
-        }
-        if (!dup) fl.push_back(newBase);
-        refreshGclFilterFile();
+        gclSaveGameFilterFor(currentDevice);
     }
 
     void applyBlacklistChanges() {
@@ -1701,8 +2100,9 @@
         catPickIndex = -1;
         {
             const std::string filterRoot = gclFilterRootKeyFor(currentDevice);
-            if (!filterRoot.empty()) gclFilterLoadedMap[filterRoot] = false;
-            gclLoadFilterFor(currentDevice);
+            (void)filterRoot;
+            gclFiltersLoaded = false;
+            gclLoadCategoryFilterFor(currentDevice);
         }
 
         // Enforce on-disk names to match current settings only when needed (run-once per root until settings change).

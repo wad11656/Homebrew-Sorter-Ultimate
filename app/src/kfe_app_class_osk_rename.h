@@ -183,6 +183,11 @@
                 std::string to   = base + renameTo;
                 if (dirExists(from)) {
                     int rc = sceIoRename(from.c_str(), to.c_str());
+                    if (rc < 0) {
+                        logInit();
+                        logf("category rename FAIL: %s -> %s rc=%d", from.c_str(), to.c_str(), rc);
+                        logClose();
+                    }
                     (rc >= 0) ? anyOk=true : anyFail=true;
                 }
             }
@@ -192,6 +197,11 @@
                 std::string to   = base + renameTo;
                 if (dirExists(from)) {
                     int rc = sceIoRename(from.c_str(), to.c_str());
+                    if (rc < 0) {
+                        logInit();
+                        logf("category rename FAIL: %s -> %s rc=%d", from.c_str(), to.c_str(), rc);
+                        logClose();
+                    }
                     (rc >= 0) ? anyOk=true : anyFail=true;
                 }
             }
@@ -205,6 +215,22 @@
             // Patch in-memory caches (icon paths, no-icon memo set, selection key) to follow the rename
             cachePatchRenameCategory(oldDisplay, newDisplay);
             updateFilterOnCategoryRename(oldDisplay, newDisplay);
+            {
+                if (strcasecmp(oldDisplay.c_str(), newDisplay.c_str()) != 0) {
+                    const char* isoRoots[]  = {"ISO/"};
+                    const char* gameRoots[] = {"PSP/GAME/","PSP/GAME/PSX/","PSP/GAME/Utility/","PSP/GAME150/"};
+                    auto maybeUpdate = [&](const char* r){
+                        std::string base = currentDevice + std::string(r);
+                        std::string oldPath = joinDirFile(base, oldDisplay.c_str());
+                        std::string newPath = joinDirFile(base, newDisplay.c_str());
+                        if (!dirExists(oldPath) && dirExists(newPath)) {
+                            updateHiddenAppPathsForFolderRename(base, oldDisplay, newDisplay);
+                        }
+                    };
+                    for (auto r : isoRoots)  maybeUpdate(r);
+                    for (auto r : gameRoots) maybeUpdate(r);
+                }
+            }
             buildCategoryRows();
 
 
@@ -349,6 +375,7 @@
 
                 // Patch cache instead of rescanning
                 cachePatchRenameItem(gi.path, newPath, gi.kind);
+                updateGameFilterOnItemRename(gi.path, newPath);
 
                 // Refresh just the current view
                 if (view == View_CategoryContents) {
