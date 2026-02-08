@@ -17,7 +17,7 @@ Successor to [HomeBrew Sorter GUI](https://www.gamebrew.org/wiki/HomeBrew_Sorter
 
 <img width="480" height="272" alt="Image" src="https://github.com/user-attachments/assets/9b42ea88-519d-451b-97d2-9976ed921f07" />
 
-### 2. Delete, Rename and Sort/Alphabetize Apps by Filename or Title
+### 2. Delete, Rename, Hide (not ISOs), and Sort/Alphabetize Apps by Filename or Title
 
 <img width="480" height="272" alt="Image" src="https://github.com/user-attachments/assets/941bd80d-e937-4f65-85ac-3e3cfefe1dc5" />
 
