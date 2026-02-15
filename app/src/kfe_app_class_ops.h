@@ -87,7 +87,11 @@
         msgBox = new MessageBox("Copying...", nullptr, SCREEN_WIDTH, SCREEN_HEIGHT, 1.0f, 0, "", 16, 18, 8, 14);
         renderOneFrame();
 
+        KfeFileOps::resetCriticalGuardFailure();
         int okCount = 0, failCount = 0;
+        bool canceledCritical = false;
+        std::vector<std::pair<std::string, std::string>> copiedPairs;
+        std::vector<GameItem::Kind> copiedKinds;
         for (size_t i = 0; i < opSrcPaths.size(); ++i) {
             const std::string& src = opSrcPaths[i];
             const GameItem::Kind k = opSrcKinds[i];
@@ -103,7 +107,18 @@
 
             // Filename detail is already shown by copyFile() via showProgress/updateProgress
             bool ok = KfeFileOps::copyOne(src, dst, k, this);
-            if (ok) okCount++; else failCount++;
+            if (ok) {
+                okCount++;
+                copiedPairs.push_back(std::make_pair(src, dst));
+                copiedKinds.push_back(k);
+            } else {
+                failCount++;
+                if (KfeFileOps::hasCriticalGuardFailure()) {
+                    canceledCritical = true;
+                    logf("performCopy: canceling after critical file verification failure");
+                    break;
+                }
+            }
             sceKernelDelayThread(0);
         }
 
@@ -141,23 +156,23 @@
             dstEntry.dirty = false;
         }
 
-        // Insert each copied item into destination snapshot
-        for (size_t i = 0; i < opSrcPaths.size(); ++i) {
-            const std::string& s = opSrcPaths[i];
-            const GameItem::Kind k = opSrcKinds[i];
-            const std::string d = KfeFileOps::buildDestPath(s, k, opDestDevice.empty() ? currentDevice : opDestDevice, opDestCategory);
+        // Insert each successfully copied item into destination snapshot
+        for (size_t i = 0; i < copiedPairs.size(); ++i) {
+            const std::string& s = copiedPairs[i].first;
+            const std::string& d = copiedPairs[i].second;
+            const GameItem::Kind k = copiedKinds[i];
             cacheApplyMoveOrCopy(dstEntry.snap, dstEntry.snap, s, d, k, /*isMove*/false);
         }
         dstEntry.dirty = false;
 
-        // Jump to destination view immediately (match Move behavior)
-        showDestinationCategoryNow(dstDev, opDestCategory);
+        if (!canceledCritical) {
+            // Jump to destination view immediately (match Move behavior)
+            showDestinationCategoryNow(dstDev, opDestCategory);
 
-        // optional: focus the last copied item
-        if (!opSrcPaths.empty()) {
-            const std::string lastDst = KfeFileOps::buildDestPath(opSrcPaths.back(), opSrcKinds.back(),
-                opDestDevice.empty() ? currentDevice : opDestDevice, opDestCategory);
-            selectByPath(lastDst);
+            // optional: focus the last copied item
+            if (!copiedPairs.empty()) {
+                selectByPath(copiedPairs.back().second);
+            }
         }
 
         // clear op state
@@ -169,10 +184,24 @@
         opDestDevice.clear(); opDestCategory.clear();
 
         char res[64];
-        if (failCount == 0) { snprintf(res, sizeof(res), "Copied %d item(s)", okCount); drawMessage(res, COLOR_GREEN); }
-        else if (okCount == 0) { snprintf(res, sizeof(res), "Copy failed (%d)", failCount); drawMessage(res, COLOR_RED); }
-        else { snprintf(res, sizeof(res), "Copied %d, failed %d", okCount, failCount); drawMessage(res, COLOR_YELLOW); }
-        sceKernelDelayThread(800*1000);
+        if (canceledCritical) {
+            MessageBox mb(
+                "Error\n"
+                "The copy operation failed to move all files to the destination directory.",
+                okIconTexture, SCREEN_WIDTH, SCREEN_HEIGHT, 1.0f, 15, "OK",
+                10, 18, 82, 9, 340, 95, PSP_CTRL_CROSS);
+            while (mb.update()) mb.render(font);
+        } else if (failCount == 0) {
+            snprintf(res, sizeof(res), "Copied %d item(s)", okCount);
+            drawMessage(res, COLOR_GREEN);
+        } else if (okCount == 0) {
+            snprintf(res, sizeof(res), "Copy failed (%d)", failCount);
+            drawMessage(res, COLOR_RED);
+        } else {
+            snprintf(res, sizeof(res), "Copied %d, failed %d", okCount, failCount);
+            drawMessage(res, COLOR_YELLOW);
+        }
+        if (!canceledCritical) sceKernelDelayThread(800*1000);
     }
 
 
@@ -214,6 +243,13 @@
     }
 
     void startAction(ActionMode mode) {
+        if ((mode == AM_Move || mode == AM_Copy) &&
+            !runningAppWarningBypass &&
+            selectionIncludesCurrentAppFolder()) {
+            openCurrentAppActionWarning(mode == AM_Copy ? RAW_Copy : RAW_Move);
+            return;
+        }
+
         actionMode = mode;
         opPhase    = OP_None;
         opSrcPaths.clear();
@@ -410,13 +446,23 @@
         msgBox = new MessageBox("Moving...", nullptr, SCREEN_WIDTH, SCREEN_HEIGHT, 1.0f, 0, "", 16, 18, 8, 14);
         renderOneFrame();
 
+        KfeFileOps::resetCriticalGuardFailure();
         int okCount = 0, failCount = 0;
-        std::vector<std::pair<std::string,std::string>> movedPairs;
+        bool canceledCritical = false;
+        struct MovedPair {
+            std::string src;
+            std::string dst;
+            GameItem::Kind kind;
+        };
+        std::vector<MovedPair> movedPairs;
         movedPairs.reserve(opSrcPaths.size());
+        bool movedCurrentApp = false;
+        std::string movedCurrentAppDst;
         for (size_t i = 0; i < opSrcPaths.size(); ++i) {
             const std::string& src = opSrcPaths[i];
             const GameItem::Kind k = opSrcKinds[i];
             std::string dst = KfeFileOps::buildDestPath(src, k, opDestDevice.empty() ? currentDevice : opDestDevice, opDestCategory);
+            const bool srcIsCurrentApp = (k == GameItem::EBOOT_FOLDER) && isCurrentExecFolderPath(src);
 
             // Game title as headline
             if (msgBox) {
@@ -436,8 +482,22 @@
                 msgBox->updateProgress(1, 1);
                 renderOneFrame();
             }
-            if (ok) { okCount++; checked.erase(src); movedPairs.emplace_back(src, dst); }
-            else    { failCount++; }
+            if (ok) {
+                okCount++;
+                checked.erase(src);
+                movedPairs.push_back({src, dst, k});
+                if (srcIsCurrentApp) {
+                    movedCurrentApp = true;
+                    movedCurrentAppDst = dst;
+                }
+            } else {
+                failCount++;
+                if (KfeFileOps::hasCriticalGuardFailure()) {
+                    canceledCritical = true;
+                    logf("performMove: canceling after critical file verification failure");
+                    break;
+                }
+            }
             sceKernelDelayThread(0);
         }
 
@@ -450,7 +510,23 @@
 
         // Update gclite_filter for moved items only (never for copies)
         for (const auto& mv : movedPairs) {
-            updateGameFilterOnItemRename(mv.first, mv.second);
+            updateGameFilterOnItemRename(mv.src, mv.dst);
+        }
+        const bool forceFullRescanAfterMove = movedCurrentApp;
+        if (movedCurrentApp && !movedCurrentAppDst.empty()) {
+            setExecBaseOverrideFromAppDir(movedCurrentAppDst);
+            reloadHomeAnimationsForExec();
+            // Moving the running app can leave stale ICON0/path memoization behind.
+            // Force fresh scans and clear icon-related transient caches.
+            markAllDevicesDirty();
+            freeSelectionIcon();
+            noIconPaths.clear();
+            selectionIconRetryAtUs = 0;
+            if (iconCarryTex) {
+                texFree(iconCarryTex);
+                iconCarryTex = nullptr;
+                iconCarryForPath.clear();
+            }
         }
 
         // --- Patch caches and jump instantly to destination ---
@@ -464,53 +540,78 @@
 
         // 2) If we have no snapshots yet (first time ever), build them once and store.
         //    Otherwise we will patch them below.
-        if (srcEntry.snap.flatAll.empty() && srcEntry.snap.uncategorized.empty()
-            && srcEntry.snap.categories.empty() && srcEntry.snap.categoryNames.empty()) {
-            scanDevice(srcDev);                 // one-time build
-            snapshotCurrentScan(srcEntry.snap);
-            srcEntry.dirty = false;
-        }
-        if (strncasecmp(srcDev.c_str(), dstDev.c_str(), 4) != 0) {
-            if (dstEntry.snap.flatAll.empty() && dstEntry.snap.uncategorized.empty()
-                && dstEntry.snap.categories.empty() && dstEntry.snap.categoryNames.empty()) {
-                scanDevice(dstDev);             // one-time build for the other device
-                snapshotCurrentScan(dstEntry.snap);
-                dstEntry.dirty = false;
+        if (!forceFullRescanAfterMove) {
+            if (srcEntry.snap.flatAll.empty() && srcEntry.snap.uncategorized.empty()
+                && srcEntry.snap.categories.empty() && srcEntry.snap.categoryNames.empty()) {
+                scanDevice(srcDev);                 // one-time build
+                snapshotCurrentScan(srcEntry.snap);
+                srcEntry.dirty = false;
+            }
+            if (strncasecmp(srcDev.c_str(), dstDev.c_str(), 4) != 0) {
+                if (dstEntry.snap.flatAll.empty() && dstEntry.snap.uncategorized.empty()
+                    && dstEntry.snap.categories.empty() && dstEntry.snap.categoryNames.empty()) {
+                    scanDevice(dstDev);             // one-time build for the other device
+                    snapshotCurrentScan(dstEntry.snap);
+                    dstEntry.dirty = false;
+                }
             }
         }
 
         // 3) Patch both snapshots with the results (remove from src; add/rename into dst)
-        for (size_t i = 0; i < opSrcPaths.size(); ++i) {
-            const std::string& src = opSrcPaths[i];
-            const GameItem::Kind k = opSrcKinds[i];
-            const std::string   dst = KfeFileOps::buildDestPath(src, k,
-                                    opDestDevice.empty() ? currentDevice : opDestDevice, opDestCategory);
-            cacheApplyMoveOrCopy(srcEntry.snap, dstEntry.snap, src, dst, k, /*isMove*/true);
+        if (!forceFullRescanAfterMove) {
+            for (size_t i = 0; i < movedPairs.size(); ++i) {
+                const std::string& src = movedPairs[i].src;
+                const std::string& dst = movedPairs[i].dst;
+                const GameItem::Kind k = movedPairs[i].kind;
+                cacheApplyMoveOrCopy(srcEntry.snap, dstEntry.snap, src, dst, k, /*isMove*/true);
+            }
         }
         // Keep them valid for instant reuse
-        srcEntry.dirty = false;
-        dstEntry.dirty = false;
+        if (!forceFullRescanAfterMove) {
+            srcEntry.dirty = false;
+            dstEntry.dirty = false;
+        } else {
+            srcEntry.dirty = true;
+            dstEntry.dirty = true;
+        }
 
         // Select the destination category and repaint full contents
-        showDestinationCategoryNow(dstDev, opDestCategory);
+        if (forceFullRescanAfterMove) {
+            // Use the exact same slow/full rebuild path as manually selecting a storage device.
+            openDevice(dstDev);
+            armIconReloadGraceWindow();
+            if (hasCategories) {
+                const std::string cat = opDestCategory.empty() ? std::string("Uncategorized") : opDestCategory;
+                openCategory(cat);
+            }
+        } else {
+            showDestinationCategoryNow(dstDev, opDestCategory);
+        }
 
         // Focus the last moved item so it’s highlighted
-        if (!opSrcPaths.empty() && okCount > 0) {
-            const std::string lastDst = KfeFileOps::buildDestPath(
-                opSrcPaths.back(),
-                opSrcKinds.back(),
-                opDestDevice.empty() ? currentDevice : opDestDevice,
-                opDestCategory
-            );
-            selectByPath(lastDst);
+        if (!movedPairs.empty()) {
+            selectByPath(movedPairs.back().dst);
         }
+
+        // clear op state
+        actionMode = AM_None;
+        opPhase    = OP_None;
+        opSrcPaths.clear(); opSrcKinds.clear();
+        opSrcCount = 0;
+        opSrcTotalBytes = 0;
+        opDestDevice.clear(); opDestCategory.clear();
 
         // Toast
         char res[64];
-        if (failCount == 0)      snprintf(res, sizeof(res), "Moved %d item(s)", okCount);
-        else if (okCount == 0)   snprintf(res, sizeof(res), "Move failed (%d)", failCount);
-        else                     snprintf(res, sizeof(res), "Moved %d, failed %d", okCount, failCount);
-        drawMessage(res, (failCount ? (okCount ? COLOR_YELLOW : COLOR_RED) : COLOR_GREEN));
+        if (canceledCritical) {
+            snprintf(res, sizeof(res), "Move canceled: critical file missing");
+            drawMessage(res, COLOR_RED);
+        } else {
+            if (failCount == 0)      snprintf(res, sizeof(res), "Moved %d item(s)", okCount);
+            else if (okCount == 0)   snprintf(res, sizeof(res), "Move failed (%d)", failCount);
+            else                     snprintf(res, sizeof(res), "Moved %d, failed %d", okCount, failCount);
+            drawMessage(res, (failCount ? (okCount ? COLOR_YELLOW : COLOR_RED) : COLOR_GREEN));
+        }
         sceKernelDelayThread(800 * 1000);
 
     }

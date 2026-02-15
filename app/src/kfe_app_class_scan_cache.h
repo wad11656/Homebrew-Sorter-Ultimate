@@ -624,6 +624,230 @@
         return {};
     }
 
+    // --- Legacy plugin support: sentinel file + PRX search helpers ---
+
+    static std::string gclSentinelFilePath() {
+        return currentExecBaseDir() + "use_legacy_categories_plugin";
+    }
+
+    static bool gclIsLegacyMode() {
+        return pathExists(gclSentinelFilePath());
+    }
+
+    static void gclSetLegacyMode(bool on) {
+        std::string path = gclSentinelFilePath();
+        if (on) {
+            SceUID fd = sceIoOpen(path.c_str(), PSP_O_WRONLY | PSP_O_CREAT | PSP_O_TRUNC, 0777);
+            if (fd >= 0) sceIoClose(fd);
+        } else {
+            if (pathExists(path)) sceIoRemove(path.c_str());
+        }
+    }
+
+    // --- Standalone blacklist file (app-level, independent of plugin mode) ---
+
+    static std::string gclBlacklistFilePath() {
+        return currentExecBaseDir() + "folder_rename_blacklist.txt";
+    }
+
+    static void gclLoadBlacklistFile() {
+        gclBlacklistMap["ms0:/"].clear();
+        gclBlacklistMap["ef0:/"].clear();
+
+        std::string txt;
+        if (!gclReadWholeText(gclBlacklistFilePath(), txt)) return;
+
+        auto addUnique = [](std::vector<std::string>& list, const std::string& v) {
+            for (const auto& w : list) {
+                if (!strcasecmp(w.c_str(), v.c_str())) return;
+            }
+            list.push_back(v);
+        };
+        auto parseDevice = [](std::string tok, std::string& outRoot) -> bool {
+            size_t a = 0, b = tok.size();
+            while (a < b && (tok[a] == ' ' || tok[a] == '\t')) ++a;
+            while (b > a && (tok[b-1] == ' ' || tok[b-1] == '\t')) --b;
+            tok = tok.substr(a, b - a);
+            if (tok.size() >= 4 && tok[3] == ':') tok = tok.substr(0, 3);
+            for (char& c : tok) c = toLowerC(c);
+            if (tok == "ms0") { outRoot = "ms0:/"; return true; }
+            if (tok == "ef0") { outRoot = "ef0:/"; return true; }
+            return false;
+        };
+
+        size_t pos = 0, start = 0;
+        while (pos <= txt.size()) {
+            if (pos == txt.size() || txt[pos] == '\n' || txt[pos] == '\r') {
+                std::string raw = trimSpaces(txt.substr(start, pos - start));
+                if (!raw.empty()) {
+                    size_t comma = raw.find(',');
+                    bool parsed = false;
+                    if (comma != std::string::npos) {
+                        std::string devTok = raw.substr(0, comma);
+                        std::string val = trimSpaces(raw.substr(comma + 1));
+                        std::string root;
+                        if (parseDevice(devTok, root) && !val.empty()) {
+                            val = normalizeBlacklistInput(val);
+                            if (!val.empty()) addUnique(gclBlacklistMap[root], val);
+                            parsed = true;
+                        }
+                    }
+                    if (!parsed) {
+                        std::string val = normalizeBlacklistInput(raw);
+                        if (!val.empty()) {
+                            addUnique(gclBlacklistMap["ms0:/"], val);
+                            addUnique(gclBlacklistMap["ef0:/"], val);
+                        }
+                    }
+                }
+                if (pos < txt.size() && txt[pos] == '\r' && pos + 1 < txt.size() && txt[pos + 1] == '\n') ++pos;
+                start = pos + 1;
+            }
+            ++pos;
+        }
+    }
+
+    static bool gclSaveBlacklistFile() {
+        std::string out;
+        auto emit = [&](const char* dev, const std::vector<std::string>& list) {
+            for (const auto& v : list) {
+                if (v.empty()) continue;
+                out += std::string(dev) + ", " + v + "\r\n";
+            }
+        };
+        emit("ms0", gclBlacklistMap["ms0:/"]);
+        emit("ef0", gclBlacklistMap["ef0:/"]);
+        return gclWriteWholeText(gclBlacklistFilePath(), out);
+    }
+
+    // Recursive search for a PRX by exact filename (case-insensitive)
+    std::string gclFindPrxByName(const std::string& sepluginsNoSlash, const char* filename) {
+        SceUID d = kfeIoOpenDir(sepluginsNoSlash.c_str());
+        if (d < 0) return {};
+        std::vector<std::string> stack{sepluginsNoSlash};
+        kfeIoCloseDir(d);
+
+        while (!stack.empty()) {
+            std::string dpath = stack.back(); stack.pop_back();
+            SceUID dd = kfeIoOpenDir(dpath.c_str()); if (dd < 0) continue;
+            SceIoDirent ent; memset(&ent, 0, sizeof(ent));
+            while (kfeIoReadDir(dd, &ent) > 0) {
+                trimTrailingSpaces(ent.d_name);
+                if (!strcmp(ent.d_name, ".") || !strcmp(ent.d_name, "..")) { memset(&ent,0,sizeof(ent)); continue; }
+                std::string child = joinDirFile(dpath, ent.d_name);
+                if (FIO_S_ISDIR(ent.d_stat.st_mode)) {
+                    stack.push_back(child);
+                } else if (strcasecmp(ent.d_name, filename) == 0) {
+                    kfeIoCloseDir(dd);
+                    return child;
+                }
+                memset(&ent, 0, sizeof(ent));
+            }
+            kfeIoCloseDir(dd);
+        }
+        return {};
+    }
+
+    std::string gclFindPrxByNameAny(const std::string& primaryRoot, const char* filename) {
+        std::vector<std::string> dirs;
+        gclCollectSepluginsDirs(primaryRoot, dirs);
+        for (const auto& dir : dirs) {
+            std::string found = gclFindPrxByName(dir, filename);
+            if (!found.empty()) return found;
+        }
+        return {};
+    }
+
+    std::string gclFindCategoryLiteOldPrxAny(const std::string& primaryRoot) {
+        return gclFindPrxByNameAny(primaryRoot, "category_lite_old.prx");
+    }
+
+    std::string gclFindCategoryLiteV18PrxAny(const std::string& primaryRoot) {
+        return gclFindPrxByNameAny(primaryRoot, "category_lite_v1.8.prx");
+    }
+
+    static std::string gclBundledPrxPath() {
+        return currentExecBaseDir() + "resources/category_lite.prx";
+    }
+
+    bool gclFilesEqual(const std::string& a, const std::string& b) {
+        SceIoStat sa{}, sb{};
+        if (!pathExists(a, &sa) || !pathExists(b, &sb)) return false;
+        if (sa.st_size != sb.st_size) return false;
+        if (sa.st_size <= 0) return true;
+
+        SceUID fa = sceIoOpen(a.c_str(), PSP_O_RDONLY, 0);
+        if (fa < 0) return false;
+        SceUID fb = sceIoOpen(b.c_str(), PSP_O_RDONLY, 0);
+        if (fb < 0) { sceIoClose(fa); return false; }
+
+        char ba[16 * 1024];
+        char bb[16 * 1024];
+        bool same = true;
+        while (same) {
+            int ra = sceIoRead(fa, ba, sizeof(ba));
+            int rb = sceIoRead(fb, bb, sizeof(bb));
+            if (ra != rb) { same = false; break; }
+            if (ra < 0) { same = false; break; }
+            if (ra == 0) break;
+            if (memcmp(ba, bb, (size_t)ra) != 0) { same = false; break; }
+        }
+
+        sceIoClose(fa);
+        sceIoClose(fb);
+        return same;
+    }
+
+    bool gclIsBundledPrxCopy(const std::string& prxPath) {
+        std::string bundled = gclBundledPrxPath();
+        if (!pathExists(prxPath) || !pathExists(bundled)) return false;
+        return gclFilesEqual(prxPath, bundled);
+    }
+
+    std::string gclFindLegacyCategoryLitePrx(const std::string& sepluginsNoSlash) {
+        SceUID d = kfeIoOpenDir(sepluginsNoSlash.c_str());
+        if (d < 0) return {};
+        std::vector<std::string> stack{sepluginsNoSlash};
+        kfeIoCloseDir(d);
+
+        while (!stack.empty()) {
+            std::string dpath = stack.back(); stack.pop_back();
+            SceUID dd = kfeIoOpenDir(dpath.c_str()); if (dd < 0) continue;
+            SceIoDirent ent; memset(&ent, 0, sizeof(ent));
+            while (kfeIoReadDir(dd, &ent) > 0) {
+                trimTrailingSpaces(ent.d_name);
+                if (!strcmp(ent.d_name, ".") || !strcmp(ent.d_name, "..")) { memset(&ent,0,sizeof(ent)); continue; }
+                std::string child = joinDirFile(dpath, ent.d_name);
+                if (FIO_S_ISDIR(ent.d_stat.st_mode)) {
+                    stack.push_back(child);
+                } else if (strcasecmp(ent.d_name, "category_lite.prx") == 0) {
+                    if (!gclIsBundledPrxCopy(child)) {
+                        kfeIoCloseDir(dd);
+                        return child;
+                    }
+                }
+                memset(&ent, 0, sizeof(ent));
+            }
+            kfeIoCloseDir(dd);
+        }
+        return {};
+    }
+
+    std::string gclFindLegacyCategoryLitePrxAny(const std::string& primaryRoot) {
+        std::vector<std::string> dirs;
+        gclCollectSepluginsDirs(primaryRoot, dirs);
+        for (const auto& dir : dirs) {
+            std::string found = gclFindLegacyCategoryLitePrx(dir);
+            if (!found.empty()) return found;
+        }
+        return {};
+    }
+
+    bool gclHasLegacyCandidatePrx(const std::string& primaryRoot) {
+        if (!gclFindLegacyCategoryLitePrxAny(primaryRoot).empty()) return true;
+        return !gclFindCategoryLiteOldPrxAny(primaryRoot).empty();
+    }
+
     std::string gclFindArkPluginsFile(std::string& outSeplugins) {
         std::string primaryRoot = gclPickDeviceRoot();
         std::vector<std::string> dirs;
@@ -796,7 +1020,7 @@
             }
         }
 
-        // Don’t gate enablement on PRX discovery; VSH/PLUGINS are the source of truth.
+        // Don't gate enablement on PRX discovery; VSH/PLUGINS are the source of truth.
         gclArkOn = arkEnabled;
         gclProOn = proEnabled;
 
@@ -808,6 +1032,30 @@
             gclDevice = rootPrefix(arkSe);
         } else {
             gclDevice = primaryRoot;
+        }
+
+        // Legacy plugin mode
+        gclLegacyMode = gclIsLegacyMode();
+        if (!gclLegacyMode) {
+            gclOldPrxPath.clear();
+        } else {
+            gclOldPrxPath = gclFindCategoryLiteOldPrxAny(primaryRoot);
+
+            // Stale legacy flag check: if the only PRX is the bundled v1.8 one
+            // (no old.prx, no v1.8.prx), the legacy plugin was removed externally.
+            if (gclOldPrxPath.empty() && gclFindCategoryLiteV18PrxAny(primaryRoot).empty()) {
+                if (havePrx) {
+                    std::string baseDir = currentExecBaseDir();
+                    std::string src = baseDir + "resources/category_lite.prx";
+                    SceIoStat srcSt{}, curSt{};
+                    if (pathExists(src, &srcSt) && pathExists(gclPrxPath, &curSt) &&
+                        srcSt.st_size == curSt.st_size) {
+                        // Only bundled v1.8 PRX remains — clear stale legacy flag
+                        gclLegacyMode = false;
+                        gclSetLegacyMode(false);
+                    }
+                }
+            }
         }
     }
 
@@ -907,6 +1155,41 @@
         return gclWriteWholeText(filePath, out);
     }
 
+    bool gclFileHasEnabledEntry(const std::string& filePath, bool arkPluginsTxt){
+        if (filePath.empty()) return false;
+        std::string txt;
+        if (!gclReadWholeText(filePath, txt)) return false;
+
+        size_t pos=0, s=0;
+        while (pos<=txt.size()){
+            if (pos==txt.size() || txt[pos]=='\n' || txt[pos]=='\r'){
+                std::string line = txt.substr(s, pos-s);
+                if (gclLineEnables(line, arkPluginsTxt)) return true;
+                if (pos+1<txt.size() && txt[pos]=='\r' && txt[pos+1]=='\n') ++pos;
+                s = pos + 1;
+            }
+            ++pos;
+        }
+        return false;
+    }
+
+    bool gclWriteEnableToFileWithVerify(const std::string& filePath, bool enable, bool arkPluginsTxt, int maxAttempts=2){
+        if (filePath.empty()) return false;
+        if (maxAttempts < 1) maxAttempts = 1;
+
+        for (int attempt = 0; attempt < maxAttempts; ++attempt) {
+            if (!gclWriteEnableToFile(filePath, enable, arkPluginsTxt)) {
+                sceKernelDelayThread(8 * 1000);
+                continue;
+            }
+
+            const bool isEnabled = gclFileHasEnabledEntry(filePath, arkPluginsTxt);
+            if (isEnabled == enable) return true;
+            sceKernelDelayThread(8 * 1000);
+        }
+        return false;
+    }
+
 
     // NEW: load/save gclite.bin (CategoryConfig)
     static std::string defaultBlacklistRoot() {
@@ -977,7 +1260,6 @@
         for (char& c : t) if (c == '\\') c = '/';
         if (t.size() >= 4 && t[3] == ':') t = t.substr(4);
         if (!t.empty() && t[0] != '/') t = std::string("/") + t;
-        for (char& c : t) c = toLowerC(c);
         return t;
     }
 
@@ -987,7 +1269,7 @@
         if (oldNorm.empty() || newNorm.empty() || oldNorm == newNorm) return false;
         bool changed = false;
         for (auto& w : list) {
-            if (w == oldNorm) {
+            if (!strcasecmp(w.c_str(), oldNorm.c_str())) {
                 w = newNorm;
                 changed = true;
             }
@@ -997,7 +1279,7 @@
             dedup.reserve(list.size());
             for (const auto& w : list) {
                 bool dup = false;
-                for (const auto& d : dedup) { if (d == w) { dup = true; break; } }
+                for (const auto& d : dedup) { if (!strcasecmp(d.c_str(), w.c_str())) { dup = true; break; } }
                 if (!dup) dedup.push_back(w);
             }
             list.swap(dedup);
@@ -1012,7 +1294,7 @@
         bool changed = false;
         for (auto& w : list) {
             if (w.size() < oldPrefix.size()) continue;
-            if (strncmp(w.c_str(), oldPrefix.c_str(), oldPrefix.size()) != 0) continue;
+            if (strncasecmp(w.c_str(), oldPrefix.c_str(), oldPrefix.size()) != 0) continue;
             if (w.size() > oldPrefix.size() && w[oldPrefix.size()] != '/') continue;
             w = newPrefix + w.substr(oldPrefix.size());
             changed = true;
@@ -1022,7 +1304,7 @@
             dedup.reserve(list.size());
             for (const auto& w : list) {
                 bool dup = false;
-                for (const auto& d : dedup) { if (d == w) { dup = true; break; } }
+                for (const auto& d : dedup) { if (!strcasecmp(d.c_str(), w.c_str())) { dup = true; break; } }
                 if (!dup) dedup.push_back(w);
             }
             list.swap(dedup);
@@ -1035,7 +1317,7 @@
         if (key.empty()) return false;
         bool changed = false;
         for (auto it = list.begin(); it != list.end(); ) {
-            if (*it == key) { it = list.erase(it); changed = true; }
+            if (!strcasecmp(it->c_str(), key.c_str())) { it = list.erase(it); changed = true; }
             else ++it;
         }
         return changed;
@@ -1047,7 +1329,7 @@
         bool changed = false;
         for (auto it = list.begin(); it != list.end(); ) {
             if (it->size() < prefix.size()) { ++it; continue; }
-            if (strncmp(it->c_str(), prefix.c_str(), prefix.size()) != 0) { ++it; continue; }
+            if (strncasecmp(it->c_str(), prefix.c_str(), prefix.size()) != 0) { ++it; continue; }
             if (it->size() > prefix.size() && (*it)[prefix.size()] != '/') { ++it; continue; }
             it = list.erase(it);
             changed = true;
@@ -1059,7 +1341,7 @@
                                                const std::string& oldValue,
                                                const std::string& newValue) {
         if (oldValue.empty() || newValue.empty()) return false;
-        if (!strcasecmp(oldValue.c_str(), newValue.c_str())) return false;
+        if (oldValue == newValue) return false;
         bool had = false;
         for (auto it = list.begin(); it != list.end(); ++it) {
             if (!strcasecmp(it->c_str(), oldValue.c_str())) {
@@ -1073,6 +1355,28 @@
             if (!strcasecmp(w.c_str(), newValue.c_str())) return true;
         }
         list.push_back(newValue);
+        return true;
+    }
+
+    static bool replaceCaseInsensitiveEntryWithExact(std::vector<std::string>& list,
+                                                     const std::string& value) {
+        if (value.empty()) return false;
+        int matches = 0;
+        bool hasExact = false;
+        for (const auto& w : list) {
+            if (!strcasecmp(w.c_str(), value.c_str())) {
+                ++matches;
+                if (w == value) hasExact = true;
+            }
+        }
+        if (matches == 0) return false;
+        if (matches == 1 && hasExact) return false;
+
+        for (auto it = list.begin(); it != list.end(); ) {
+            if (!strcasecmp(it->c_str(), value.c_str())) it = list.erase(it);
+            else ++it;
+        }
+        list.push_back(value);
         return true;
     }
 
@@ -1091,7 +1395,7 @@
                                                     const std::string& fromName,
                                                     const std::string& toName) {
         if (fromName.empty() || toName.empty()) return false;
-        if (!strcasecmp(fromName.c_str(), toName.c_str())) return false;
+        if (fromName == toName) return false;
         const std::string devRoot = rootPrefix(absRoot);
         if (devRoot.empty()) return false;
 
@@ -1109,6 +1413,40 @@
     }
 
     bool updateGameFilterOnItemRename(const std::string& oldPath, const std::string& newPath) {
+        if (gclLegacyMode) {
+            const std::string oldName = extractGameFolderName(oldPath);
+            const std::string newName = extractGameFolderName(newPath);
+            if (oldName.empty() || newName.empty()) return false;
+            if (oldName == newName) return false;
+
+            gclLoadLegacyFilterCache();
+            std::vector<std::string> names = gclLegacyFilterCache;
+            bool changed = false;
+            for (size_t i = 0; i < names.size(); ++i) {
+                if (names[i] == oldName) {
+                    names[i] = newName;
+                    changed = true;
+                }
+            }
+            if (!changed) return false;
+
+            // Keep case-sensitive uniqueness in legacy list.
+            std::vector<std::string> dedup;
+            dedup.reserve(names.size());
+            for (const auto& n : names) {
+                bool dup = false;
+                for (const auto& d : dedup) {
+                    if (d == n) { dup = true; break; }
+                }
+                if (!dup) dedup.push_back(n);
+            }
+
+            gclWriteLegacyFilter(dedup);
+            gclLegacyFilterCache = dedup;
+            gclLegacyFilterLoaded = true;
+            return true;
+        }
+
         std::string oldNorm = normalizeGameFilterPath(oldPath);
         std::string newNorm = normalizeGameFilterPath(newPath);
         if (oldNorm.empty() || newNorm.empty()) return false;
@@ -1125,17 +1463,16 @@
         bool changed = false;
         if (newRoot.empty() || !strcasecmp(oldRoot.c_str(), newRoot.c_str())) {
             changed = updateGameFilterEntryExact(oldList, oldNorm, newNorm);
+            changed |= replaceCaseInsensitiveEntryWithExact(oldList, newNorm);
         } else {
-            bool found = false;
-            for (auto it = oldList.begin(); it != oldList.end(); ++it) {
-                if (*it == oldNorm) { oldList.erase(it); found = true; break; }
-            }
+            bool found = removeGameFilterEntryExact(oldList, oldNorm);
             if (found) {
                 const std::string newFilterRoot = gclFilterRootKeyFor(newRoot);
                 auto& newList = gclGameFilterMap[newFilterRoot];
                 bool dup = false;
-                for (const auto& w : newList) { if (w == newNorm) { dup = true; break; } }
+                for (const auto& w : newList) { if (!strcasecmp(w.c_str(), newNorm.c_str())) { dup = true; break; } }
                 if (!dup) newList.push_back(newNorm);
+                else changed |= replaceCaseInsensitiveEntryWithExact(newList, newNorm);
                 changed = true;
             }
         }
@@ -1216,7 +1553,7 @@
 
         auto addUniqueExact = [&](std::vector<std::string>& list, const std::string& v){
             for (const auto& w : list) {
-                if (w == v) return;
+                if (!strcasecmp(w.c_str(), v.c_str())) return;
             }
             list.push_back(v);
         };
@@ -1309,10 +1646,28 @@
             }
             ++pos;
         }
+
+        // Blacklist lives in its own file in the EBOOT folder.
+        // If the standalone file exists, it's authoritative; overwrite anything
+        // parsed from gclite_filter.txt above.  If not, any entries we just
+        // parsed from gclite_filter.txt serve as a one-time migration and we
+        // write them out to the new file.
+        if (pathExists(gclBlacklistFilePath())) {
+            gclLoadBlacklistFile();
+        } else if (!gclBlacklistMap["ms0:/"].empty() || !gclBlacklistMap["ef0:/"].empty()) {
+            gclSaveBlacklistFile();  // one-time migration
+        }
     }
 
     static bool gclSaveUnifiedFilters() {
         if (!gclFiltersLoaded) gclLoadUnifiedFilters();
+
+        // Blacklist always goes to its own file in the EBOOT folder
+        gclSaveBlacklistFile();
+
+        // Legacy mode: gclite_filter.txt is in legacy format, don't overwrite
+        if (gclIsLegacyMode()) return true;
+
         std::string root = gclFiltersRoot();
         std::string dir = root + "seplugins";
         sceIoMkdir(dir.c_str(), 0777);
@@ -1347,15 +1702,12 @@
             return out;
         };
 
-        const auto& blMs = gclBlacklistMap["ms0:/"];
-        const auto& blEf = gclBlacklistMap["ef0:/"];
         const auto& catMs = gclCategoryFilterMap["ms0:/"];
         const auto& catEf = gclCategoryFilterMap["ef0:/"];
         const auto& appMs = gclGameFilterMap["ms0:/"];
         const auto& appEf = gclGameFilterMap["ef0:/"];
 
         std::string out;
-        out += emitDeviceList("CATEGORIES RENAME BLACKLIST", blMs, blEf, false);
         out += emitDeviceList("HIDDEN CATEGORIES", catMs, catEf, false);
         out += emitDeviceList("HIDDEN APPS", appMs, appEf, true);
 
@@ -1392,6 +1744,504 @@
     static bool gclSaveBlacklistFor(const std::string& dev) {
         (void)dev;
         return gclSaveUnifiedFilters();
+    }
+
+    // ---------------------------------------------------------------
+    // Legacy v1.6/v1.7 filter support
+    // ---------------------------------------------------------------
+
+    // Extract the game-folder name from a full PSP path.
+    // e.g. "ms0:/PSP/GAME/MyApp/EBOOT.PBP" → "MyApp"
+    //      "/psp/game/cat_action/myapp"      → "myapp"
+    //      "ms0:/PSP/GAME/MyApp"             → "MyApp"
+    static std::string extractGameFolderName(const std::string& rawPath) {
+        std::string p = rawPath;
+        // Strip device prefix
+        if (p.size() >= 4 && p[3] == ':') p = p.substr(4);
+        for (char& c : p) if (c == '\\') c = '/';
+        // Remove trailing slash
+        while (!p.empty() && p.back() == '/') p.pop_back();
+        if (p.empty()) return {};
+        // If it ends with a known file (EBOOT.PBP, PBOOT.PBP, etc.), go up one level
+        std::string last = p;
+        size_t sl = p.rfind('/');
+        if (sl != std::string::npos) last = p.substr(sl + 1);
+        auto endsWithCI = [](const std::string& s, const char* suffix) {
+            size_t slen = strlen(suffix);
+            if (s.size() < slen) return false;
+            return strcasecmp(s.c_str() + s.size() - slen, suffix) == 0;
+        };
+        if (endsWithCI(last, ".pbp") || endsWithCI(last, ".prx") || endsWithCI(last, ".rif")) {
+            if (sl != std::string::npos) p = p.substr(0, sl);
+        }
+        // Now get the last component
+        sl = p.rfind('/');
+        if (sl != std::string::npos) return p.substr(sl + 1);
+        return p;
+    }
+
+    // Read a legacy (v1.6/v1.7) gclite_filter.txt: one folder name per line
+    // Extract a bare folder name from a line that may be a simple name,
+    // a full path, or a device-prefixed path.  Returns empty for === headers.
+    static std::string extractLegacyFolderName(const std::string& line) {
+        if (line.empty()) return {};
+        if (line.rfind("===", 0) == 0) return {};  // skip section headers
+
+        // Already a bare folder name?
+        if (line.find('/') == std::string::npos &&
+            line.find('\\') == std::string::npos &&
+            line.find(':') == std::string::npos) return line;
+
+        // Has path separators or device prefix — extract last component
+        std::string name = extractGameFolderName(line);
+        // Reject if extractGameFolderName returned something that still looks like a header
+        if (!name.empty() && name.rfind("===", 0) == 0) return {};
+        return name;
+    }
+
+    static std::vector<std::string> gclReadLegacyFilterFile(const std::string& filePath) {
+        std::vector<std::string> names;
+        std::string txt;
+        if (!gclReadWholeText(filePath, txt)) return names;
+        size_t pos = 0, start = 0;
+        while (pos <= txt.size()) {
+            if (pos == txt.size() || txt[pos] == '\n' || txt[pos] == '\r') {
+                std::string raw = trimSpaces(txt.substr(start, pos - start));
+                std::string name = extractLegacyFolderName(raw);
+                if (!name.empty()) {
+                    // Deduplicate (case-sensitive)
+                    bool dup = false;
+                    for (const auto& existing : names) {
+                        if (existing == name) { dup = true; break; }
+                    }
+                    if (!dup) names.push_back(name);
+                }
+                if (pos + 1 < txt.size() && txt[pos] == '\r' && txt[pos + 1] == '\n') ++pos;
+                start = pos + 1;
+            }
+            ++pos;
+        }
+        return names;
+    }
+
+    static std::vector<std::string> gclReadLegacyFilter() {
+        return gclReadLegacyFilterFile(gclFiltersPath());
+    }
+
+    // Write a legacy gclite_filter.txt: one folder name per line
+    static bool gclWriteLegacyFilter(const std::vector<std::string>& names) {
+        std::string out;
+        for (const auto& n : names) {
+            std::string clean = extractLegacyFolderName(n);
+            if (clean.empty()) continue;
+            out += clean + "\r\n";
+        }
+        std::string root = gclFiltersRoot();
+        std::string dir = root + "seplugins";
+        sceIoMkdir(dir.c_str(), 0777);
+        return gclWriteWholeText(gclFiltersPath(), out);
+    }
+
+    // Ensure legacy filter cache is loaded
+    void gclLoadLegacyFilterCache() {
+        if (gclLegacyFilterLoaded) return;
+        gclLegacyFilterCache = gclReadLegacyFilter();
+        gclLegacyFilterLoaded = true;
+    }
+
+    // Check if a folder name is in the legacy filter (uses cache)
+    bool isGameFilteredLegacy(const std::string& path) {
+        std::string folderName = extractGameFolderName(path);
+        if (folderName.empty()) return false;
+        gclLoadLegacyFilterCache();
+        for (const auto& n : gclLegacyFilterCache) {
+            if (n == folderName) return true;
+        }
+        return false;
+    }
+
+    // Hide/unhide in legacy mode: add/remove the folder name
+    void setGameHiddenLegacy(const std::vector<std::string>& paths, bool hide) {
+        if (paths.empty()) return;
+        gclLoadLegacyFilterCache();
+        std::vector<std::string> names = gclLegacyFilterCache;
+        for (const auto& p : paths) {
+            std::string folderName = extractGameFolderName(p);
+            if (folderName.empty()) continue;
+            if (hide) {
+                bool exists = false;
+                for (const auto& n : names) {
+                    if (n == folderName) { exists = true; break; }
+                }
+                if (!exists) names.push_back(folderName);
+            } else {
+                for (auto it = names.begin(); it != names.end(); ) {
+                    if (*it == folderName) it = names.erase(it);
+                    else ++it;
+                }
+            }
+        }
+        gclWriteLegacyFilter(names);
+        gclLegacyFilterCache = names;  // update cache in place
+    }
+
+    // Recursively search for game folders matching a name across both devices
+    // Returns all full paths found (e.g. "ms0:/PSP/GAME/MyApp", "ef0:/PSP/GAME/CAT_Action/MyApp")
+    std::vector<std::string> gclFindGameFoldersByName(const std::string& folderName) {
+        std::vector<std::string> results;
+        if (folderName.empty()) return results;
+
+        auto searchDir = [&](const std::string& base) {
+            SceUID d = kfeIoOpenDir(base.c_str());
+            if (d < 0) return;
+            SceIoDirent ent; memset(&ent, 0, sizeof(ent));
+            while (kfeIoReadDir(d, &ent) > 0) {
+                trimTrailingSpaces(ent.d_name);
+                if (!strcmp(ent.d_name, ".") || !strcmp(ent.d_name, "..")) { memset(&ent,0,sizeof(ent)); continue; }
+                if (FIO_S_ISDIR(ent.d_stat.st_mode)) {
+                    if (folderName == ent.d_name) {
+                        results.push_back(joinDirFile(base, ent.d_name));
+                    }
+                }
+                memset(&ent, 0, sizeof(ent));
+            }
+            kfeIoCloseDir(d);
+        };
+
+        auto searchDevice = [&](const char* root) {
+            if (!DeviceExists(root)) return;
+            std::string gameDir = std::string(root) + "PSP/GAME";
+            // Direct children of /PSP/GAME/
+            searchDir(gameDir);
+            // Also search inside category folders (CAT_*, numbered, etc.)
+            SceUID d = kfeIoOpenDir(gameDir.c_str());
+            if (d < 0) return;
+            SceIoDirent ent; memset(&ent, 0, sizeof(ent));
+            while (kfeIoReadDir(d, &ent) > 0) {
+                trimTrailingSpaces(ent.d_name);
+                if (!strcmp(ent.d_name, ".") || !strcmp(ent.d_name, "..")) { memset(&ent,0,sizeof(ent)); continue; }
+                if (FIO_S_ISDIR(ent.d_stat.st_mode)) {
+                    searchDir(joinDirFile(gameDir, ent.d_name));
+                }
+                memset(&ent, 0, sizeof(ent));
+            }
+            kfeIoCloseDir(d);
+        };
+
+        searchDevice("ms0:/");
+        searchDevice("ef0:/");
+        return results;
+    }
+
+    // Parse ===HIDDEN APPS=== entries from a v1.8-format file text
+    static std::vector<std::pair<std::string, std::string>> gclParseV18HiddenApps(const std::string& txt) {
+        // Returns pairs of (device root, normalized path)
+        std::vector<std::pair<std::string, std::string>> results;
+        bool inHiddenApps = false;
+        size_t pos = 0, start = 0;
+        while (pos <= txt.size()) {
+            if (pos == txt.size() || txt[pos] == '\n' || txt[pos] == '\r') {
+                std::string raw = trimSpaces(txt.substr(start, pos - start));
+                if (!raw.empty()) {
+                    std::string low = raw;
+                    for (char& c : low) c = toLowerC(c);
+                    if (low.rfind("===", 0) == 0) {
+                        inHiddenApps = (low == "===hidden apps===");
+                    } else if (inHiddenApps) {
+                        // Parse device + path
+                        std::string devTok, pathPart;
+                        size_t comma = raw.find(',');
+                        if (comma != std::string::npos) {
+                            devTok = raw.substr(0, comma);
+                            pathPart = trimSpaces(raw.substr(comma + 1));
+                        } else if (raw.size() >= 4 && raw[3] == ':') {
+                            devTok = raw.substr(0, 3);
+                            pathPart = raw;
+                        }
+                        std::string root;
+                        auto parseDevTok = [](std::string tok, std::string& r) -> bool {
+                            for (char& c : tok) if (c >= 'A' && c <= 'Z') c = c - 'A' + 'a';
+                            if (tok.size() >= 4 && tok[3] == ':') tok = tok.substr(0, 3);
+                            while (!tok.empty() && (tok.back() == ' ' || tok.back() == '\t')) tok.pop_back();
+                            if (tok == "ms0") { r = "ms0:/"; return true; }
+                            if (tok == "ef0") { r = "ef0:/"; return true; }
+                            return false;
+                        };
+                        if (!devTok.empty() && parseDevTok(devTok, root)) {
+                            std::string norm = normalizeGameFilterPath(pathPart);
+                            if (!norm.empty()) results.push_back({root, norm});
+                        } else if (devTok.empty()) {
+                            std::string norm = normalizeGameFilterPath(raw);
+                            if (!norm.empty()) {
+                                results.push_back({"ms0:/", norm});
+                                results.push_back({"ef0:/", norm});
+                            }
+                        }
+                    }
+                }
+                if (pos + 1 < txt.size() && txt[pos] == '\r' && txt[pos + 1] == '\n') ++pos;
+                start = pos + 1;
+            }
+            ++pos;
+        }
+        return results;
+    }
+
+    // Bidirectional merge between legacy and v1.8 filter files
+    void gclMergeLegacyFilters(const std::string& sourceFile, const std::string& destFile, bool toLegacy) {
+        if (toLegacy) {
+            // Source = v1.8 format → extract folder names → merge into legacy dest
+            std::string srcTxt;
+            if (!gclReadWholeText(sourceFile, srcTxt)) return;
+            auto hiddenApps = gclParseV18HiddenApps(srcTxt);
+
+            // Collect folder names from v1.8 paths
+            std::vector<std::string> newFolderNames;
+            for (const auto& entry : hiddenApps) {
+                std::string name = extractGameFolderName(entry.second);
+                if (name.empty() || name.rfind("===", 0) == 0) continue;
+                newFolderNames.push_back(name);
+            }
+
+            // Read existing legacy entries (already validated by gclReadLegacyFilterFile)
+            std::vector<std::string> legacyNames = gclReadLegacyFilterFile(destFile);
+
+            // Add missing names
+            for (const auto& name : newFolderNames) {
+                bool exists = false;
+                for (const auto& existing : legacyNames) {
+                    if (existing == name) { exists = true; break; }
+                }
+                if (!exists) legacyNames.push_back(name);
+            }
+
+            // Write back (only valid folder names)
+            std::string out;
+            for (const auto& n : legacyNames) {
+                std::string cleanN = extractLegacyFolderName(n);
+                if (cleanN.empty()) continue;
+                out += cleanN + "\r\n";
+            }
+            gclWriteWholeText(destFile, out);
+        } else {
+            // Source = legacy format → resolve to full paths → merge into v1.8 dest
+            std::vector<std::string> legacyNames = gclReadLegacyFilterFile(sourceFile);
+            if (legacyNames.empty()) return;
+
+            // Force-reload the v1.8 filter maps so we have current state
+            gclFiltersLoaded = false; gclLegacyFilterLoaded = false;
+
+            // If dest doesn't exist yet, create an empty v1.8 file
+            if (!pathExists(destFile)) {
+                gclWriteWholeText(destFile, "===HIDDEN CATEGORIES===\r\n===HIDDEN APPS===\r\n");
+            }
+
+            gclLoadUnifiedFilters();
+
+            for (const auto& name : legacyNames) {
+                if (name.empty() || name.rfind("===", 0) == 0) continue;
+                std::vector<std::string> found = gclFindGameFoldersByName(name);
+                if (found.empty()) {
+                    // Fallback: add as /PSP/GAME/<name> for both devices
+                    std::string fallback = normalizeGameFilterPath("/PSP/GAME/" + name);
+                    if (!fallback.empty()) {
+                        auto addUnique = [](std::vector<std::string>& list, const std::string& v) {
+                            for (const auto& w : list) if (!strcasecmp(w.c_str(), v.c_str())) return;
+                            list.push_back(v);
+                        };
+                        addUnique(gclGameFilterMap["ms0:/"], fallback);
+                        addUnique(gclGameFilterMap["ef0:/"], fallback);
+                    }
+                } else {
+                    for (const auto& fullPath : found) {
+                        std::string root = rootPrefix(fullPath);
+                        if (root.empty()) root = "ms0:/";
+                        std::string norm = normalizeGameFilterPath(fullPath);
+                        if (norm.empty()) continue;
+                        auto addUnique = [](std::vector<std::string>& list, const std::string& v) {
+                            for (const auto& w : list) if (!strcasecmp(w.c_str(), v.c_str())) return;
+                            list.push_back(v);
+                        };
+                        addUnique(gclGameFilterMap[root], norm);
+                    }
+                }
+            }
+
+            gclSaveUnifiedFilters();
+        }
+    }
+
+    static bool gclLooksLikeV18FilterText(const std::string& txt) {
+        return txt.find("===HIDDEN CATEGORIES===") != std::string::npos ||
+               txt.find("===HIDDEN APPS===") != std::string::npos;
+    }
+
+    bool gclLooksLikeV18FilterFile(const std::string& path) {
+        std::string txt;
+        if (!gclReadWholeText(path, txt)) return false;
+        return gclLooksLikeV18FilterText(txt);
+    }
+
+    bool gclForceRemoveFile(const std::string& path) {
+        if (path.empty() || !pathExists(path)) return true;
+        return sceIoRemove(path.c_str()) >= 0;
+    }
+
+    bool gclForceCopyFile(const std::string& src, const std::string& dst) {
+        if (src.empty() || dst.empty() || !pathExists(src)) return false;
+        if (strcasecmp(src.c_str(), dst.c_str()) == 0) return true;
+        gclForceRemoveFile(dst);
+        return copyFileBuffered(src, dst);
+    }
+
+    bool gclForceMoveFile(const std::string& src, const std::string& dst) {
+        if (src.empty() || dst.empty() || !pathExists(src)) return false;
+        if (strcasecmp(src.c_str(), dst.c_str()) == 0) return true;
+        gclForceRemoveFile(dst);
+        if (sceIoRename(src.c_str(), dst.c_str()) >= 0) return true;
+        if (!copyFileBuffered(src, dst)) return false;
+        sceIoRemove(src.c_str());
+        return true;
+    }
+
+    void gclEnsureV18FilterFile(const std::string& path) {
+        if (pathExists(path) && gclLooksLikeV18FilterFile(path)) return;
+        gclWriteWholeText(path, "===HIDDEN CATEGORIES===\r\n===HIDDEN APPS===\r\n");
+    }
+
+    // Toggle between legacy and v1.8 plugin modes
+    void gclToggleLegacyMode(bool enableLegacy) {
+        std::string primaryRoot = gclPickDeviceRoot();
+        std::string targetRoot = rootPrefix(gclDevice);
+        if (targetRoot.empty()) targetRoot = primaryRoot;
+        std::string seplugins = gclSepluginsDirForRoot(targetRoot);
+        if (!dirExists(seplugins)) sceIoMkdir(seplugins.c_str(), 0777);
+
+        const std::string prxActive = joinDirFile(seplugins, "category_lite.prx");
+        const std::string prxOld = joinDirFile(seplugins, "category_lite_old.prx");
+        const std::string prxV18 = joinDirFile(seplugins, "category_lite_v1.8.prx");
+        const std::string bundledPrx = gclBundledPrxPath();
+
+        std::string filterRoot = gclFiltersRoot();
+        std::string filterDir = filterRoot + "seplugins";
+        sceIoMkdir(filterDir.c_str(), 0777);
+        const std::string filter = joinDirFile(filterDir, "gclite_filter.txt");
+        const std::string filterOld = joinDirFile(filterDir, "gclite_filter_old.txt");
+        const std::string filterV18 = joinDirFile(filterDir, "gclite_filter_v1.8.txt");
+
+        if (enableLegacy) {
+            // Keep a deterministic v1.8 copy available.
+            if (pathExists(bundledPrx)) {
+                gclForceCopyFile(bundledPrx, prxV18);
+            } else if (!pathExists(prxV18) && pathExists(prxActive)) {
+                gclForceCopyFile(prxActive, prxV18);
+            }
+
+            // Activate legacy PRX if available.
+            std::string legacySrc = gclFindLegacyCategoryLitePrxAny(primaryRoot);
+            if (legacySrc.empty() && pathExists(prxOld)) legacySrc = prxOld;
+            if (legacySrc.empty()) legacySrc = gclFindCategoryLiteOldPrxAny(primaryRoot);
+            if (!legacySrc.empty() && strcasecmp(legacySrc.c_str(), prxActive.c_str()) != 0) {
+                gclForceCopyFile(legacySrc, prxActive);
+            }
+            if (!pathExists(prxActive) && pathExists(prxV18)) {
+                gclForceCopyFile(prxV18, prxActive);
+            }
+
+            // Normalize filter files for legacy-active mode.
+            if (pathExists(filter) && gclLooksLikeV18FilterFile(filter)) {
+                gclForceMoveFile(filter, filterV18);
+            }
+            if (!pathExists(filterV18)) {
+                gclEnsureV18FilterFile(filterV18);
+            }
+            if (!pathExists(filter)) {
+                if (pathExists(filterOld)) gclForceMoveFile(filterOld, filter);
+                if (!pathExists(filter)) gclWriteWholeText(filter, "");
+            }
+
+            gclLegacyMode = true;
+            gclSetLegacyMode(true);
+            if (pathExists(filterV18) && pathExists(filter)) {
+                gclMergeLegacyFilters(filterV18, filter, /*toLegacy=*/true);
+            }
+
+            // Checked mode should be category_lite.prx + category_lite_v1.8.prx.
+            gclForceRemoveFile(prxOld);
+            gclForceRemoveFile(filterOld);
+        } else {
+            // Preserve current legacy PRX as *_old (if legacy is active now).
+            if (pathExists(prxActive) && !gclIsBundledPrxCopy(prxActive)) {
+                gclForceMoveFile(prxActive, prxOld);
+            } else if (!pathExists(prxOld)) {
+                std::string legacySrc = gclFindLegacyCategoryLitePrxAny(primaryRoot);
+                if (!legacySrc.empty()) gclForceCopyFile(legacySrc, prxOld);
+            }
+
+            // Activate v1.8 PRX.
+            bool haveV18 = false;
+            if (pathExists(prxV18)) haveV18 = gclForceMoveFile(prxV18, prxActive);
+            if (!haveV18 && pathExists(bundledPrx)) haveV18 = gclForceCopyFile(bundledPrx, prxActive);
+            if (!haveV18 && !pathExists(prxActive) && pathExists(prxOld)) {
+                gclForceCopyFile(prxOld, prxActive);
+            }
+
+            // Keep unchecked mode clean (no *_v1.8 files).
+            gclForceRemoveFile(prxV18);
+
+            // Preserve legacy filter as *_old if needed.
+            if (pathExists(filter) && !gclLooksLikeV18FilterFile(filter)) {
+                gclForceMoveFile(filter, filterOld);
+            } else if (!pathExists(filterOld)) {
+                gclWriteWholeText(filterOld, "");
+            }
+
+            // Activate v1.8 filter.
+            if (pathExists(filterV18)) {
+                gclForceMoveFile(filterV18, filter);
+            }
+            gclEnsureV18FilterFile(filter);
+
+            gclLegacyMode = false;
+            gclSetLegacyMode(false);
+
+            if (pathExists(filterOld)) {
+                gclMergeLegacyFilters(filterOld, filter, /*toLegacy=*/false);
+            }
+
+            // Keep unchecked mode clean (no *_v1.8 files).
+            gclForceRemoveFile(filterV18);
+        }
+
+        if (pathExists(prxActive)) gclPrxPath = prxActive;
+        gclOldPrxPath = gclFindCategoryLiteOldPrxAny(primaryRoot);
+        gclLegacyMode = enableLegacy;
+        gclFiltersLoaded = false; gclLegacyFilterLoaded = false;
+    }
+
+    // Auto-migrate old-format gclite_filter.txt on boot
+    void gclAutoMigrateLegacyFilterOnBoot() {
+        if (gclLegacyMode) return;  // skip if using legacy plugin
+
+        std::string filterPath = gclFiltersPath();
+        std::string txt;
+        if (!gclReadWholeText(filterPath, txt)) return;
+        if (txt.find("===") != std::string::npos) return;  // already v1.8 format
+        if (txt.empty()) return;  // empty, nothing to migrate
+
+        // Old-format file found. Rename to _old and migrate.
+        std::string root = gclFiltersRoot();
+        std::string oldPath = root + "seplugins/gclite_filter_old.txt";
+        if (!pathExists(oldPath)) {
+            sceIoRename(filterPath.c_str(), oldPath.c_str());
+        } else {
+            // _old already exists; just remove the current file (we'll merge from _old)
+            sceIoRemove(filterPath.c_str());
+        }
+
+        // Merge old entries into a fresh v1.8 filter
+        gclFiltersLoaded = false; gclLegacyFilterLoaded = false;
+        gclMergeLegacyFilters(oldPath, filterPath, /*toLegacy=*/false);
     }
 
     static bool isBlacklistedBaseNameFor(const std::string& root, const std::string& base) {
@@ -1502,19 +2352,21 @@
     }
 
     bool isGameFilteredPath(const std::string& path) {
+        if (gclLegacyMode) return isGameFilteredLegacy(path);
         std::string key = normalizeGameFilterPath(path);
         if (key.empty()) return false;
         gclLoadGameFilterFor(currentDevice);
         const std::string root = gclFilterRootKeyFor(currentDevice);
         const auto& fl = gclGameFilterMap[root];
         for (const auto& w : fl) {
-            if (w == key) return true;
+            if (!strcasecmp(w.c_str(), key.c_str())) return true;
         }
         return false;
     }
 
     void setGameHiddenForPaths(const std::vector<std::string>& paths, bool hide) {
         if (paths.empty()) return;
+        if (gclLegacyMode) { setGameHiddenLegacy(paths, hide); return; }
         gclLoadGameFilterFor(currentDevice);
         const std::string root = gclFilterRootKeyFor(currentDevice);
         auto& fl = gclGameFilterMap[root];
@@ -1525,12 +2377,12 @@
             if (hide) {
                 bool exists = false;
                 for (const auto& w : fl) {
-                    if (w == key) { exists = true; break; }
+                    if (!strcasecmp(w.c_str(), key.c_str())) { exists = true; break; }
                 }
                 if (!exists) fl.push_back(key);
             } else {
                 for (auto it = fl.begin(); it != fl.end(); ) {
-                    if (*it == key) it = fl.erase(it);
+                    if (!strcasecmp(it->c_str(), key.c_str())) it = fl.erase(it);
                     else ++it;
                 }
             }
@@ -1900,7 +2752,7 @@
         std::string dst = joinDirFile(seplugins, "category_lite.prx");
 
         // Where we’re copying from (next to your images)
-        std::string baseDir = getBaseDir(gExecPath);
+        std::string baseDir = currentExecBaseDir();
         std::string src = baseDir + "resources/category_lite.prx";
 
         if (!copyFileBuffered(src, dst)) return false;
@@ -1912,10 +2764,11 @@
 
     void gclMaybeUpdatePrx() {
         if (!gclArkOn && !gclProOn) return;
+        if (gclLegacyMode) return;  // don't touch legacy plugin
         if (gclPrxPath.empty()) return;
 
         SceIoStat srcSt{}, curSt{};
-        std::string baseDir = getBaseDir(gExecPath);
+        std::string baseDir = currentExecBaseDir();
         std::string src = baseDir + "resources/category_lite.prx";
         if (!pathExists(src, &srcSt) || !pathExists(gclPrxPath, &curSt)) return;
         if (srcSt.st_size == curSt.st_size) return;
@@ -1942,8 +2795,33 @@
         }
     }
 
+    // On non-legacy mode, remove stale v1.8 sidecars when main files are already v1.8-active.
+    void gclHealRedundantV18ArtifactsOnLoad() {
+        if (gclLegacyMode) return;
+
+        std::string targetRoot = rootPrefix(gclDevice);
+        if (targetRoot.empty()) targetRoot = gclPickDeviceRoot();
+        std::string seplugins = gclSepluginsDirForRoot(targetRoot);
+        if (!seplugins.empty()) {
+            std::string prxActive = joinDirFile(seplugins, "category_lite.prx");
+            std::string prxV18 = joinDirFile(seplugins, "category_lite_v1.8.prx");
+            if (pathExists(prxActive) && pathExists(prxV18) && gclIsBundledPrxCopy(prxActive)) {
+                sceIoRemove(prxV18.c_str());
+            }
+            if (pathExists(prxActive)) gclPrxPath = prxActive;
+        }
+
+        std::string filterDir = gclFiltersRoot() + "seplugins";
+        std::string filter = joinDirFile(filterDir, "gclite_filter.txt");
+        std::string filterV18 = joinDirFile(filterDir, "gclite_filter_v1.8.txt");
+        if (pathExists(filter) && pathExists(filterV18) && gclLooksLikeV18FilterFile(filter)) {
+            sceIoRemove(filterV18.c_str());
+        }
+    }
+
     void gclHardCheckPrxIfEnabled() {
         if (!gclArkOn && !gclProOn) return;
+        if (gclLegacyMode) return;  // skip PRX update when using legacy v1.6/v1.7 plugin
 
         // Prefer ARK-4 if both are enabled (matches UI precedence)
         const bool wantArk = gclArkOn;
@@ -1975,6 +2853,7 @@
         // Ensure the PRX exists and refresh it if needed.
         if (!gclEnsurePrxPresent(targetSeplugins)) return;
         gclMaybeUpdatePrx();
+        gclHealRedundantV18ArtifactsOnLoad();
     }
 
     void buildRootRows(){
@@ -1991,7 +2870,9 @@
         if (opPhase != OP_SelectDevice) {
             gclLoadConfig();
             gclComputeInitial();
+            gclAutoMigrateLegacyFilterOnBoot();
             gclMaybeUpdatePrx();
+            gclHealRedundantV18ArtifactsOnLoad();
         }
 
         auto addSimpleRow = [&](const char* name){
@@ -2136,7 +3017,7 @@
         {
             const std::string filterRoot = gclFilterRootKeyFor(currentDevice);
             (void)filterRoot;
-            gclFiltersLoaded = false;
+            gclFiltersLoaded = false; gclLegacyFilterLoaded = false;
             gclLoadCategoryFilterFor(currentDevice);
         }
 

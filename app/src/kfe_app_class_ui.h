@@ -62,8 +62,12 @@ private:
     // --- Game Categories Lite toggle state ---
     bool        gclArkOn = false;
     bool        gclProOn = false;
+    bool        gclLegacyMode = false;  // true when using v1.6/v1.7 legacy plugin
+    bool        gclLegacyFilterLoaded = false;
+    std::vector<std::string> gclLegacyFilterCache;  // cached legacy filter names
     std::string gclDevice;   // "ef0:/" on PSP Go if present; else "ms0:/"
     std::string gclPrxPath;  // full path to found category_lite.prx (if any)
+    std::string gclOldPrxPath;  // full path to category_lite_old.prx (if any)
 
     // --- NEW: in-memory gclite config (matches plugin) ---
     struct GclConfig {
@@ -756,6 +760,9 @@ private:
     static GclSettingKey gclPending;
     bool gclBlacklistDirty = false;
     bool gclHardCheckDone = false;
+    enum RunningAppWarningAction { RAW_None, RAW_Rename, RAW_Move, RAW_Copy };
+    RunningAppWarningAction runningAppWarningPending = RAW_None;
+    bool runningAppWarningBypass = false;
 
     // Track which kind of menu is open (content vs categories)
     enum MenuContext { MC_ContentOps, MC_CategoryOps };
@@ -860,6 +867,15 @@ private:
 
     // Cache of entries that have no embedded icon; use placeholder and don't retry.
     std::unordered_set<std::string> noIconPaths;
+    // Short grace period after self move/rename to avoid memoizing transient icon lookup failures.
+    unsigned long long noIconMemoGraceUntilUs = 0;
+    // Retry timer when selected icon is currently placeholder but not memoized-failed.
+    unsigned long long selectionIconRetryAtUs = 0;
+
+    void armIconReloadGraceWindow(unsigned int ms = 2000) {
+        noIconMemoGraceUntilUs = (unsigned long long)sceKernelGetSystemTimeWide() +
+                                 (unsigned long long)ms * 1000ULL;
+    }
 
     // Apply current on-screen order of categories to XX numbering and on-disk names.
     // - Skips "Uncategorized" entirely.
@@ -1351,6 +1367,66 @@ private:
         return "";
     }
 
+    static std::string trimTrailingSlashCopy(std::string p) {
+        while (!p.empty() && p[p.size() - 1] == '/') p.erase(p.size() - 1);
+        return p;
+    }
+
+    bool isCurrentExecFolderPath(const std::string& path) const {
+        std::string appDir = trimTrailingSlashCopy(currentExecBaseDir());
+        std::string cand = trimTrailingSlashCopy(path);
+        if (appDir.empty() || cand.empty()) return false;
+        return !strcasecmp(appDir.c_str(), cand.c_str());
+    }
+
+    bool selectionIncludesCurrentAppFolder() const {
+        if (showRoots || !(view == View_AllFlat || view == View_CategoryContents)) return false;
+        if (!checked.empty()) {
+            for (size_t i = 0; i < workingList.size(); ++i) {
+                const GameItem& gi = workingList[i];
+                if (checked.find(gi.path) == checked.end()) continue;
+                if (gi.kind != GameItem::EBOOT_FOLDER) continue;
+                if (isCurrentExecFolderPath(gi.path)) return true;
+            }
+            return false;
+        }
+        if (selectedIndex < 0 || selectedIndex >= (int)workingList.size()) return false;
+        const GameItem& gi = workingList[selectedIndex];
+        return gi.kind == GameItem::EBOOT_FOLDER && isCurrentExecFolderPath(gi.path);
+    }
+
+    void openCurrentAppActionWarning(RunningAppWarningAction action) {
+        runningAppWarningPending = action;
+        msgBox = new MessageBox(
+            "Attention\n"
+            "Moving, copying, or renaming the currently-running app might fail or cause issues.",
+            okIconTexture, SCREEN_WIDTH, SCREEN_HEIGHT, 1.0f, 15, "Continue",
+            10, 18, 80, 9, 280, 102, PSP_CTRL_CROSS);
+        msgBox->setCancel(circleIconTexture, "Cancel", PSP_CTRL_CIRCLE);
+        msgBox->setOkAlignLeft(true);
+        msgBox->setOkPosition(10, 7);
+        msgBox->setOkStyle(0.7f, 0xFFBBBBBB);
+        msgBox->setOkTextOffset(-2, -1);
+        msgBox->setSubtitleStyle(0.7f, 0xFFBBBBBB);
+        msgBox->setSubtitleGapAdjust(-8);
+    }
+
+    void resolveCurrentAppActionWarning(bool canceled) {
+        const RunningAppWarningAction action = runningAppWarningPending;
+        runningAppWarningPending = RAW_None;
+        if (canceled || action == RAW_None) return;
+
+        runningAppWarningBypass = true;
+        if (action == RAW_Rename) {
+            beginRenameSelected();
+        } else if (action == RAW_Move) {
+            startAction(AM_Move);
+        } else if (action == RAW_Copy) {
+            startAction(AM_Copy);
+        }
+        runningAppWarningBypass = false;
+    }
+
 
     // Replace raw scan calls during navigation with this:
     void scanDevicePreferCache(const std::string& dev) {
@@ -1372,6 +1448,17 @@ private:
         auto rmPath = [&](std::vector<GameItem>& v){
             v.erase(std::remove_if(v.begin(), v.end(),
                 [&](const GameItem& gi){ return gi.path == path; }), v.end());
+        };
+        rmPath(s.flatAll);
+        rmPath(s.uncategorized);
+        for (auto &kv : s.categories) rmPath(kv.second);
+    }
+
+    // Remove a GameItem by case-insensitive full path from all vectors in a snapshot.
+    static void snapErasePathCaseInsensitive(ScanSnapshot& s, const std::string& path) {
+        auto rmPath = [&](std::vector<GameItem>& v){
+            v.erase(std::remove_if(v.begin(), v.end(),
+                [&](const GameItem& gi){ return !strcasecmp(gi.path.c_str(), path.c_str()); }), v.end());
         };
         rmPath(s.flatAll);
         rmPath(s.uncategorized);
@@ -1673,6 +1760,10 @@ private:
                                     GameItem::Kind k, bool isMove) {
         // Remove from source lists first when moving
         if (isMove) snapErasePath(srcSnap, src);
+
+        // Destination collision policy mirrors file ops: replace case-insensitive
+        // duplicates at the destination path (e.g. BOOT vs boot).
+        snapErasePathCaseInsensitive(dstSnap, dst);
 
         // Build fully refreshed metadata for the destination
         GameItem gi = makeItemFor(dst, k);
@@ -2284,6 +2375,7 @@ private:
 
         const GameItem& gi = workingList[selectedIndex];
         const std::string key = gi.path;
+        const unsigned long long nowUs = (unsigned long long)sceKernelGetSystemTimeWide();
 
         // If we just renamed this item, restore the previously displayed ICON0 immediately.
         if (iconCarryTex && key == iconCarryForPath) {
@@ -2291,10 +2383,17 @@ private:
             selectionIconKey = iconCarryForPath;
             iconCarryTex = nullptr;
             iconCarryForPath.clear();
+            selectionIconRetryAtUs = 0;
             return;
         }
 
-        if (key == selectionIconKey && selectionIconTex) return;
+        if (key == selectionIconKey && selectionIconTex) {
+            if (selectionIconTex != placeholderIconTexture) return;
+            if (noIconPaths.find(key) != noIconPaths.end()) return;
+            if (nowUs < selectionIconRetryAtUs) return;
+        } else {
+            selectionIconRetryAtUs = 0;
+        }
 
         freeSelectionIcon();
 
@@ -2307,10 +2406,17 @@ private:
         Texture* t = loadIconForGameItem(gi);
         if (t) {
             selectionIconTex = t;
+            selectionIconRetryAtUs = 0;
         } else {
             selectionIconTex = placeholderIconTexture;
             const bool cacheFailure = (gi.kind == GameItem::EBOOT_FOLDER) && !ebootHasIconSource(gi);
-            if (cacheFailure) noIconPaths.insert(key);
+            if (cacheFailure) {
+                if (nowUs >= noIconMemoGraceUntilUs) noIconPaths.insert(key);
+                selectionIconRetryAtUs = 0;
+            } else {
+                // Transient miss: keep retrying while selected, but throttle retries.
+                selectionIconRetryAtUs = nowUs + 250000ULL; // 250ms
+            }
         }
         selectionIconKey = key;
     }
@@ -2866,7 +2972,7 @@ private:
             drawKeyRowLeft(keyX, keyY, circleIconTexture, "Back", true, keyTextCol, 18.0f);
         } else {
             drawKeyRowLeft(keyX, keyY, okIconTexture, "Pick Up/Drop", true, keyTextCol, 18.0f);
-            drawKeyRowLeft(keyX, keyY, startIconTexture, "Save List", false, saveTextCol, 18.0f);
+            drawKeyRowLeft(keyX, keyY, startIconTexture, "Save List Order", false, saveTextCol, 18.0f);
             drawKeyRowLeft(keyX, keyY, circleIconTexture, "Back", true, keyTextCol, 18.0f);
         }
 
@@ -3287,7 +3393,7 @@ private:
         const char* toggleLabel = showTitles ? "Toggle Filenames" : "Toggle App Titles";
         drawKeyRowLeft(keyX, keyY, lIconTexture, toggleLabel, true, keyTextCol);
         drawKeyRowLeft(keyX, keyY, rIconTexture, "Alphabetize", true, keyTextCol);
-        drawKeyRowLeft(keyX, keyY, startIconTexture, "Save List", false, saveTextCol);
+        drawKeyRowLeft(keyX, keyY, startIconTexture, "Save List Order", false, saveTextCol);
         drawKeyRowLeft(keyX, keyY, selectIconTexture, "Rename", false, keyTextCol);
         drawKeyRowSquarePlusUpDown(keyX, keyY, "Mark for App Ops.", keyTextCol);
         drawKeyRowLeft(keyX, keyY, triangleIconTexture, "App Operations", true, keyTextCol);

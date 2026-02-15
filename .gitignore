@@ -1,6 +1,7 @@
 # Prerequisites
 *.d
 .vscode/
+.claude/
 .sfdx/
 
 # macOS system files

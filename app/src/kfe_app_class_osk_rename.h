@@ -117,6 +117,39 @@
         return false;
     }
 
+    // FAT-style filesystems can reject case-only renames when done directly.
+    // Fallback: rename via a temporary sibling name, then to the requested target.
+    static int renamePathCaseAware(const std::string& from, const std::string& to) {
+        if (from.empty() || to.empty()) return -1;
+        if (from == to) return 0;
+        int rc = sceIoRename(from.c_str(), to.c_str());
+        if (rc >= 0) return rc;
+        if (strcasecmp(from.c_str(), to.c_str()) != 0) return rc;
+
+        const std::string parent = parentOf(from);
+        if (parent.empty()) return rc;
+
+        const unsigned long long seedUs = (unsigned long long)sceKernelGetSystemTimeWide();
+        for (int i = 0; i < 16; ++i) {
+            char tmpLeaf[64];
+            snprintf(tmpLeaf, sizeof(tmpLeaf), ".__kfe_case_tmp_%08X_%02d",
+                     (unsigned)(seedUs & 0xFFFFFFFFu), i);
+            const std::string tmp = joinDirFile(parent, tmpLeaf);
+            SceIoStat st{};
+            if (sceIoGetstat(tmp.c_str(), &st) >= 0) continue;
+
+            int r1 = sceIoRename(from.c_str(), tmp.c_str());
+            if (r1 < 0) return r1;
+            int r2 = sceIoRename(tmp.c_str(), to.c_str());
+            if (r2 >= 0) return r2;
+
+            // Best-effort rollback if second hop fails.
+            sceIoRename(tmp.c_str(), from.c_str());
+            return r2;
+        }
+        return rc;
+    }
+
     // ===================== Rename logic (unchanged) =====================
     void beginRenameSelected() {
         if (showRoots || moving) return;
@@ -133,7 +166,7 @@
             // Treat user input as a BASE name (strip CAT_/XX if they typed it)
             typed = sanitizeFilename(stripCategoryPrefixes(typed));
             // If base didn’t change, nothing to do
-            if (!strcasecmp(stripCategoryPrefixes(oldDisplay).c_str(), typed.c_str())) return;
+            if (stripCategoryPrefixes(oldDisplay) == typed) return;
             if (isBlacklistedBaseNameFor(currentDevice, typed)) {
                 drawMessage("Blacklisted name", COLOR_RED);
                 sceKernelDelayThread(700*1000);
@@ -182,7 +215,7 @@
                 std::string from = base + oldDisplay;
                 std::string to   = base + renameTo;
                 if (dirExists(from)) {
-                    int rc = sceIoRename(from.c_str(), to.c_str());
+                    int rc = renamePathCaseAware(from, to);
                     if (rc < 0) {
                         logInit();
                         logf("category rename FAIL: %s -> %s rc=%d", from.c_str(), to.c_str(), rc);
@@ -196,7 +229,7 @@
                 std::string from = base + oldDisplay;
                 std::string to   = base + renameTo;
                 if (dirExists(from)) {
-                    int rc = sceIoRename(from.c_str(), to.c_str());
+                    int rc = renamePathCaseAware(from, to);
                     if (rc < 0) {
                         logInit();
                         logf("category rename FAIL: %s -> %s rc=%d", from.c_str(), to.c_str(), rc);
@@ -211,14 +244,33 @@
 
             // Compute the *display* name we will now use for this category
             std::string newDisplay = findDisplayNameForCategoryBase(currentDevice, typed);
+            bool updatedExecBaseFromCategoryRename = false;
+            std::string oldExecDir = currentExecBaseDir();
+            if (!oldExecDir.empty() && oldExecDir.back() == '/') oldExecDir.pop_back();
+            bool oldExecDirGoneAfterRename = false;
 
             // Patch in-memory caches (icon paths, no-icon memo set, selection key) to follow the rename
             cachePatchRenameCategory(oldDisplay, newDisplay);
             updateFilterOnCategoryRename(oldDisplay, newDisplay);
             {
-                if (strcasecmp(oldDisplay.c_str(), newDisplay.c_str()) != 0) {
+                if (oldDisplay != newDisplay) {
                     const char* isoRoots[]  = {"ISO/"};
                     const char* gameRoots[] = {"PSP/GAME/","PSP/GAME/PSX/","PSP/GAME/Utility/","PSP/GAME150/"};
+                    auto maybeUpdateExecBase = [&](const char* r){
+                        if (updatedExecBaseFromCategoryRename || oldExecDir.empty()) return;
+                        std::string base = currentDevice + std::string(r);
+                        std::string oldPath = joinDirFile(base, oldDisplay.c_str());
+                        std::string newPath = joinDirFile(base, newDisplay.c_str());
+                        if (!oldPath.empty() && oldPath.back() == '/') oldPath.pop_back();
+                        if (!newPath.empty() && newPath.back() == '/') newPath.pop_back();
+                        const size_t oldLen = oldPath.size();
+                        if (oldLen == 0 || oldExecDir.size() <= oldLen) return;
+                        if (strncasecmp(oldExecDir.c_str(), oldPath.c_str(), oldLen) != 0) return;
+                        if (oldExecDir[oldLen] != '/') return;
+                        std::string mappedAppDir = newPath + oldExecDir.substr(oldLen);
+                        setExecBaseOverrideFromAppDir(mappedAppDir);
+                        updatedExecBaseFromCategoryRename = true;
+                    };
                     auto maybeUpdate = [&](const char* r){
                         std::string base = currentDevice + std::string(r);
                         std::string oldPath = joinDirFile(base, oldDisplay.c_str());
@@ -226,10 +278,14 @@
                         if (!dirExists(oldPath) && dirExists(newPath)) {
                             updateHiddenAppPathsForFolderRename(base, oldDisplay, newDisplay);
                         }
+                        maybeUpdateExecBase(r);
                     };
                     for (auto r : isoRoots)  maybeUpdate(r);
                     for (auto r : gameRoots) maybeUpdate(r);
                 }
+            }
+            if (!oldExecDir.empty() && !dirExists(oldExecDir)) {
+                oldExecDirGoneAfterRename = true;
             }
             buildCategoryRows();
 
@@ -261,6 +317,9 @@
             delete msgBox; 
             msgBox = nullptr;
             renderOneFrame();
+            if (updatedExecBaseFromCategoryRename || oldExecDirGoneAfterRename) {
+                reloadHomeAnimationsForExec();
+            }
 
             return;
         }
@@ -272,26 +331,11 @@
             std::string dir  = dirnameOf(gi.path);
             std::string base = basenameOf(gi.path);
 
-            // Block renaming the currently running app folder.
-            if (gi.kind == GameItem::EBOOT_FOLDER) {
-                std::string appDir = currentExecBaseDir();
-                if (!appDir.empty() && appDir.back() == '/') appDir.pop_back();
-                std::string giDir = gi.path;
-                if (!giDir.empty() && giDir.back() == '/') giDir.pop_back();
-                if (!appDir.empty() && !strcasecmp(appDir.c_str(), giDir.c_str())) {
-                    msgBox = new MessageBox(
-                        "Rename Disabled\n"
-                        "The currently-running app can't be renamed from within the app.",
-                        okIconTexture, SCREEN_WIDTH, SCREEN_HEIGHT, 1.0f, 15, "Close",
-                        10, 18, 80, 9, 280, 90, PSP_CTRL_CROSS);
-                    msgBox->setOkAlignLeft(true);
-                    msgBox->setOkPosition(10, 7);
-                    msgBox->setOkStyle(0.7f, 0xFFBBBBBB);
-                    msgBox->setOkTextOffset(-2, -1);
-                    msgBox->setSubtitleStyle(0.7f, 0xFFBBBBBB);
-                    msgBox->setSubtitleGapAdjust(-8);
-                    return;
-                }
+            if (gi.kind == GameItem::EBOOT_FOLDER &&
+                !runningAppWarningBypass &&
+                isCurrentExecFolderPath(gi.path)) {
+                openCurrentAppActionWarning(RAW_Rename);
+                return;
             }
 
             std::string typed;
@@ -339,9 +383,11 @@
 
             SceIoStat tmp{};
             if (sceIoGetstat(newPath.c_str(), &tmp) >= 0) {
-                drawMessage("Name exists", COLOR_RED);
-                sceKernelDelayThread(700*1000);
-                return;
+                if (strcasecmp(newPath.c_str(), gi.path.c_str()) != 0) {
+                    drawMessage("Name exists", COLOR_RED);
+                    sceKernelDelayThread(700*1000);
+                    return;
+                }
             }
 
             bool wasChecked = (checked.find(gi.path) != checked.end());
@@ -367,17 +413,24 @@
                                     renamePanelW, renamePanelH);
             renderOneFrame();
 
-                int rc = sceIoRename(gi.path.c_str(), newPath.c_str());
+                int rc = renamePathCaseAware(gi.path, newPath);
                 if (rc < 0) {
                     delete msgBox; msgBox = nullptr;
                     drawMessage("Rename failed", COLOR_RED);
                     sceKernelDelayThread(700*1000);
                     return;
                 }
+                const bool renamedCurrentApp =
+                    (gi.kind == GameItem::EBOOT_FOLDER) && isCurrentExecFolderPath(gi.path);
+                if (renamedCurrentApp) {
+                    setExecBaseOverrideFromAppDir(newPath);
+                }
 
                 // If we were showing an ICON0 for this exact item, carry it across the path change.
                 // (Don't carry the placeholder; only a real texture.)
-                if (selectionIconTex && selectionIconTex != placeholderIconTexture && selectionIconKey == gi.path) {
+                if (!renamedCurrentApp &&
+                    selectionIconTex && selectionIconTex != placeholderIconTexture &&
+                    selectionIconKey == gi.path) {
                     iconCarryTex = selectionIconTex;      // do NOT free; we'll reattach after refresh
                     iconCarryForPath = newPath;
                     selectionIconTex = nullptr;
@@ -394,30 +447,54 @@
 
                 // after successful sceIoRename(...)
                 std::string keepPath = newPath;
+                const bool forceFullRescanAfterRename = renamedCurrentApp;
 
-                // Patch cache instead of rescanning
-                cachePatchRenameItem(gi.path, newPath, gi.kind);
                 updateGameFilterOnItemRename(gi.path, newPath);
+                if (!forceFullRescanAfterRename) {
+                    // Patch cache instead of rescanning
+                    cachePatchRenameItem(gi.path, newPath, gi.kind);
 
-                // Preserve the current unsaved order in this list.
-                bool updated = false;
-                for (auto &item : workingList) {
-                    if (item.path == gi.path) {
-                        item = makeItemFor(newPath, gi.kind);
-                        updated = true;
-                        break;
+                    // Preserve the current unsaved order in this list.
+                    bool updated = false;
+                    for (auto &item : workingList) {
+                        if (item.path == gi.path) {
+                            item = makeItemFor(newPath, gi.kind);
+                            updated = true;
+                            break;
+                        }
                     }
-                }
-                if (updated) {
-                    refillRowsFromWorkingPreserveSel();
-                } else {
-                    // Fallback: refresh just the current view
-                    if (view == View_CategoryContents) {
-                        openCategory(currentCategory);
-                    } else if (view == View_AllFlat) {
-                        rebuildFlatFromCache();
+                    if (updated) {
+                        refillRowsFromWorkingPreserveSel();
                     } else {
-                        buildCategoryRows();
+                        // Fallback: refresh just the current view
+                        if (view == View_CategoryContents) {
+                            openCategory(currentCategory);
+                        } else if (view == View_AllFlat) {
+                            rebuildFlatFromCache();
+                        } else {
+                            buildCategoryRows();
+                        }
+                    }
+                } else {
+                    // Renaming the running app can stale icon/path memoization.
+                    // Force a clean in-memory rebuild from disk.
+                    const bool wasCategoryView = (view == View_CategoryContents);
+                    const std::string restoreCategory = currentCategory;
+                    markAllDevicesDirty();
+                    freeSelectionIcon();
+                    noIconPaths.clear();
+                    selectionIconRetryAtUs = 0;
+                    if (iconCarryTex) {
+                        texFree(iconCarryTex);
+                        iconCarryTex = nullptr;
+                        iconCarryForPath.clear();
+                    }
+
+                    // Use the exact same full rebuild path as selecting the device from root.
+                    openDevice(currentDevice);
+                    armIconReloadGraceWindow();
+                    if (wasCategoryView && hasCategories) {
+                        openCategory(restoreCategory);
                     }
                 }
 
@@ -429,6 +506,9 @@
                 // NOW dismiss the "Renaming..." modal
                 delete msgBox; msgBox = nullptr;
                 renderOneFrame();
+                if (renamedCurrentApp) {
+                    reloadHomeAnimationsForExec();
+                }
 
         }
     }

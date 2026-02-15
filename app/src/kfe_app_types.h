@@ -1873,6 +1873,8 @@ uint64_t bytesNeededForMove(const std::vector<std::string>& srcPaths,
 class KernelFileExplorer;
 
 struct KfeFileOps {
+    static void resetCriticalGuardFailure() ;
+    static bool hasCriticalGuardFailure() ;
     static bool sameDevice(const std::string& a, const std::string& b) ;
     static bool ensureDir(const std::string& path) ;
     static bool ensureDirRecursive(const std::string& full) ;
@@ -1992,13 +1994,18 @@ static std::string currentExecBaseDir() {
     return getBaseDir(gExecPath);
 }
 
+static void setExecBaseOverrideFromAppDir(const std::string& appDir) {
+    if (appDir.empty()) return;
+    std::string norm = appDir;
+    if (norm.back() != '/') norm.push_back('/');
+    gExecBaseOverride = norm;
+}
+
 static void setExecBaseOverrideFromAnimRoot(const std::string& animRoot) {
     if (animRoot.empty()) return;
     std::string resDir = parentOf(animRoot);
     std::string appDir = parentOf(resDir);
-    if (appDir.empty()) return;
-    if (appDir.back() != '/') appDir.push_back('/');
-    gExecBaseOverride = appDir;
+    setExecBaseOverrideFromAppDir(appDir);
 }
 
 static void disableHomeAnimationForUsb() {
@@ -2277,6 +2284,21 @@ public:
     void setAllowTriangleDelete(bool allow) { _allowTriangleDelete = allow; }
     bool deleteRequested() const { return _deleteRequested; }
 
+    void setHeightOverride(int h) {
+        _h = h;
+        _y = (_screenH - _h) / 2;
+    }
+    void setCheckbox(const char* label, bool checked, bool disabled) {
+        _hasCheckbox = true;
+        _checkboxLabel = label;
+        _checkboxChecked = checked;
+        _checkboxDisabled = disabled;
+        _checkboxToggled = false;
+        _onCheckbox = false;
+    }
+    bool checkboxToggled() const { return _checkboxToggled; }
+    bool checkboxChecked() const { return _checkboxChecked; }
+
     // NEW: pre-position the highlight on the currently-selected option
     void setSelected(int idx) {
         if (idx >= 0 && idx < (int)_items.size() && !_items[idx].disabled) {
@@ -2293,15 +2315,47 @@ public:
 
 
         if (pressed & PSP_CTRL_UP) {
-            do { _sel = (_sel + (int)_items.size() - 1) % (int)_items.size(); } while (_items[_sel].disabled && _hasEnabled());
+            if (_hasCheckbox && _onCheckbox) {
+                // Move from checkbox back to last enabled item
+                _onCheckbox = false;
+                if (_hasEnabled()) {
+                    _sel = (int)_items.size() - 1;
+                    while (_sel > 0 && _items[_sel].disabled) --_sel;
+                }
+            } else if (_hasCheckbox && !_checkboxDisabled && _sel == 0) {
+                // Wrap from first item to checkbox (only if checkbox is enabled)
+                _onCheckbox = true;
+            } else {
+                do { _sel = (_sel + (int)_items.size() - 1) % (int)_items.size(); } while (_items[_sel].disabled && _hasEnabled());
+            }
         } else if (pressed & PSP_CTRL_DOWN) {
-            do { _sel = (_sel + 1) % (int)_items.size(); } while (_items[_sel].disabled && _hasEnabled());
+            if (_hasCheckbox && !_checkboxDisabled && !_onCheckbox && _sel == (int)_items.size() - 1) {
+                // Move from last item to checkbox (only if checkbox is enabled)
+                _onCheckbox = true;
+            } else if (_hasCheckbox && _onCheckbox) {
+                // Wrap from checkbox to first enabled item
+                _onCheckbox = false;
+                if (_hasEnabled()) {
+                    _sel = 0;
+                    while (_sel < (int)_items.size() - 1 && _items[_sel].disabled) ++_sel;
+                }
+            } else {
+                do { _sel = (_sel + 1) % (int)_items.size(); } while (_items[_sel].disabled && _hasEnabled());
+            }
         } else if (pressed & PSP_CTRL_CIRCLE) {
             _choice = -1; _visible = false;
         } else if (pressed & PSP_CTRL_CROSS) {
-            if (!_items[_sel].disabled) { _choice = _sel; _visible = false; }
+            if (_hasCheckbox && _onCheckbox) {
+                // Toggle checkbox (don't close modal)
+                if (!_checkboxDisabled) {
+                    _checkboxChecked = !_checkboxChecked;
+                    _checkboxToggled = true;
+                }
+            } else if (!_items[_sel].disabled) {
+                _choice = _sel; _visible = false;
+            }
         } else if ((pressed & PSP_CTRL_TRIANGLE) && _allowTriangleDelete) {
-            if (!_items[_sel].disabled && _sel > 0) {
+            if (!_onCheckbox && !_items[_sel].disabled && _sel > 0) {
                 _choice = _sel; _deleteRequested = true; _visible = false;
             }
         }
@@ -2384,7 +2438,7 @@ public:
             const int startIdx = _scroll;
             const int endIdx = std::min((int)_items.size(), startIdx + visibleRows);
             for (int i = startIdx; i < endIdx; ++i) {
-                bool sel = (i == _sel);
+                bool sel = (i == _sel) && !_onCheckbox;
                 bool disabled = _items[i].disabled;
                 unsigned col = disabled ? COLOR_GRAY : COLOR_WHITE;
                 unsigned shadow = (sel && !disabled) ? COLOR_GLOW : 0;
@@ -2395,7 +2449,7 @@ public:
 
                 if (_title && !strcmp(_title, "Game Categories") &&
                     _items[i].label && !strcmp(_items[i].label, "PRO/ME")) {
-                    const char* warnText = "On Vita, enable \"Category Prefix\"";
+                    const char* warnText = "Vita may require \"CAT_\" prefixes";
                     const float warnScale = descScale;
                     const float warnIconH = 12.0f;
                     float warnTextW = _measureText(font, warnScale, warnText);
@@ -2430,6 +2484,36 @@ public:
                 const float t = (maxScroll > 0) ? ((float)_scroll / (float)maxScroll) : 0.0f;
                 const float thumbY = trackY + t * (trackH - thumbH);
                 _rect((int)trackX, (int)thumbY, 2, (int)thumbH, 0xFFBBBBBB);
+            }
+
+            // Checkbox (drawn between items and controls)
+            if (_hasCheckbox && _checkboxLabel) {
+                const float cbY = controlsY - 34.0f;
+                const int cbX = _x + 17;
+                const int cbSize = 11;
+                const bool cbSel = _onCheckbox;
+                const unsigned cbBorderColor = _checkboxDisabled ? 0xFF777777 : COLOR_WHITE;
+                const unsigned cbLabelColor = _checkboxDisabled ? 0xFF777777 : (cbSel ? COLOR_WHITE : COLOR_DESC);
+                const unsigned cbGlow = (cbSel && !_checkboxDisabled) ? COLOR_GLOW : 0;
+
+                // 1px border square (shifted up 2px relative to label)
+                const int boxY = (int)cbY - 2;
+                _rect(cbX, boxY, cbSize, 1, cbBorderColor);
+                _rect(cbX, boxY + cbSize - 1, cbSize, 1, cbBorderColor);
+                _rect(cbX, boxY, 1, cbSize, cbBorderColor);
+                _rect(cbX + cbSize - 1, boxY, 1, cbSize, cbBorderColor);
+
+                // Checkmark fill if checked
+                if (_checkboxChecked) {
+                    _rect(cbX + 2, boxY + 2, cbSize - 4, cbSize - 4, cbBorderColor);
+                }
+
+                // Label
+                intraFontSetStyle(font, 0.65f, cbLabelColor, cbGlow, 0.f, INTRAFONT_ALIGN_LEFT);
+                intraFontPrint(font, (float)(cbX + cbSize + 4), cbY + 8.0f, _checkboxLabel);
+                if (cbSel && !_checkboxDisabled) {
+                    intraFontPrint(font, (float)(cbX + cbSize + 5), cbY + 8.0f, _checkboxLabel);
+                }
             }
 
             // Controls
@@ -2596,5 +2680,13 @@ private:
     int _lastVisibleRows = 0;
     bool _allowTriangleDelete = false;
     bool _deleteRequested = false;
+
+    // Checkbox support
+    bool _hasCheckbox = false;
+    const char* _checkboxLabel = nullptr;
+    bool _checkboxChecked = false;
+    bool _checkboxDisabled = false;
+    bool _checkboxToggled = false;
+    bool _onCheckbox = false;
 };
 // --------------------------------------------------------------------------

@@ -55,6 +55,20 @@ static void mbDrawTextureScaled(Texture* tex, float x, float y, float h, unsigne
     sceGuDisable(GU_TEXTURE_2D);
 }
 
+static void mbDrawHFadeLine(int x, int y, int w, int h, unsigned char peakAlpha, int fadePx, unsigned rgbNoAlpha) {
+    if (w <= 0 || h <= 0) return;
+    if (fadePx < 1) fadePx = 1;
+    for (int i = 0; i < w; ++i) {
+        int left = i;
+        int right = (w - 1) - i;
+        int edgeDist = (left < right) ? left : right;
+        float t = (edgeDist >= fadePx) ? 1.0f : ((float)edgeDist / (float)fadePx);
+        unsigned a = (unsigned)(peakAlpha * t + 0.5f);
+        if (a == 0) continue;
+        mbDrawRect(x + i, y, 1, h, ((a & 0xFF) << 24) | (rgbNoAlpha & 0x00FFFFFF));
+    }
+}
+
 static void mbCountLinesMaxChars(const char* s, int& outMaxChars, int& outLines) {
     outMaxChars = 0;
     outLines = 1;
@@ -96,7 +110,12 @@ MessageBox::MessageBox(const char* message,
   _visible(true),
   _closeButton(closeButton),
   _cancelButton(0),
-  _canceled(false) {
+  _canceled(false),
+  _lastButtons(0),
+  _holdStartUs(0),
+  _holdMask(0),
+  _armedForInput(true),
+  _inputPrimed(false) {
     if (_w <= 0 || _h <= 0) {
         int maxChars = 0, lines = 1;
         mbCountLinesMaxChars(_msg, maxChars, lines);
@@ -131,36 +150,30 @@ bool MessageBox::update() {
     sceCtrlPeekBufferPositive(&pad, 1);
     unsigned now = pad.Buttons;
 
-    // These statics intentionally persist across calls to preserve edge/hold state.
-    static unsigned lastButtons = 0;
-    static unsigned long long holdStartUs = 0;
-    static unsigned holdMask = 0;
-    static MessageBox* activeBox = nullptr;
-    static bool armedForInput = true;   // becomes true once close button is seen released after showing
-
-    // If a different MessageBox has become active, require a release before accepting input.
-    if (activeBox != this) {
-        activeBox = this;
-        armedForInput = false;  // wait for release so we don't instantly close from a previous press
-        holdStartUs = 0;
-        holdMask = 0;
-        lastButtons = now;
+    // Per-instance input state: avoids cross-modal interference when multiple
+    // MessageBox instances are updated in the same frame (e.g. msgBox + gUsbBox).
+    if (!_inputPrimed) {
+        _inputPrimed = true;
+        _lastButtons = now;
+        _holdStartUs = 0;
+        _holdMask = 0;
+        _armedForInput = false; // require one release after the modal appears
     }
 
     // Arm when the close button is fully released
-    if (!armedForInput) {
+    if (!_armedForInput) {
         unsigned gate = _closeButton | _cancelButton;
         if ((now & gate) == 0) {
-            armedForInput = true;
-            holdStartUs = 0;
-            holdMask = 0;
+            _armedForInput = true;
+            _holdStartUs = 0;
+            _holdMask = 0;
         }
-        lastButtons = now;
+        _lastButtons = now;
         return _visible;
     }
 
     // Edge detection + hold fallback (helps when edges are missed due to long frames)
-    unsigned newlyPressed = now & ~lastButtons;
+    unsigned newlyPressed = now & ~_lastButtons;
     bool cancel = (_cancelButton != 0) && ((newlyPressed & _cancelButton) != 0);
     bool close = (!cancel) && ((newlyPressed & _closeButton) != 0);
 
@@ -170,31 +183,32 @@ bool MessageBox::update() {
         else if (now & _closeButton) curMask = _closeButton;
 
         if (curMask == 0) {
-            holdStartUs = 0;
-            holdMask = 0;
+            _holdStartUs = 0;
+            _holdMask = 0;
         } else {
-            if (curMask != holdMask) {
-                holdMask = curMask;
-                holdStartUs = now_us();
+            if (curMask != _holdMask) {
+                _holdMask = curMask;
+                _holdStartUs = now_us();
             } else {
-                if (holdStartUs == 0) holdStartUs = now_us();
-                unsigned long long elapsed = now_us() - holdStartUs;
+                if (_holdStartUs == 0) _holdStartUs = now_us();
+                unsigned long long elapsed = now_us() - _holdStartUs;
                 // 220ms hold fallback: feels snappy but forgiving
                 if (elapsed >= 220000ULL) {
-                    if (holdMask == _cancelButton) cancel = true;
-                    else if (holdMask == _closeButton) close = true;
+                    if (_holdMask == _cancelButton) cancel = true;
+                    else if (_holdMask == _closeButton) close = true;
                 }
             }
         }
     }
 
-    lastButtons = now;
+    _lastButtons = now;
 
     if (close || cancel) {
         _canceled = cancel;
         _visible = false;
-        // After closing, require release before any other UI consumes this press.
-        armedForInput = false;
+        // If this instance is reused later, require a fresh release gate.
+        _armedForInput = false;
+        _inputPrimed = false;
     }
     return _visible;
 }
@@ -271,7 +285,7 @@ void MessageBox::render(intraFont* font) {
     std::vector<std::string> lines;
     wrapTextByChars(_msg ? _msg : "", maxChars, lines);
 
-    int y = innerY;
+    int y = innerY + (_progEnabled ? 2 : 0);
     if (font) {
         const float titleScale = _textScale;
         const float subtitleScale = (_useSubtitleStyle && _subtitleScale > 0.0f)
@@ -329,6 +343,12 @@ void MessageBox::render(intraFont* font) {
 
     // ---- Progress UI ----
     if (_progEnabled) {
+        const int sepW = _w - 6;
+        if (sepW > 0) {
+            mbDrawHFadeLine(_x + 3, y - 16, sepW, 1, 0xA0, 20, 0x00C0C0C0);
+            y += 7;
+        }
+
         const int barH = 12;
         const int barW = innerW;
         const int barX = innerX;
@@ -378,7 +398,7 @@ void MessageBox::render(intraFont* font) {
             }
 
             // Line 2: filename (detail), if any
-            if (!_progDetail.empty()) {
+            if (_progDetailVisible && !_progDetail.empty()) {
                 std::string d = trimToWidth(_progDetail, detailScale, textMaxW);
                 float cy = (float)(y + 2);
                 intraFontSetStyle(font, detailScale, detailColor, 0, 0.0f, INTRAFONT_ALIGN_CENTER);
@@ -632,10 +652,19 @@ void MessageBox::setProgressTitle(const char* title) {
     _progEnabled = true; // ensure progress UI shows when we set a title first
 }
 
+void MessageBox::setProgressDetailVisible(bool visible) {
+    _progDetailVisible = visible;
+}
+
+void MessageBox::setMessage(const char* message) {
+    _msg = message ? message : "";
+}
+
 void MessageBox::hideProgress() {
     _progEnabled = false;
     _progTitle.clear();
     _progDetail.clear();
+    _progDetailVisible = true;
     _progOffset = 0;
     _progSize   = 1;
 }

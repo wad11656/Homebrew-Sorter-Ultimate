@@ -49,6 +49,8 @@ class MessageBox {
         void updateProgress(uint64_t offset, uint64_t size, const char* fileMessage = nullptr);
         void hideProgress();
         void setProgressTitle(const char* title);
+        void setProgressDetailVisible(bool visible);
+        void setMessage(const char* message);
 
 private:
     // config/state
@@ -72,6 +74,7 @@ private:
     bool        _progEnabled = false;
     std::string _progTitle;    // headline (game title)
     std::string _progDetail;   // detail (filename)
+    bool        _progDetailVisible = true;
     uint64_t    _progOffset = 0;
     uint64_t    _progSize   = 1; // never 0 to avoid div-by-zero
     unsigned _closeButton;      // NEW: which button dismisses the box
@@ -86,6 +89,11 @@ private:
     const char* _cancelLabel = nullptr;
     unsigned _cancelButton = 0;
     bool _canceled = false;
+    unsigned _lastButtons = 0;
+    unsigned long long _holdStartUs = 0;
+    unsigned _holdMask = 0;
+    bool _armedForInput = true;
+    bool _inputPrimed = false;
 
     float _subtitleScale = -1.0f;
     unsigned _subtitleColor = 0xFFFFFFFF;

@@ -518,7 +518,7 @@
                         const char* nm = entries[selectedIndex].d_name;
                         std::string base = stripCategoryPrefixes(nm);
                         catHidden = isFilteredBaseName(base);
-                        canHide = gclOn;
+                        canHide = gclOn && !gclLegacyMode;  // legacy plugins can't hide categories
                         canDelete = true;
                     }
                     const char* catHideLabel = catHidden ? "Unhide in XMB" : "Hide in XMB";
@@ -725,9 +725,16 @@
                         "Pick your installed CFW version to activate category folders to organize your games.",
                         items, SCREEN_WIDTH, SCREEN_HEIGHT
                     );
+                    optMenu->setHeightOverride(175); // +15px for legacy checkbox
                     // Preselect current state
                     int sel = (!gclArkOn && !gclProOn) ? 0 : (gclArkOn ? 1 : 2);
                     optMenu->setSelected(sel);
+
+                    std::string primaryRoot = gclPickDeviceRoot();
+                    bool legacyCandidate = gclHasLegacyCandidatePrx(primaryRoot);
+                    bool cbDisabled = !legacyCandidate && !gclLegacyMode;
+                    optMenu->setCheckbox("Use existing v1.6/v1.7 Categories plugin",
+                                         gclLegacyMode, cbDisabled);
 
                     // Prime & debounce so held X/O won't auto-activate the choice
                     SceCtrlData now{}; sceCtrlReadBufferPositive(&now, 1);
@@ -917,6 +924,11 @@
                     delete msgBox; msgBox = nullptr; inputWaitRelease = true;
                     msgBoxOwnedText.clear();
 
+                    if (runningAppWarningPending != RAW_None) {
+                        resolveCurrentAppActionWarning(canceled);
+                        continue;
+                    }
+
                     // If we just closed a confirmation, perform the chosen op now.
                     if (opPhase == OP_Confirm) {
                         if (canceled) {
@@ -1001,10 +1013,22 @@
                     const bool deleteReq = optMenu->deleteRequested();
                     const GclSettingKey pending = gclPending;  // capture BEFORE clearing
                     const bool wasRootPick = rootPickGcl;       // capture BEFORE clearing
+                    const bool cbToggled = optMenu->checkboxToggled();
+                    const bool cbChecked = optMenu->checkboxChecked();
                     delete optMenu; optMenu = nullptr;
                     optMenuOwnedLabels.clear();
                     gclPending = GCL_SK_None;
                     if (wasRootPick) rootPickGcl = false;
+
+                    // Handle legacy checkbox toggle (independent of CFW pick)
+                    if (wasRootPick && cbToggled && cbChecked != gclLegacyMode) {
+                        gclToggleLegacyMode(cbChecked);
+                        // If user only toggled checkbox and canceled CFW pick, refresh UI
+                        if (pick < 0) {
+                            rootKeepGclSelection = true;
+                            buildRootRows();
+                        }
+                    }
 
                 if (pending == GCL_SK_Blacklist && pick < 0) {
                     if (gclBlacklistDirty) {
@@ -1058,24 +1082,54 @@
                             } else {
                                 const bool pluginsExists = !plugins.empty() && pathExists(plugins);
                                 const bool vshExists = !vsh.empty() && pathExists(vsh);
+                                auto applyBackendStateOnce = [&]() -> bool {
+                                    bool ok = true;
 
-                                // Only touch the file we actually need for the chosen mode
-                                if (needArkFile) gclWriteEnableToFile(plugins, wantArk, /*arkPluginsTxt=*/true);
-                                if (needProFile) gclWriteEnableToFile(vsh,     wantPro, /*arkPluginsTxt=*/false);
+                                    // Only touch the file we actually need for the chosen mode
+                                    if (needArkFile) ok &= gclWriteEnableToFileWithVerify(plugins, wantArk, /*arkPluginsTxt=*/true);
+                                    if (needProFile) ok &= gclWriteEnableToFileWithVerify(vsh,     wantPro, /*arkPluginsTxt=*/false);
 
-                                // Ensure the other backend is disabled without creating empty files
-                                if (wantPro) {
-                                    if (pluginsExists) gclWriteEnableToFile(plugins, false, /*arkPluginsTxt=*/true);
-                                } else if (wantArk) {
-                                    if (vshExists) gclWriteEnableToFile(vsh, false, /*arkPluginsTxt=*/false);
-                                } else {
-                                    if (pluginsExists) gclWriteEnableToFile(plugins, false, /*arkPluginsTxt=*/true);
-                                    if (vshExists)     gclWriteEnableToFile(vsh,     false, /*arkPluginsTxt=*/false);
+                                    // Ensure the other backend is disabled without creating empty files
+                                    if (wantPro) {
+                                        if (pluginsExists) ok &= gclWriteEnableToFileWithVerify(plugins, false, /*arkPluginsTxt=*/true);
+                                    } else if (wantArk) {
+                                        if (vshExists) ok &= gclWriteEnableToFileWithVerify(vsh, false, /*arkPluginsTxt=*/false);
+                                    } else {
+                                        if (pluginsExists) ok &= gclWriteEnableToFileWithVerify(plugins, false, /*arkPluginsTxt=*/true);
+                                        if (vshExists)     ok &= gclWriteEnableToFileWithVerify(vsh,     false, /*arkPluginsTxt=*/false);
+                                    }
+
+                                    // Recompute from disk and verify state actually matches request.
+                                    gclComputeInitial();
+                                    if (gclArkOn != wantArk || gclProOn != wantPro) ok = false;
+                                    return ok;
+                                };
+
+                                bool backendOk = applyBackendStateOnce();
+                                if (!backendOk) {
+                                    // One additional pass for intermittent I/O lag on some setups.
+                                    sceKernelDelayThread(12 * 1000);
+                                    backendOk = applyBackendStateOnce();
                                 }
-                                gclArkOn = wantArk;
-                                gclProOn = wantPro;
-                                rootKeepGclSelection = true;
-                                buildRootRows();   // reflect new state immediately
+
+                                if (!backendOk) {
+                                    msgBox = new MessageBox(
+                                        "Error\n"
+                                        "Could not verify plugin update. Please try again.",
+                                        okIconTexture, SCREEN_WIDTH, SCREEN_HEIGHT, 1.0f, 15, "Close",
+                                        10, 18, 80, 9, 280, 102, PSP_CTRL_CROSS);
+                                    msgBox->setOkAlignLeft(true);
+                                    msgBox->setOkPosition(10, 7);
+                                    msgBox->setOkStyle(0.7f, 0xFFBBBBBB);
+                                    msgBox->setOkTextOffset(-2, -1);
+                                    msgBox->setSubtitleStyle(0.7f, 0xFFBBBBBB);
+                                    msgBox->setSubtitleGapAdjust(-8);
+                                } else {
+                                    gclArkOn = wantArk;
+                                    gclProOn = wantPro;
+                                    rootKeepGclSelection = true;
+                                    buildRootRows();   // reflect new state immediately
+                                }
                             }
                         } else {
                             const uint32_t prevCatsort = gclCfg.catsort;
@@ -1086,13 +1140,41 @@
                                 case GCL_SK_Uncat:  gclCfg.uncategorized = (uint32_t)pick; break;
                                 case GCL_SK_Sort:   gclCfg.catsort = (uint32_t)pick; break;
                                 case GCL_SK_Blacklist: {
-                                    if (deleteReq || pick > 0) {
+                                    if (deleteReq && pick > 0) {
+                                        // Triangle on existing item → delete
                                         deleteBlacklistAtIndex(pick - 1);
                                         openBlacklistModal(pick);
                                         continue;
                                     }
 
+                                    if (pick > 0) {
+                                        // X on existing item → rename via OSK
+                                        gclLoadBlacklistFor(currentDevice);
+                                        auto& blRen = gclBlacklistMap[blacklistRootKey(currentDevice)];
+                                        int idx = pick - 1;
+                                        if (idx >= 0 && idx < (int)blRen.size()) {
+                                            std::string typed;
+                                            if (promptTextOSK("Rename blacklist item", blRen[idx].c_str(), 64, typed)) {
+                                                typed = normalizeBlacklistInput(typed);
+                                                if (!typed.empty() && strcasecmp(typed.c_str(), blRen[idx].c_str()) != 0) {
+                                                    // Check for duplicate
+                                                    bool dup = false;
+                                                    for (const auto& w : blRen) {
+                                                        if (!strcasecmp(w.c_str(), typed.c_str())) { dup = true; break; }
+                                                    }
+                                                    if (!dup) {
+                                                        blRen[idx] = typed;
+                                                        gclBlacklistDirty = true;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        openBlacklistModal(pick);
+                                        continue;
+                                    }
+
                                     if (pick == 0) {
+                                        // X on "Add..." → add new item via OSK
                                         std::string typed;
                                         if (!promptTextOSK("Add blacklist item", "", 64, typed)) {
                                             openBlacklistModal(0);
