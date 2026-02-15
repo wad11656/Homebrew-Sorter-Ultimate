@@ -2126,7 +2126,20 @@
         if (path.empty() || gclLegacyMode) return;
         if (gclLooksLikeV18FilterFile(path)) return;
 
+        std::string originalTxt;
+        gclReadWholeText(path, originalTxt);
         std::vector<std::string> legacyNames = gclReadLegacyFilterFile(path);
+
+        // Keep a legacy snapshot when converting the active filter in non-legacy mode.
+        // This preserves user data for later legacy-toggle restores.
+        const std::string activeFilter = gclFiltersPath();
+        if (!strcasecmp(path.c_str(), activeFilter.c_str())) {
+            std::string oldPath = gclFiltersRoot() + "seplugins/gclite_filter_old.txt";
+            if (!pathExists(oldPath) && !originalTxt.empty()) {
+                gclWriteWholeText(oldPath, originalTxt);
+            }
+        }
+
         gclWriteWholeText(path, "===HIDDEN CATEGORIES===\r\n===HIDDEN APPS===\r\n");
 
         if (!legacyNames.empty()) {
@@ -2338,13 +2351,6 @@
         const std::string filterV18 = joinDirFile(filterDir, "gclite_filter_v1.8.txt");
 
         if (enableLegacy) {
-            // Keep a deterministic v1.8 copy available.
-            if (pathExists(bundledPrx)) {
-                gclForceCopyFile(bundledPrx, prxV18);
-            } else if (!pathExists(prxV18) && pathExists(prxActive)) {
-                gclForceCopyFile(prxActive, prxV18);
-            }
-
             // Activate legacy PRX if available.
             std::string legacySrc = gclFindLegacyCategoryLitePrxAny(primaryRoot);
             if (legacySrc.empty() && pathExists(prxOld)) legacySrc = prxOld;
@@ -2353,16 +2359,28 @@
             if (!legacySrc.empty() && strcasecmp(legacySrc.c_str(), prxActive.c_str()) != 0) {
                 gclForceCopyFile(legacySrc, prxActive);
             }
-            if (!pathExists(prxActive) && pathExists(prxV18)) {
-                gclForceCopyFile(prxV18, prxActive);
+            if ((!pathExists(prxActive) || !gclVerifyPrxHeader(prxActive)) && pathExists(prxOld)) {
+                gclForceCopyFile(prxOld, prxActive);
+            }
+            if ((!pathExists(prxActive) || !gclVerifyPrxHeader(prxActive)) && !bundledPrx.empty()) {
+                // Last resort to avoid leaving a broken plugin path.
+                gclForceCopyFile(bundledPrx, prxActive);
             }
 
             // Normalize filter files for legacy-active mode.
-            if (pathExists(filter) && gclLooksLikeV18FilterFile(filter)) {
-                gclForceMoveFile(filter, filterV18);
-            }
-            if (!pathExists(filterV18)) {
-                gclEnsureV18FilterFile(filterV18);
+            // Keep only one active filter file in legacy mode (gclite_filter.txt).
+            const bool filterIsV18 = pathExists(filter) && gclLooksLikeV18FilterFile(filter);
+            if (filterIsV18) {
+                // Merge current v1.8 entries into a temporary legacy file, then replace active file.
+                const std::string legacyTmp = joinDirFile(filterDir, "gclite_filter_legacy_tmp.txt");
+                gclForceRemoveFile(legacyTmp);
+                if (pathExists(filterOld) && !gclLooksLikeV18FilterFile(filterOld)) {
+                    gclForceCopyFile(filterOld, legacyTmp);
+                } else {
+                    gclWriteWholeText(legacyTmp, "");
+                }
+                gclMergeLegacyFilters(filter, legacyTmp, /*toLegacy=*/true);
+                gclForceMoveFile(legacyTmp, filter);
             }
             if (!pathExists(filter)) {
                 if (pathExists(filterOld)) gclForceMoveFile(filterOld, filter);
@@ -2371,13 +2389,12 @@
 
             gclLegacyMode = true;
             gclSetLegacyMode(true);
-            if (pathExists(filterV18) && pathExists(filter)) {
-                gclMergeLegacyFilters(filterV18, filter, /*toLegacy=*/true);
-            }
 
-            // Checked mode should be category_lite.prx + category_lite_v1.8.prx.
+            // Legacy mode should keep a single active variant of plugin/filter files.
             gclForceRemoveFile(prxOld);
+            gclForceRemoveFile(prxV18);
             gclForceRemoveFile(filterOld);
+            gclForceRemoveFile(filterV18);
         } else {
             // Preserve current legacy PRX as *_old (if legacy is active now).
             if (pathExists(prxActive) && !gclIsBundledPrxCopy(prxActive)) {
@@ -2389,8 +2406,8 @@
 
             // Activate v1.8 PRX.
             bool haveV18 = false;
-            if (pathExists(prxV18)) haveV18 = gclForceMoveFile(prxV18, prxActive);
-            if (!haveV18 && pathExists(bundledPrx)) haveV18 = gclForceCopyFile(bundledPrx, prxActive);
+            if (pathExists(bundledPrx)) haveV18 = gclForceCopyFile(bundledPrx, prxActive);
+            if (!haveV18 && pathExists(prxV18)) haveV18 = gclForceMoveFile(prxV18, prxActive);
             if (!haveV18 && !pathExists(prxActive) && pathExists(prxOld)) {
                 gclForceCopyFile(prxOld, prxActive);
             }
@@ -2406,9 +2423,6 @@
             }
 
             // Activate v1.8 filter.
-            if (pathExists(filterV18)) {
-                gclForceMoveFile(filterV18, filter);
-            }
             gclEnsureV18FilterFile(filter);
 
             gclLegacyMode = false;
