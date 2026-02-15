@@ -571,6 +571,7 @@
                 delete gUsbBox; gUsbBox = nullptr;
                 inputWaitRelease = true;
                 reloadHomeAnimationsForExec();
+                gclRunPostUsbIntegrityHeal();
             }
         }
 

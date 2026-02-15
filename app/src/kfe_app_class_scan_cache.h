@@ -882,9 +882,16 @@
         SceIoStat st{}; if (sceIoGetstat(path.c_str(), &st) < 0) { sceIoClose(fd); return false; }
         if (st.st_size <= 0 || st.st_size > 512*1024) { sceIoClose(fd); return false; }
         out.resize((size_t)st.st_size);
-        int got = sceIoRead(fd, &out[0], (uint32_t)out.size());
+        size_t off = 0;
+        while (off < out.size()) {
+            int rd = sceIoRead(fd, &out[off], (uint32_t)(out.size() - off));
+            if (rd < 0) { sceIoClose(fd); out.clear(); return false; }
+            if (rd == 0) break;
+            off += (size_t)rd;
+        }
         sceIoClose(fd);
-        return got >= 0;
+        out.resize(off);
+        return !out.empty();
     }
 
     static bool gclWriteWholeText(const std::string& path, const std::string& data){
@@ -1783,8 +1790,17 @@
     // Read a legacy (v1.6/v1.7) gclite_filter.txt: one folder name per line
     // Extract a bare folder name from a line that may be a simple name,
     // a full path, or a device-prefixed path.  Returns empty for === headers.
+    static bool hasBinaryLikeBytes(const std::string& s) {
+        for (unsigned char ch : s) {
+            if (ch == '\0') return true;
+            if (ch < 0x20 && ch != '\t' && ch != '\r' && ch != '\n') return true;
+        }
+        return false;
+    }
+
     static std::string extractLegacyFolderName(const std::string& line) {
         if (line.empty()) return {};
+        if (hasBinaryLikeBytes(line)) return {};
         if (line.rfind("===", 0) == 0) return {};  // skip section headers
 
         // Already a bare folder name?
@@ -2104,26 +2120,195 @@
         return gclLooksLikeV18FilterText(txt);
     }
 
+    // In non-legacy mode, guarantee gclite_filter.txt is sectioned v1.8 format.
+    // If the file is legacy/headerless (or malformed), salvage names and rewrite.
+    void gclRepairV18FilterFileIfNeeded(const std::string& path) {
+        if (path.empty() || gclLegacyMode) return;
+        if (gclLooksLikeV18FilterFile(path)) return;
+
+        std::vector<std::string> legacyNames = gclReadLegacyFilterFile(path);
+        gclWriteWholeText(path, "===HIDDEN CATEGORIES===\r\n===HIDDEN APPS===\r\n");
+
+        if (!legacyNames.empty()) {
+            std::string root = gclFiltersRoot();
+            std::string dir = root + "seplugins";
+            sceIoMkdir(dir.c_str(), 0777);
+            std::string repairLegacy = joinDirFile(dir, "gclite_filter_repair_legacy.txt");
+
+            std::string out;
+            for (const auto& n : legacyNames) {
+                std::string clean = extractLegacyFolderName(n);
+                if (clean.empty()) continue;
+                out += clean + "\r\n";
+            }
+            if (!out.empty()) {
+                gclWriteWholeText(repairLegacy, out);
+                gclFiltersLoaded = false; gclLegacyFilterLoaded = false;
+                gclMergeLegacyFilters(repairLegacy, path, /*toLegacy=*/false);
+                sceIoRemove(repairLegacy.c_str());
+            }
+        }
+
+        // Final guard: never leave malformed text in non-legacy mode.
+        if (!gclLooksLikeV18FilterFile(path)) {
+            gclWriteWholeText(path, "===HIDDEN CATEGORIES===\r\n===HIDDEN APPS===\r\n");
+        }
+    }
+
     bool gclForceRemoveFile(const std::string& path) {
         if (path.empty() || !pathExists(path)) return true;
         return sceIoRemove(path.c_str()) >= 0;
     }
 
+    static bool gclIsPrxPath(const std::string& path) {
+        return endsWithNoCase(path, ".prx");
+    }
+
+    static bool gclVerifyPrxHeader(const std::string& path) {
+        SceIoStat st{};
+        if (!pathExists(path, &st)) return false;
+        if (st.st_size < 4096 || st.st_size > 2 * 1024 * 1024) return false;
+        SceUID fd = sceIoOpen(path.c_str(), PSP_O_RDONLY, 0);
+        if (fd < 0) return false;
+        uint8_t hdr[4] = {0, 0, 0, 0};
+        int rd = sceIoRead(fd, hdr, sizeof(hdr));
+        sceIoClose(fd);
+        return (rd == 4 && hdr[0] == 0x7F && hdr[1] == 'E' && hdr[2] == 'L' && hdr[3] == 'F');
+    }
+
+    static bool gclFilesBinaryEqual(const std::string& a, const std::string& b) {
+        SceIoStat sa{}, sb{};
+        if (!pathExists(a, &sa) || !pathExists(b, &sb)) return false;
+        if (sa.st_size != sb.st_size) return false;
+
+        SceUID fa = sceIoOpen(a.c_str(), PSP_O_RDONLY, 0);
+        if (fa < 0) return false;
+        SceUID fb = sceIoOpen(b.c_str(), PSP_O_RDONLY, 0);
+        if (fb < 0) { sceIoClose(fa); return false; }
+
+        char ba[16 * 1024];
+        char bb[16 * 1024];
+        bool ok = true;
+        for (;;) {
+            int ra = sceIoRead(fa, ba, sizeof(ba));
+            int rb = sceIoRead(fb, bb, sizeof(bb));
+            if (ra != rb) { ok = false; break; }
+            if (ra < 0) { ok = false; break; }
+            if (ra == 0) break;
+            if (memcmp(ba, bb, (size_t)ra) != 0) { ok = false; break; }
+        }
+        sceIoClose(fa);
+        sceIoClose(fb);
+        return ok;
+    }
+
+    static bool gclVerifyPrxInstall(const std::string& src, const std::string& dst) {
+        if (!gclVerifyPrxHeader(dst)) return false;
+        return gclFilesBinaryEqual(src, dst);
+    }
+
     bool gclForceCopyFile(const std::string& src, const std::string& dst) {
         if (src.empty() || dst.empty() || !pathExists(src)) return false;
-        if (strcasecmp(src.c_str(), dst.c_str()) == 0) return true;
-        gclForceRemoveFile(dst);
-        return copyFileBuffered(src, dst);
+        const bool isPrx = gclIsPrxPath(src) || gclIsPrxPath(dst);
+        if (strcasecmp(src.c_str(), dst.c_str()) == 0) {
+            return isPrx ? gclVerifyPrxHeader(dst) : true;
+        }
+
+        if (!isPrx) {
+            gclForceRemoveFile(dst);
+            return copyFileBuffered(src, dst);
+        }
+
+        const std::string tmp = dst + ".tmp_hsrt";
+        const std::string bak = dst + ".bak_hsrt";
+        gclForceRemoveFile(tmp);
+        gclForceRemoveFile(bak);
+
+        if (!copyFileBuffered(src, tmp)) { gclForceRemoveFile(tmp); return false; }
+        if (!gclVerifyPrxInstall(src, tmp)) { gclForceRemoveFile(tmp); return false; }
+
+        const bool hadDst = pathExists(dst);
+        if (hadDst) {
+            if (sceIoRename(dst.c_str(), bak.c_str()) < 0) {
+                gclForceRemoveFile(tmp);
+                return false;
+            }
+        }
+
+        bool moved = (sceIoRename(tmp.c_str(), dst.c_str()) >= 0);
+        if (!moved) {
+            moved = copyFileBuffered(tmp, dst);
+            gclForceRemoveFile(tmp);
+        }
+        if (!moved || !gclVerifyPrxInstall(src, dst)) {
+            gclForceRemoveFile(dst);
+            if (hadDst) sceIoRename(bak.c_str(), dst.c_str());
+            gclForceRemoveFile(tmp);
+            return false;
+        }
+
+        if (hadDst) gclForceRemoveFile(bak);
+        return true;
     }
 
     bool gclForceMoveFile(const std::string& src, const std::string& dst) {
         if (src.empty() || dst.empty() || !pathExists(src)) return false;
-        if (strcasecmp(src.c_str(), dst.c_str()) == 0) return true;
-        gclForceRemoveFile(dst);
-        if (sceIoRename(src.c_str(), dst.c_str()) >= 0) return true;
-        if (!copyFileBuffered(src, dst)) return false;
-        sceIoRemove(src.c_str());
+        const bool isPrx = gclIsPrxPath(src) || gclIsPrxPath(dst);
+        if (strcasecmp(src.c_str(), dst.c_str()) == 0) {
+            return isPrx ? gclVerifyPrxHeader(dst) : true;
+        }
+
+        if (!isPrx) {
+            gclForceRemoveFile(dst);
+            if (sceIoRename(src.c_str(), dst.c_str()) >= 0) return true;
+            if (!copyFileBuffered(src, dst)) return false;
+            sceIoRemove(src.c_str());
+            return true;
+        }
+
+        const std::string bak = dst + ".bak_hsrt";
+        gclForceRemoveFile(bak);
+        const bool hadDst = pathExists(dst);
+        if (hadDst) {
+            if (sceIoRename(dst.c_str(), bak.c_str()) < 0) return false;
+        }
+
+        if (sceIoRename(src.c_str(), dst.c_str()) >= 0) {
+            if (gclVerifyPrxHeader(dst)) {
+                if (hadDst) gclForceRemoveFile(bak);
+                return true;
+            }
+            sceIoRename(dst.c_str(), src.c_str());
+            if (hadDst) sceIoRename(bak.c_str(), dst.c_str());
+            return false;
+        }
+
+        if (hadDst && !pathExists(dst) && pathExists(bak)) {
+            sceIoRename(bak.c_str(), dst.c_str());
+        }
+
+        if (!gclForceCopyFile(src, dst)) return false;
+        if (sceIoRemove(src.c_str()) < 0) {
+            // Keep source intact if delete failed; treat as failed move.
+            return false;
+        }
         return true;
+    }
+
+    bool gclTryHealActivePrx(const std::string& prxActive,
+                             const std::vector<std::string>& sources,
+                             bool requireExactMatch) {
+        for (const auto& src : sources) {
+            if (src.empty() || !pathExists(src)) continue;
+            if (!gclVerifyPrxHeader(src)) continue;
+            if (!gclForceCopyFile(src, prxActive)) continue;
+            if (requireExactMatch) {
+                if (gclVerifyPrxInstall(src, prxActive)) return true;
+            } else {
+                if (gclVerifyPrxHeader(prxActive)) return true;
+            }
+        }
+        return false;
     }
 
     void gclEnsureV18FilterFile(const std::string& path) {
@@ -2143,6 +2328,7 @@
         const std::string prxOld = joinDirFile(seplugins, "category_lite_old.prx");
         const std::string prxV18 = joinDirFile(seplugins, "category_lite_v1.8.prx");
         const std::string bundledPrx = gclBundledPrxPath();
+        std::string selectedLegacyPrx;
 
         std::string filterRoot = gclFiltersRoot();
         std::string filterDir = filterRoot + "seplugins";
@@ -2163,6 +2349,7 @@
             std::string legacySrc = gclFindLegacyCategoryLitePrxAny(primaryRoot);
             if (legacySrc.empty() && pathExists(prxOld)) legacySrc = prxOld;
             if (legacySrc.empty()) legacySrc = gclFindCategoryLiteOldPrxAny(primaryRoot);
+            selectedLegacyPrx = legacySrc;
             if (!legacySrc.empty() && strcasecmp(legacySrc.c_str(), prxActive.c_str()) != 0) {
                 gclForceCopyFile(legacySrc, prxActive);
             }
@@ -2231,8 +2418,45 @@
                 gclMergeLegacyFilters(filterOld, filter, /*toLegacy=*/false);
             }
 
+            // Safety: ensure gclite_filter.txt is valid v1.8 format after conversion.
+            gclRepairV18FilterFileIfNeeded(filter);
+
             // Keep unchecked mode clean (no *_v1.8 files).
             gclForceRemoveFile(filterV18);
+        }
+
+        // Crash-safety guard:
+        // If plugin is enabled in CFW config but category_lite.prx is missing,
+        // disable plugin entries to avoid boot-time crashes.
+        if ((gclArkOn || gclProOn) && (!pathExists(prxActive) || !gclVerifyPrxHeader(prxActive))) {
+            bool healed = false;
+            if (enableLegacy) {
+                // Prefer true legacy source first, then known backups, then bundled v1.8 as last resort.
+                std::vector<std::string> legacySources = {
+                    selectedLegacyPrx, prxOld, prxV18, bundledPrx
+                };
+                healed = gclTryHealActivePrx(prxActive, legacySources, /*requireExactMatch=*/false);
+            } else {
+                // Prefer bundled v1.8 (exact match), then sidecar, then old as last resort.
+                std::vector<std::string> v18StrictSources = { bundledPrx, prxV18 };
+                healed = gclTryHealActivePrx(prxActive, v18StrictSources, /*requireExactMatch=*/true);
+                if (!healed) {
+                    std::vector<std::string> fallbackSources = { prxOld };
+                    healed = gclTryHealActivePrx(prxActive, fallbackSources, /*requireExactMatch=*/false);
+                }
+            }
+
+            if (!healed) {
+                std::string pluginsSe, vshSe;
+                std::string plugins = gclFindArkPluginsFile(pluginsSe);
+                std::string vsh = gclFindProVshFile(vshSe);
+                if (!plugins.empty() && pathExists(plugins))
+                    gclWriteEnableToFileWithVerify(plugins, false, /*arkPluginsTxt=*/true);
+                if (!vsh.empty() && pathExists(vsh))
+                    gclWriteEnableToFileWithVerify(vsh, false, /*arkPluginsTxt=*/false);
+                gclArkOn = false;
+                gclProOn = false;
+            }
         }
 
         if (pathExists(prxActive)) gclPrxPath = prxActive;
@@ -2270,6 +2494,7 @@
         // Merge old entries into a fresh v1.8 filter
         gclFiltersLoaded = false; gclLegacyFilterLoaded = false;
         gclMergeLegacyFilters(oldPath, filterPath, /*toLegacy=*/false);
+        gclRepairV18FilterFileIfNeeded(filterPath);
     }
 
     static bool isBlacklistedBaseNameFor(const std::string& root, const std::string& base) {
@@ -2769,7 +2994,7 @@
         if (!gclPrxPath.empty()) {
             const std::string prxRoot = rootPrefix(gclPrxPath);
             if (!targetRoot.empty() && !strcasecmp(prxRoot.c_str(), targetRoot.c_str()) &&
-                pathExists(gclPrxPath)) {
+                pathExists(gclPrxPath) && gclVerifyPrxHeader(gclPrxPath)) {
                 return true;
             }
         }
@@ -2783,7 +3008,14 @@
         std::string baseDir = currentExecBaseDir();
         std::string src = baseDir + "resources/category_lite.prx";
 
-        if (!copyFileBuffered(src, dst)) return false;
+        if (!gclForceCopyFile(src, dst) || !gclVerifyPrxInstall(src, dst)) {
+            // If copy from bundled failed, keep a previously valid installed PRX.
+            if (!gclPrxPath.empty() && pathExists(gclPrxPath) && gclVerifyPrxHeader(gclPrxPath)) {
+                return true;
+            }
+            if (pathExists(dst) && gclVerifyPrxHeader(dst)) return true;
+            return false;
+        }
 
         gclPrxPath = dst;   // remember the exact installed path
         if (!targetRoot.empty()) gclDevice = targetRoot;
@@ -2807,17 +3039,19 @@
         std::string old = joinDirFile(dir, "category_lite_old.prx");
 
         if (pathExists(tmp)) sceIoRemove(tmp.c_str());
-        if (!copyFileBuffered(src, tmp)) { if (pathExists(tmp)) sceIoRemove(tmp.c_str()); return; }
+        if (!gclForceCopyFile(src, tmp)) { if (pathExists(tmp)) sceIoRemove(tmp.c_str()); return; }
+        if (!gclVerifyPrxInstall(src, tmp)) { if (pathExists(tmp)) sceIoRemove(tmp.c_str()); return; }
 
         if (pathExists(old)) sceIoRemove(old.c_str());
-        if (sceIoRename(gclPrxPath.c_str(), old.c_str()) < 0) {
+        if (!gclForceMoveFile(gclPrxPath, old)) {
             sceIoRemove(tmp.c_str());
             return;
         }
 
-        if (sceIoRename(tmp.c_str(), gclPrxPath.c_str()) < 0) {
-            copyFileBuffered(tmp, gclPrxPath);
-            if (!pathExists(gclPrxPath)) sceIoRename(old.c_str(), gclPrxPath.c_str());
+        if (!gclForceMoveFile(tmp, gclPrxPath) || !gclVerifyPrxInstall(src, gclPrxPath)) {
+            // Roll back to previous known-good plugin
+            if (pathExists(gclPrxPath)) sceIoRemove(gclPrxPath.c_str());
+            if (pathExists(old)) gclForceMoveFile(old, gclPrxPath);
             if (pathExists(tmp)) sceIoRemove(tmp.c_str());
             return;
         }
@@ -2842,6 +3076,7 @@
         std::string filterDir = gclFiltersRoot() + "seplugins";
         std::string filter = joinDirFile(filterDir, "gclite_filter.txt");
         std::string filterV18 = joinDirFile(filterDir, "gclite_filter_v1.8.txt");
+        gclRepairV18FilterFileIfNeeded(filter);
         if (pathExists(filter) && pathExists(filterV18) && gclLooksLikeV18FilterFile(filter)) {
             sceIoRemove(filterV18.c_str());
         }
@@ -2881,6 +3116,48 @@
         // Ensure the PRX exists and refresh it if needed.
         if (!gclEnsurePrxPresent(targetSeplugins)) return;
         gclMaybeUpdatePrx();
+        gclHealRedundantV18ArtifactsOnLoad();
+    }
+
+    // Run after USB disconnect to recover from host-side edits/races that can
+    // leave plugin binaries truncated or malformed.
+    void gclRunPostUsbIntegrityHeal() {
+        gclComputeInitial();
+
+        std::string targetRoot = rootPrefix(gclDevice);
+        if (targetRoot.empty()) targetRoot = gclPickDeviceRoot();
+        std::string seplugins = gclSepluginsDirForRoot(targetRoot);
+        if (seplugins.empty()) return;
+        if (!dirExists(seplugins)) sceIoMkdir(seplugins.c_str(), 0777);
+
+        const std::string prxActive = joinDirFile(seplugins, "category_lite.prx");
+        const std::string prxOld = joinDirFile(seplugins, "category_lite_old.prx");
+        const std::string prxV18 = joinDirFile(seplugins, "category_lite_v1.8.prx");
+        const std::string bundledPrx = gclBundledPrxPath();
+
+        // Remove obviously bad sidecars so they don't get selected as sources.
+        if (pathExists(prxOld) && !gclVerifyPrxHeader(prxOld)) gclForceRemoveFile(prxOld);
+        if (pathExists(prxV18) && !gclVerifyPrxHeader(prxV18)) gclForceRemoveFile(prxV18);
+
+        if (!pathExists(prxActive) || !gclVerifyPrxHeader(prxActive)) {
+            std::vector<std::string> sources;
+            if (gclLegacyMode) {
+                sources.push_back(gclFindLegacyCategoryLitePrxAny(gclPickDeviceRoot()));
+                sources.push_back(prxOld);
+                sources.push_back(prxV18);
+                sources.push_back(bundledPrx);
+            } else {
+                sources.push_back(bundledPrx);
+                sources.push_back(prxV18);
+                sources.push_back(prxOld);
+            }
+            gclTryHealActivePrx(prxActive, sources, /*requireExactMatch=*/false);
+        }
+
+        if (pathExists(prxActive) && gclVerifyPrxHeader(prxActive)) gclPrxPath = prxActive;
+
+        // Re-apply enabled-mode hard checks (and safety disable on failure).
+        gclHardCheckPrxIfEnabled();
         gclHealRedundantV18ArtifactsOnLoad();
     }
 
