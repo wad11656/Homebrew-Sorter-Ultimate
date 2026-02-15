@@ -902,7 +902,7 @@
                 showRoots && opPhase == OP_None &&
                 actionMode == AM_None && !msgBox && !fileMenu && !optMenu)
             {
-                const char* convertText = "Coverting legacy gclite_filter.txt...";
+                const char* convertText = "Converting legacy gclite_filter.txt...";
                 const float popScale = 1.0f;
                 const int popPadX = 10;
                 const int popPadY = 24;
@@ -1055,7 +1055,35 @@
 
                     // Handle legacy checkbox toggle (independent of CFW pick)
                     if (wasRootPick && cbToggled && cbChecked != gclLegacyMode) {
-                        gclToggleLegacyMode(cbChecked);
+                        if (!cbChecked) {
+                            // Unchecking legacy mode can trigger recursive conversion/merge.
+                            // Keep UI responsive by showing a blocking progress modal.
+                            const char* convertText = "Converting legacy gclite_filter.txt...";
+                            const float popScale = 1.0f;
+                            const int popPadX = 10;
+                            const int popPadY = 24;
+                            const int popLineH = (int)(24.0f * popScale + 0.5f);
+                            const float popTextW = measureTextWidth(popScale, convertText);
+                            const int popExtraW = 4;
+                            int popPanelW = (int)(popTextW + popPadX * 2 + popExtraW + 0.5f);
+                            popPanelW -= 6;
+                            const int popBottom = 14;
+                            const int popPanelH = popPadY + popLineH + popBottom - 24;
+                            const int popWrapTweak = 32;
+                            const int popForcedPxPerChar = 8;
+                            const int convertPanelH = popPanelH - 4; // match "Renaming..." item modal height
+                            const int convertPanelW = popPanelW + 4;
+                            msgBox = new MessageBox(convertText,
+                                                    nullptr, SCREEN_WIDTH, SCREEN_HEIGHT, popScale, 0, "",
+                                                    popPadX, popPadY, popWrapTweak, popForcedPxPerChar,
+                                                    convertPanelW, convertPanelH);
+                            renderOneFrame();
+                            gclToggleLegacyMode(cbChecked);
+                            delete msgBox; msgBox = nullptr;
+                            inputWaitRelease = true;
+                        } else {
+                            gclToggleLegacyMode(cbChecked);
+                        }
                         // If user only toggled checkbox and canceled CFW pick, refresh UI
                         if (pick < 0) {
                             rootKeepGclSelection = true;
