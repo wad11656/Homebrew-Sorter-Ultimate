@@ -1885,47 +1885,55 @@
         gclLegacyFilterCache = names;  // update cache in place
     }
 
-    // Recursively search for game folders matching a name across both devices
-    // Returns all full paths found (e.g. "ms0:/PSP/GAME/MyApp", "ef0:/PSP/GAME/CAT_Action/MyApp")
+    // Recursively search for game folders matching a name across both devices.
+    // Matching is case-insensitive, and only folders that look like game folders
+    // (contain EBOOT/PBOOT/PARAM) are returned.
+    // Returns full paths (e.g. "ms0:/PSP/GAME/MyApp", "ef0:/PSP/GAME/CAT_Action/MyApp").
     std::vector<std::string> gclFindGameFoldersByName(const std::string& folderName) {
         std::vector<std::string> results;
         if (folderName.empty()) return results;
 
-        auto searchDir = [&](const std::string& base) {
-            SceUID d = kfeIoOpenDir(base.c_str());
-            if (d < 0) return;
-            SceIoDirent ent; memset(&ent, 0, sizeof(ent));
-            while (kfeIoReadDir(d, &ent) > 0) {
-                trimTrailingSpaces(ent.d_name);
-                if (!strcmp(ent.d_name, ".") || !strcmp(ent.d_name, "..")) { memset(&ent,0,sizeof(ent)); continue; }
-                if (FIO_S_ISDIR(ent.d_stat.st_mode)) {
-                    if (folderName == ent.d_name) {
-                        results.push_back(joinDirFile(base, ent.d_name));
-                    }
-                }
-                memset(&ent, 0, sizeof(ent));
+        auto pushUnique = [&](const std::string& p) {
+            for (const auto& e : results) {
+                if (!strcasecmp(e.c_str(), p.c_str())) return;
             }
-            kfeIoCloseDir(d);
+            results.push_back(p);
         };
 
         auto searchDevice = [&](const char* root) {
             if (!DeviceExists(root)) return;
             std::string gameDir = std::string(root) + "PSP/GAME";
-            // Direct children of /PSP/GAME/
-            searchDir(gameDir);
-            // Also search inside category folders (CAT_*, numbered, etc.)
-            SceUID d = kfeIoOpenDir(gameDir.c_str());
-            if (d < 0) return;
-            SceIoDirent ent; memset(&ent, 0, sizeof(ent));
-            while (kfeIoReadDir(d, &ent) > 0) {
-                trimTrailingSpaces(ent.d_name);
-                if (!strcmp(ent.d_name, ".") || !strcmp(ent.d_name, "..")) { memset(&ent,0,sizeof(ent)); continue; }
-                if (FIO_S_ISDIR(ent.d_stat.st_mode)) {
-                    searchDir(joinDirFile(gameDir, ent.d_name));
+            if (!dirExists(gameDir)) return;
+
+            std::vector<std::string> stack;
+            stack.push_back(gameDir);
+
+            while (!stack.empty()) {
+                std::string base = stack.back();
+                stack.pop_back();
+
+                SceUID d = kfeIoOpenDir(base.c_str());
+                if (d < 0) continue;
+
+                SceIoDirent ent; memset(&ent, 0, sizeof(ent));
+                while (kfeIoReadDir(d, &ent) > 0) {
+                    trimTrailingSpaces(ent.d_name);
+                    if (!strcmp(ent.d_name, ".") || !strcmp(ent.d_name, "..")) { memset(&ent, 0, sizeof(ent)); continue; }
+                    if (!FIO_S_ISDIR(ent.d_stat.st_mode)) { memset(&ent, 0, sizeof(ent)); continue; }
+
+                    std::string child = joinDirFile(base, ent.d_name);
+
+                    if (!strcasecmp(ent.d_name, folderName.c_str())) {
+                        if (!findEbootCaseInsensitive(child).empty()) {
+                            pushUnique(child);
+                        }
+                    }
+
+                    stack.push_back(child);
+                    memset(&ent, 0, sizeof(ent));
                 }
-                memset(&ent, 0, sizeof(ent));
+                kfeIoCloseDir(d);
             }
-            kfeIoCloseDir(d);
         };
 
         searchDevice("ms0:/");
@@ -2219,15 +2227,21 @@
         gclFiltersLoaded = false; gclLegacyFilterLoaded = false;
     }
 
+    // Detect whether boot should migrate a legacy (headerless) filter file.
+    bool gclShouldAutoMigrateLegacyFilterOnBoot() {
+        if (gclLegacyMode) return false;  // skip if using legacy plugin
+        std::string txt;
+        if (!gclReadWholeText(gclFiltersPath(), txt)) return false;
+        if (txt.find("===") != std::string::npos) return false;  // already v1.8 format
+        if (txt.empty()) return false;  // empty, nothing to migrate
+        return true;
+    }
+
     // Auto-migrate old-format gclite_filter.txt on boot
     void gclAutoMigrateLegacyFilterOnBoot() {
-        if (gclLegacyMode) return;  // skip if using legacy plugin
+        if (!gclShouldAutoMigrateLegacyFilterOnBoot()) return;
 
         std::string filterPath = gclFiltersPath();
-        std::string txt;
-        if (!gclReadWholeText(filterPath, txt)) return;
-        if (txt.find("===") != std::string::npos) return;  // already v1.8 format
-        if (txt.empty()) return;  // empty, nothing to migrate
 
         // Old-format file found. Rename to _old and migrate.
         std::string root = gclFiltersRoot();
@@ -2870,7 +2884,9 @@
         if (opPhase != OP_SelectDevice) {
             gclLoadConfig();
             gclComputeInitial();
-            gclAutoMigrateLegacyFilterOnBoot();
+            if (!gclDeferredLegacyConvertPending) {
+                gclDeferredLegacyConvertPending = gclShouldAutoMigrateLegacyFilterOnBoot();
+            }
             gclMaybeUpdatePrx();
             gclHealRedundantV18ArtifactsOnLoad();
         }

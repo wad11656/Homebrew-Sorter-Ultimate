@@ -896,6 +896,39 @@
         while (1) {
             renderOneFrame();
 
+            // One-shot deferred boot migration:
+            // show main screen first, then run legacy gclite_filter conversion behind a blocking modal.
+            if (gclDeferredLegacyConvertPending &&
+                showRoots && opPhase == OP_None &&
+                actionMode == AM_None && !msgBox && !fileMenu && !optMenu)
+            {
+                const char* convertText = "Coverting legacy gclite_filter.txt...";
+                const float popScale = 1.0f;
+                const int popPadX = 10;
+                const int popPadY = 24;
+                const int popLineH = (int)(24.0f * popScale + 0.5f);
+                const float popTextW = measureTextWidth(popScale, convertText);
+                const int popExtraW = 4;
+                int popPanelW = (int)(popTextW + popPadX * 2 + popExtraW + 0.5f);
+                popPanelW -= 6;
+                const int popBottom = 14;
+                const int popPanelH = popPadY + popLineH + popBottom - 24;
+                const int popWrapTweak = 32;
+                const int popForcedPxPerChar = 8;
+                const int convertPanelH = popPanelH - 4; // match "Renaming..." item modal height
+                const int convertPanelW = popPanelW + 4;
+                msgBox = new MessageBox(convertText,
+                                        nullptr, SCREEN_WIDTH, SCREEN_HEIGHT, popScale, 0, "",
+                                        popPadX, popPadY, popWrapTweak, popForcedPxPerChar,
+                                        convertPanelW, convertPanelH);
+                renderOneFrame();
+                gclAutoMigrateLegacyFilterOnBoot();
+                gclDeferredLegacyConvertPending = false;
+                delete msgBox; msgBox = nullptr;
+                inputWaitRelease = true;
+                continue;
+            }
+
             // One-shot: after main screen + home animation are ready, hard-check plugin file if enabled
             if (!gclHardCheckDone && showRoots && opPhase == OP_None && !msgBox) {
                 bool animReady = gHomeAnimEntries.empty();

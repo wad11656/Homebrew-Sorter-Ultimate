@@ -760,6 +760,7 @@ private:
     static GclSettingKey gclPending;
     bool gclBlacklistDirty = false;
     bool gclHardCheckDone = false;
+    bool gclDeferredLegacyConvertPending = false;
     enum RunningAppWarningAction { RAW_None, RAW_Rename, RAW_Move, RAW_Copy };
     RunningAppWarningAction runningAppWarningPending = RAW_None;
     bool runningAppWarningBypass = false;
