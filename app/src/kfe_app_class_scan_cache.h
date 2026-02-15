@@ -1885,7 +1885,10 @@
         gclLegacyFilterCache = names;  // update cache in place
     }
 
-    // Recursively search for game folders matching a name across both devices.
+    // Search for game folders matching a name across both devices.
+    // Scope is intentionally bounded to PSP layout depth:
+    //   - /PSP/GAME/<App>
+    //   - /PSP/GAME/<Category>/<App>
     // Matching is case-insensitive, and only folders that look like game folders
     // (contain EBOOT/PBOOT/PARAM) are returned.
     // Returns full paths (e.g. "ms0:/PSP/GAME/MyApp", "ef0:/PSP/GAME/CAT_Action/MyApp").
@@ -1904,36 +1907,47 @@
             if (!DeviceExists(root)) return;
             std::string gameDir = std::string(root) + "PSP/GAME";
             if (!dirExists(gameDir)) return;
+            SceUID d = kfeIoOpenDir(gameDir.c_str());
+            if (d < 0) return;
 
-            std::vector<std::string> stack;
-            stack.push_back(gameDir);
+            SceIoDirent ent; memset(&ent, 0, sizeof(ent));
+            while (kfeIoReadDir(d, &ent) > 0) {
+                trimTrailingSpaces(ent.d_name);
+                if (!strcmp(ent.d_name, ".") || !strcmp(ent.d_name, "..")) { memset(&ent, 0, sizeof(ent)); continue; }
+                if (!FIO_S_ISDIR(ent.d_stat.st_mode)) { memset(&ent, 0, sizeof(ent)); continue; }
 
-            while (!stack.empty()) {
-                std::string base = stack.back();
-                stack.pop_back();
+                std::string child = joinDirFile(gameDir, ent.d_name);
+                const bool childIsGameFolder = !findEbootCaseInsensitive(child).empty();
 
-                SceUID d = kfeIoOpenDir(base.c_str());
-                if (d < 0) continue;
-
-                SceIoDirent ent; memset(&ent, 0, sizeof(ent));
-                while (kfeIoReadDir(d, &ent) > 0) {
-                    trimTrailingSpaces(ent.d_name);
-                    if (!strcmp(ent.d_name, ".") || !strcmp(ent.d_name, "..")) { memset(&ent, 0, sizeof(ent)); continue; }
-                    if (!FIO_S_ISDIR(ent.d_stat.st_mode)) { memset(&ent, 0, sizeof(ent)); continue; }
-
-                    std::string child = joinDirFile(base, ent.d_name);
-
-                    if (!strcasecmp(ent.d_name, folderName.c_str())) {
-                        if (!findEbootCaseInsensitive(child).empty()) {
-                            pushUnique(child);
-                        }
-                    }
-
-                    stack.push_back(child);
-                    memset(&ent, 0, sizeof(ent));
+                // /PSP/GAME/<App>
+                if (!strcasecmp(ent.d_name, folderName.c_str()) && childIsGameFolder) {
+                    pushUnique(child);
                 }
-                kfeIoCloseDir(d);
+
+                // /PSP/GAME/<Category>/<App> (one level only)
+                if (!childIsGameFolder) {
+                    SceUID d2 = kfeIoOpenDir(child.c_str());
+                    if (d2 >= 0) {
+                        SceIoDirent ent2; memset(&ent2, 0, sizeof(ent2));
+                        while (kfeIoReadDir(d2, &ent2) > 0) {
+                            trimTrailingSpaces(ent2.d_name);
+                            if (!strcmp(ent2.d_name, ".") || !strcmp(ent2.d_name, "..")) { memset(&ent2, 0, sizeof(ent2)); continue; }
+                            if (!FIO_S_ISDIR(ent2.d_stat.st_mode)) { memset(&ent2, 0, sizeof(ent2)); continue; }
+
+                            if (!strcasecmp(ent2.d_name, folderName.c_str())) {
+                                std::string appPath = joinDirFile(child, ent2.d_name);
+                                if (!findEbootCaseInsensitive(appPath).empty()) {
+                                    pushUnique(appPath);
+                                }
+                            }
+                            memset(&ent2, 0, sizeof(ent2));
+                        }
+                        kfeIoCloseDir(d2);
+                    }
+                }
+                memset(&ent, 0, sizeof(ent));
             }
+            kfeIoCloseDir(d);
         };
 
         searchDevice("ms0:/");
