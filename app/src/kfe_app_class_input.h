@@ -733,7 +733,7 @@
                     std::string primaryRoot = gclPickDeviceRoot();
                     bool legacyCandidate = gclHasLegacyCandidatePrx(primaryRoot);
                     bool cbDisabled = !legacyCandidate && !gclLegacyMode;
-                    optMenu->setCheckbox("Use existing v1.6/v1.7 Categories plugin",
+                    optMenu->setCheckbox("Use existing legacy category_lite.prx plugin",
                                          gclLegacyMode, cbDisabled);
 
                     // Prime & debounce so held X/O won't auto-activate the choice
