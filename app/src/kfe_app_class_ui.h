@@ -1430,6 +1430,23 @@ private:
         if (appDir.empty() || cand.empty()) return false;
         return !strcasecmp(appDir.c_str(), cand.c_str());
     }
+    bool isCurrentExecCategoryRow(const std::string& rowName) const {
+        if (rowName.empty()) return false;
+        if (!strcasecmp(rowName.c_str(), kCatSettingsLabel)) return false;
+        if (!strcasecmp(rowName.c_str(), "Uncategorized")) return false;
+
+        std::string appDir = trimTrailingSlashCopy(currentExecBaseDir());
+        if (appDir.empty()) return false;
+
+        const std::string appRoot = rootPrefix(appDir);
+        const std::string devRoot = rootPrefix(currentDevice);
+        if (appRoot.empty() || devRoot.empty() || strcasecmp(appRoot.c_str(), devRoot.c_str()) != 0)
+            return false;
+
+        const std::string appCat = parseCategoryFromFullPath(appDir, GameItem::EBOOT_FOLDER);
+        if (appCat.empty()) return false;
+        return !strcasecmp(appCat.c_str(), rowName.c_str());
+    }
 
     bool selectionIncludesCurrentAppFolder() const {
         if (showRoots || !(view == View_AllFlat || view == View_CategoryContents)) return false;

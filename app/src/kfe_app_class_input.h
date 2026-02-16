@@ -495,13 +495,14 @@
                         if (isIsoLike(p)) { hasIsoLike = true; break; }
                     }
                     const bool hideDisabled = hidePaths.empty() || hasIsoLike || !gclOn;
+                    const bool deleteDisabled = selectionIncludesCurrentAppFolder();
                     const char* hideLabel = hideInXmb ? "Hide in XMB" : "Unhide in XMB";
 
                     std::vector<FileOpsItem> items = {
                         { "Move",   !canMoveCopy },
                         { "Copy",   !canMoveCopy },
                         { hideLabel, hideDisabled },
-                        { "Delete", false }
+                        { "Delete", deleteDisabled }
                     };
                     menuContext = MC_ContentOps;
                     fileMenu = new FileOpsMenu("App Operations", items, SCREEN_WIDTH, SCREEN_HEIGHT, 250, 160);
@@ -521,7 +522,7 @@
                         std::string base = stripCategoryPrefixes(nm);
                         catHidden = isFilteredBaseName(base);
                         canHide = gclOn && !gclLegacyMode;  // legacy plugins can't hide categories
-                        canDelete = true;
+                        canDelete = !isCurrentExecCategoryRow(nm);
                     }
                     const char* catHideLabel = catHidden ? "Unhide in XMB" : "Hide in XMB";
                     std::vector<FileOpsItem> items = {
@@ -1381,6 +1382,12 @@
                             }
                         } else if (choice == 3) {
                             // (existing content delete flow)
+                            if (selectionIncludesCurrentAppFolder()) {
+                                msgBox = new MessageBox("Can't delete the currently-running app.", okIconTexture,
+                                                        SCREEN_WIDTH, SCREEN_HEIGHT, 1.0f, 20, "OK", 16, 18, 8, 14);
+                                continue;
+                            }
+
                             std::vector<std::string> delPaths;
                             std::vector<GameItem::Kind> delKinds;
                             if (!checked.empty()) {
@@ -1525,6 +1532,9 @@
                             } else if (isCategoryRowLocked(selectedIndex)) {
                                 // Don't allow deleting "Category Settings" or "Uncategorized"
                                 msgBox = new MessageBox("Pick a category folder.", okIconTexture, SCREEN_WIDTH, SCREEN_HEIGHT, 1.0f, 20, "OK", 16, 18, 8, 14);
+                            } else if (isCurrentExecCategoryRow(entries[selectedIndex].d_name)) {
+                                msgBox = new MessageBox("Can't delete the category containing the currently-running app.", okIconTexture,
+                                                        SCREEN_WIDTH, SCREEN_HEIGHT, 1.0f, 20, "OK", 16, 18, 8, 14);
                             } else {
                                 std::string cat = entries[selectedIndex].d_name;
 
