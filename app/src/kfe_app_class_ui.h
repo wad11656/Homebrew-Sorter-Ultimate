@@ -2076,6 +2076,7 @@ private:
         drawRect(0, 0, SCREEN_WIDTH, bannerH, COLOR_BANNER);
 
         std::string leftLabel = "Homebrew Sorter Ultimate";
+        std::string leftLabelMutedSuffix = " v1.20";
         Texture* deviceIcon = nullptr;
         bool underlineLabel = false;
         const bool opHeader = (actionMode != AM_None &&
@@ -2099,6 +2100,7 @@ private:
 
         if (opHeader) {
             leftLabel = (actionMode == AM_Copy) ? "Copy Operation" : "Move Operation";
+            leftLabelMutedSuffix.clear();
             deviceIcon = nullptr;
             if ((opPhase == OP_SelectCategory || opPhase == OP_Confirm) &&
                 !opDestDevice.empty() && opDestDevice[0] != '_') {
@@ -2107,9 +2109,11 @@ private:
             underlineLabel = false;
         } else if (!showRoots && (view == View_Categories || view == View_GclSettings)) {
             leftLabel = currentDeviceHeaderName();
+            leftLabelMutedSuffix.clear();
             pickDeviceIcon();
         } else if (!showRoots && (view == View_CategoryContents || view == View_AllFlat)) {
             leftLabel = ellipsizeText(currentCategoryHeaderLabel(), 23);
+            leftLabelMutedSuffix.clear();
             underlineLabel = true;
             pickDeviceIcon();
         }
@@ -2124,7 +2128,15 @@ private:
             textX += iconW + 3.0f;  // Icon width + 3px gap
         }
 
-        drawTextAligned(textX, textY, leftLabel.c_str(), COLOR_WHITE, INTRAFONT_ALIGN_LEFT);
+        if (!leftLabelMutedSuffix.empty()) {
+            // Draw app name in white and version suffix in the same muted color used by
+            // "Animation by:" / "Change Animation".
+            drawTextAligned(textX, textY, leftLabel.c_str(), COLOR_WHITE, INTRAFONT_ALIGN_LEFT);
+            const float appW = measureTextWidth(0.5f, leftLabel.c_str());
+            drawTextAligned(textX + appW, textY, leftLabelMutedSuffix.c_str(), 0xFFBBBBBB, INTRAFONT_ALIGN_LEFT);
+        } else {
+            drawTextAligned(textX, textY, leftLabel.c_str(), COLOR_WHITE, INTRAFONT_ALIGN_LEFT);
+        }
         if (underlineLabel && leftLabel.find('_') != std::string::npos) {
             const float scale = 0.5f;
             const float underscoreW = measureTextWidth(scale, "_");
