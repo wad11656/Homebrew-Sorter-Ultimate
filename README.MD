@@ -53,7 +53,7 @@ Successor to [HomeBrew Sorter GUI](https://www.gamebrew.org/wiki/HomeBrew_Sorter
 <ins>Acknowledgements</ins>:
 
 - [CMFileManager by joel16](https://github.com/joel16/CMFileManager-PSP) was used as the base for this app to help with file operations and compiling with the modern PSP SDK.
-- Thank you [u/k_rollo](https://www.reddit.com/user/k_rollo/) for the kind promo and thorough QA.
+- Thank you [kathyrollo](https://github.com/kathyrollo) for the kind promo and thorough QA.
 
 <div id="vibe-code-acknowledgement">
   &#8194;
