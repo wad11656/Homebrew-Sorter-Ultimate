@@ -45,7 +45,7 @@ Successor to [HomeBrew Sorter GUI](https://www.gamebrew.org/wiki/HomeBrew_Sorter
 - You can bulk-select apps by holding square and pressing up or down. (This will select every unchecked app in that direction until it hits the end of the app list <ins>or</ins> another checked app.)
 - You can disable the main screen's animations by removing all the folders in the `/resources/animations` folder. (Or even add your own animation folders with animation `.png` frames named the same way as in the existing folders.)
 - You can change the app background by swapping out `/resources/bkg.png`.
-- A [personally-updated build of the Game Categories Lite plugin](https://github.com/wad11656/game-categories-lite) was created and integrated with this app to hide Categories & Apps on the XMB at a more granular level: by storage device/exact filepath.
+- A [personally-updated build of the Game Categories Lite plugin](https://github.com/wad11656/game-categories-lite) was created and auto-installed with this app to hide Categories & Apps on the XMB at a more granular level, from within the app: by storage device/exact filepath.
   - You can use your existing legacy Game Categories Lite plugin instead if you prefer. Just make sure it's installed on your PSP as `category_lite.prx`, and select the **Use existing legacy category_lite.prx plugin** option in the **Game Categories** menu on the app's main screen.
 
 <div>
