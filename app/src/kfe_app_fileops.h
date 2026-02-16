@@ -16,6 +16,15 @@ static bool kfeEndsWithNoCase(const std::string& s, const char* suffix) {
     return strncasecmp(s.c_str() + s.size() - n, suffix, n) == 0;
 }
 
+static bool kfeIsMacJunkName(const char* name) {
+    if (!name || !*name) return false;
+    // AppleDouble sidecar files from macOS copy operations.
+    if (name[0] == '.' && name[1] == '_' && name[2] != '\0') return true;
+    // Finder metadata file.
+    if (!strcasecmp(name, ".DS_Store")) return true;
+    return false;
+}
+
 static bool kfeNeedsDestPresenceVerify(const std::string& path) {
     return kfeEndsWithNoCase(path, ".pbp") || kfeEndsWithNoCase(path, ".prx");
 }
@@ -40,6 +49,10 @@ static void kfeCollectAllSourceFiles(const std::string& srcDir,
             memset(&ent, 0, sizeof(ent));
             continue;
         }
+        if (kfeIsMacJunkName(ent.d_name)) {
+            memset(&ent, 0, sizeof(ent));
+            continue;
+        }
         std::string s = joinDirFile(srcDir, ent.d_name);
         std::string t = joinDirFile(dstDir, ent.d_name);
         if (FIO_S_ISDIR(ent.d_stat.st_mode)) kfeCollectAllSourceFiles(s, t, out, scanOk);
@@ -60,6 +73,10 @@ static void kfeCollectMissingDestFiles(const std::string& srcDir,
     SceIoDirent ent; memset(&ent, 0, sizeof(ent));
     while (kfeIoReadDir(d, &ent) > 0) {
         if (!strcmp(ent.d_name, ".") || !strcmp(ent.d_name, "..")) {
+            memset(&ent, 0, sizeof(ent));
+            continue;
+        }
+        if (kfeIsMacJunkName(ent.d_name)) {
             memset(&ent, 0, sizeof(ent));
             continue;
         }
@@ -316,6 +333,7 @@ bool KfeFileOps::copyDirRecursive(const std::string& src, const std::string& dst
     bool ok = true;
     while (ok && kfeIoReadDir(d, &ent) > 0) {
         if (!strcmp(ent.d_name, ".") || !strcmp(ent.d_name, "..")) { memset(&ent,0,sizeof(ent)); continue; }
+        if (kfeIsMacJunkName(ent.d_name)) { memset(&ent,0,sizeof(ent)); continue; }
         std::string s = joinDirFile(src, ent.d_name);
         std::string t = joinDirFile(dst, ent.d_name);
 

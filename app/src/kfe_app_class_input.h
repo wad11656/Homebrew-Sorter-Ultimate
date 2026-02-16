@@ -256,11 +256,13 @@
                         }
                     }
 
+                    const bool useCategoryPicker = (gclArkOn || gclProOn);
+
                     if (hasPreOpScan && strcasecmp(opDestDevice.c_str(), preOpDevice.c_str()) == 0) {
                         // Same device as the one we were already viewing → reuse instantly
                         restoreScan(preOpScan);
 
-                        if (hasCategories) {
+                        if (useCategoryPicker) {
                             buildCategoryRowsForOp();
                             opPhase = OP_SelectCategory;
                         } else {
@@ -297,7 +299,7 @@
                         if (needScan) { delete msgBox; msgBox = nullptr; }
 
 
-                        if (hasCategories) {
+                        if (useCategoryPicker) {
                             buildCategoryRowsForOp();
                             opPhase = OP_SelectCategory;
                         } else {
@@ -471,8 +473,9 @@
         if (pressed & PSP_CTRL_TRIANGLE) {
             if (!showRoots && !fileMenu) {
                 if (view == View_AllFlat || view == View_CategoryContents) {
+                    const bool gclOn = (gclArkOn || gclProOn);
                     const bool canCrossDevices = dualDeviceAvailableFromMs0();
-                    const bool canWithinDevice = hasCategories;
+                    const bool canWithinDevice = gclOn && hasCategories;
                     const bool canMoveCopy     = canCrossDevices || canWithinDevice;
 
                     std::vector<std::string> hidePaths;
@@ -486,7 +489,6 @@
                         if (isGameFilteredPath(p)) hiddenCount++;
                         else unhiddenCount++;
                     }
-                    const bool gclOn = (gclArkOn || gclProOn);
                     const bool hideInXmb = (unhiddenCount >= hiddenCount);
                     bool hasIsoLike = false;
                     for (const auto& p : hidePaths) {
@@ -978,7 +980,13 @@
                             }
                             // For Move/Copy confirms, return to the selection phase instead of canceling the op.
                             opDestCategory.clear();
-                            opPhase = showRoots ? OP_SelectDevice : OP_SelectCategory;
+                            const bool gclOn = (gclArkOn || gclProOn);
+                            if (!gclOn) {
+                                opPhase = OP_SelectDevice;
+                                if (!showRoots) buildRootRowsForDevicePicker();
+                            } else {
+                                opPhase = showRoots ? OP_SelectDevice : OP_SelectCategory;
+                            }
                             continue;
                         }
                         if (opDestDevice == "__DELETE__") {
@@ -1014,12 +1022,11 @@
                             deleteCategoryDirs(currentDevice, delCat);
                             removeHiddenFiltersForDeletedCategory(delCat);
 
-                            // Patch cache & refresh UI without a rescan
-                            cachePatchDeleteCategory(delCat);
-                            buildCategoryRows();
-
-
+                            // Force a true repopulate pass (with Populating... modal) after category delete.
                             delete msgBox; msgBox = nullptr;
+                            markDeviceDirty(currentDevice);
+                            openDevice(currentDevice);
+
                             drawMessage("Category deleted", COLOR_GREEN);
                             sceKernelDelayThread(700*1000);
 

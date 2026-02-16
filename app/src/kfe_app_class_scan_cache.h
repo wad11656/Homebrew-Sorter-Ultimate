@@ -3437,6 +3437,22 @@
             if (r == "ef0:/") hasEf = true;
         }
 
+        const bool gclOn = (gclArkOn || gclProOn);
+        bool preOpHasRealCategoryFolders = false;
+        if (hasPreOpScan) {
+            for (const auto& kv : preOpScan.categories) {
+                if (strcasecmp(kv.first.c_str(), "Uncategorized") != 0) {
+                    preOpHasRealCategoryFolders = true;
+                    break;
+                }
+            }
+        }
+        const bool disableSourceDeviceForGoOp =
+            (opPhase == OP_SelectDevice) &&
+            (actionMode == AM_Move || actionMode == AM_Copy) &&
+            dualDeviceAvailableFromMs0() &&
+            (!gclOn || !preOpHasRealCategoryFolders);
+
         if (opPhase != OP_SelectDevice) {
             gclLoadConfig();
             gclComputeInitial();
@@ -3469,14 +3485,20 @@
             RowDisableReason reason = RD_NONE;
             uint64_t needB = 0, freeB = 0, totalB = 0;
 
-            if (!present) {
-                flags |= ROW_DISABLED;
-            } else {
-                // Existing rule: running from ef0 → ms0 disabled
-                if (runningFromEf0 && r == "ms0:/") {
+                if (!present) {
                     flags |= ROW_DISABLED;
-                    reason = RD_RUNNING_FROM_EF0;
-                }
+                } else {
+                    if (disableSourceDeviceForGoOp &&
+                        !preOpDevice.empty() &&
+                        r == preOpDevice) {
+                        flags |= ROW_DISABLED;
+                    }
+
+                    // Existing rule: running from ef0 → ms0 disabled
+                    if (runningFromEf0 && r == "ms0:/") {
+                        flags |= ROW_DISABLED;
+                        reason = RD_RUNNING_FROM_EF0;
+                    }
 
                 // NEW: don't probe or show yellow text for same-device MOVE row
                 const bool sameDeviceMoveRow =
@@ -3716,22 +3738,12 @@
 
         // (Removed call to buildCategoriesListForDevice(); not defined & not needed here)
 
-        // Put the cursor back on the category we just left
-        selectedIndex = findCategoryRowByName(currentCategory);
-        if (selectedIndex < 0) selectedIndex = 0;
-        if (selectedIndex >= (int)entries.size()) selectedIndex = (int)entries.size() - 1;
-
-        // Clamp scroll to show the selected row
-        if (selectedIndex < scrollOffset) scrollOffset = selectedIndex;
-        {
-            const int visible = categoryVisibleRows();
-            if (selectedIndex >= scrollOffset + visible)
-                scrollOffset = selectedIndex - (visible - 1);
+        // Prefer Uncategorized as destination default, then first non-disabled.
+        int sel = findCategoryRowByName("Uncategorized");
+        if (sel >= 0 && opDisabledCategories.find(entries[sel].d_name) != opDisabledCategories.end()) {
+            sel = -1;
         }
-
-
-        // Select the first NON-disabled category
-        int sel = 0;
+        if (sel < 0) sel = 0;
         while (sel < (int)entries.size() &&
             opDisabledCategories.find(entries[sel].d_name) != opDisabledCategories.end()) {
             ++sel;

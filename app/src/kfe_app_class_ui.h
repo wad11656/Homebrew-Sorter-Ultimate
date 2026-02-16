@@ -1276,7 +1276,10 @@ private:
         moving = false;
 
         // Return to the exact pre-op view
-        if (preOpView == View_Categories) {
+        const bool gclOn = (gclArkOn || gclProOn);
+        if (!gclOn) {
+            openDevice(preOpDevice);
+        } else if (preOpView == View_Categories) {
             openCategory(preOpCategory);
         } else if (preOpView == View_CategoryContents) {
             currentCategory = preOpCategory;
@@ -1318,7 +1321,8 @@ private:
         // Normalize cat name ("Uncategorized" vs "")
         std::string cat = dstCat.empty() ? std::string("Uncategorized") : dstCat;
 
-        if (hasCategories) {
+        const bool gclOn = (gclArkOn || gclProOn);
+        if (gclOn) {
             // Open the real destination category with ALL entries (not just the moved ones)
             openCategory(cat);
         } else {
@@ -2485,7 +2489,9 @@ private:
         const float ctrlX = 290.0f;
         const float ctrlY = 22.0f;
         const float ctrlW = 185.0f;
-        const bool devicePicker = (opPhase == OP_SelectDevice);
+        const bool devicePicker =
+            (opPhase == OP_SelectDevice) ||
+            (actionMode != AM_None && showRoots && opPhase == OP_Confirm);
 
         if (devicePicker) {
             const float ctrlH = 39.0f;

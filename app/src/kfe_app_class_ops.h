@@ -296,9 +296,17 @@
         hasPreOpScan = true;
 
         const bool goMs0Mode = dualDeviceAvailableFromMs0();
+        const bool gclOn = (gclArkOn || gclProOn);
 
         if (mode == AM_Move || mode == AM_Copy) {
-            if (mode == AM_Copy || goMs0Mode) {
+            if (!gclOn && !goMs0Mode) {
+                msgBox = new MessageBox("Game Categories must be enabled on this device.", okIconTexture,
+                                        SCREEN_WIDTH, SCREEN_HEIGHT, 1.0f, 20, "OK", 16, 18, 8, 14);
+                actionMode = AM_None;
+                return;
+            }
+
+            if (!gclOn || mode == AM_Copy || goMs0Mode) {
                 opPhase = OP_SelectDevice;
 
                 // NEW: transient feedback while we do the first free-space probe
@@ -357,7 +365,8 @@
 
         // Restore UI state
         scanDevicePreferCache(preOpDevice);
-        if (hasCategories) {
+        const bool gclOn = (gclArkOn || gclProOn);
+        if (gclOn) {
             if (preOpView == View_CategoryContents) {
                 openCategory(preOpCategory.empty() ? "Uncategorized" : preOpCategory);
             } else {
