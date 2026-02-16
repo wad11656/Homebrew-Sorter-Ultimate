@@ -980,14 +980,218 @@
         }
     }
 
+    bool gclExtractCategoryLitePathFromLine(const std::string& line,
+                                            bool arkPluginsTxt,
+                                            std::string& outPath,
+                                            bool& outEnabled) {
+        outPath.clear();
+        outEnabled = false;
+
+        auto toLower = [](std::string s){ for(char& c:s) if(c>='A'&&c<='Z') c=c-'A'+'a'; return s; };
+        auto trim = [](std::string s){
+            size_t a=0,b=s.size();
+            while (a<b && (s[a]==' '||s[a]=='\t')) ++a;
+            while (b>a && (s[b-1]==' '||s[b-1]=='\t'||s[b-1]=='\r')) --b;
+            return s.substr(a,b-a);
+        };
+
+        auto parseState = [&](const std::string& rawState)->bool {
+            std::string state = toLower(trim(rawState));
+            if (state.empty()) return true; // missing flag -> treat as enabled
+            if (state == "0") return false;
+            if (state == "1" || state == "on" || state == "true" || state == "enabled") return true;
+            return true;
+        };
+
+        if (arkPluginsTxt) {
+            std::vector<std::string> colsRaw;
+            size_t start=0;
+            while (start<=line.size()){
+                size_t pos = line.find(',', start);
+                if (pos == std::string::npos) pos = line.size();
+                colsRaw.push_back(trim(line.substr(start, pos - start)));
+                start = pos + (pos < line.size() ? 1 : 0);
+                if (pos == line.size()) break;
+            }
+            if (colsRaw.size() < 2) return false;
+            std::string pathLow = toLower(colsRaw[1]);
+            if (pathLow.find("category_lite.prx") == std::string::npos) return false;
+            outPath = colsRaw[1];
+            outEnabled = (colsRaw.size() >= 3) ? parseState(colsRaw[2]) : true;
+            return true;
+        }
+
+        // PRO/ME: tolerate both CSV and space-separated
+        if (line.find(',') != std::string::npos) {
+            std::vector<std::string> colsRaw;
+            size_t start=0;
+            while (start<=line.size()){
+                size_t pos = line.find(',', start);
+                if (pos == std::string::npos) pos = line.size();
+                colsRaw.push_back(trim(line.substr(start, pos - start)));
+                start = pos + (pos < line.size() ? 1 : 0);
+                if (pos == line.size()) break;
+            }
+            if (colsRaw.size() >= 2) {
+                std::string pathLow = toLower(colsRaw[1]);
+                if (pathLow.find("category_lite.prx") != std::string::npos) {
+                    outPath = colsRaw[1];
+                    outEnabled = (colsRaw.size() >= 3) ? parseState(colsRaw[2]) : true;
+                    return true;
+                }
+            }
+        }
+
+        std::vector<std::string> toks;
+        size_t i=0;
+        while (i<line.size()){
+            while (i<line.size() && (line[i]==' '||line[i]=='\t'||line[i]=='\r'||line[i]=='\n')) ++i;
+            size_t j=i; while (j<line.size() && !(line[j]==' '||line[j]=='\t'||line[j]=='\r'||line[j]=='\n')) ++j;
+            if (j>i) toks.emplace_back(line.substr(i,j-i));
+            i=j;
+        }
+        for (size_t k=0; k<toks.size(); ++k){
+            std::string lowTok = toLower(toks[k]);
+            if (lowTok.find("category_lite.prx") != std::string::npos) {
+                outPath = toks[k];
+                // Find first explicit state token after path
+                bool sawState = false;
+                for (size_t m=k+1; m<toks.size(); ++m){
+                    std::string lowState = toLower(trim(toks[m]));
+                    if (lowState=="0" || lowState=="1" || lowState=="on" || lowState=="true" || lowState=="enabled"){
+                        outEnabled = parseState(lowState);
+                        sawState = true;
+                        break;
+                    }
+                }
+                if (!sawState) outEnabled = true;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    std::string gclFindCategoryLitePathInFile(const std::string& filePath, bool arkPluginsTxt, bool enabledOnly) {
+        if (filePath.empty()) return {};
+        std::string txt;
+        if (!gclReadWholeText(filePath, txt)) return {};
+        size_t pos=0, s=0;
+        while (pos<=txt.size()){
+            if (pos==txt.size() || txt[pos]=='\n' || txt[pos]=='\r'){
+                std::string line = txt.substr(s, pos-s);
+                std::string path;
+                bool enabled = false;
+                if (gclExtractCategoryLitePathFromLine(line, arkPluginsTxt, path, enabled)) {
+                    if (!enabledOnly || enabled) return path;
+                }
+                if (pos+1<txt.size() && txt[pos]=='\r' && txt[pos+1]=='\n') ++pos;
+                s = pos + 1;
+            }
+            ++pos;
+        }
+        return {};
+    }
+
+    std::string gclResolveConfiguredPrxPathToken(const std::string& rawPath, const std::string& sepluginsDir) {
+        auto trim = [](std::string s){
+            size_t a=0,b=s.size();
+            while (a<b && (s[a]==' '||s[a]=='\t')) ++a;
+            while (b>a && (s[b-1]==' '||s[b-1]=='\t'||s[b-1]=='\r')) --b;
+            return s.substr(a,b-a);
+        };
+
+        std::string p = trim(rawPath);
+        if (p.size() >= 2) {
+            const char first = p.front();
+            const char last  = p.back();
+            if ((first == '"' && last == '"') || (first == '\'' && last == '\'')) {
+                p = p.substr(1, p.size() - 2);
+            }
+        }
+        for (size_t i = 0; i < p.size(); ++i) {
+            if (p[i] == '\\') p[i] = '/';
+        }
+        if (p.empty()) return {};
+
+        if (!rootPrefix(p).empty()) return p;
+
+        const std::string seplugins = trimTrailingSlashCopy(sepluginsDir);
+        const std::string root = rootPrefix(seplugins);
+        if (!p.empty() && p[0] == '/') {
+            if (!root.empty()) return root + p.substr(1);
+            return p;
+        }
+        if (!seplugins.empty()) return joinDirFile(seplugins, p.c_str());
+        return p;
+    }
+
+    bool gclFindConfiguredPrxPathForBackend(bool arkBackend,
+                                            bool enabledOnly,
+                                            std::string& outPath,
+                                            std::string* outConfigPath = nullptr,
+                                            std::string* outSepluginsDir = nullptr) {
+        outPath.clear();
+        std::string seplugins;
+        const std::string cfg = arkBackend ? gclFindArkPluginsFile(seplugins)
+                                           : gclFindProVshFile(seplugins);
+        if (cfg.empty()) return false;
+        std::string token = gclFindCategoryLitePathInFile(cfg, arkBackend, enabledOnly);
+        if (token.empty()) return false;
+
+        std::string resolved = gclResolveConfiguredPrxPathToken(token, seplugins);
+        if (resolved.empty()) return false;
+
+        outPath = resolved;
+        if (outConfigPath) *outConfigPath = cfg;
+        if (outSepluginsDir) *outSepluginsDir = seplugins;
+        return true;
+    }
+
+    bool gclFindConfiguredPrxPathAny(bool enabledOnly,
+                                     bool preferArkBackend,
+                                     std::string& outPath,
+                                     std::string* outConfigPath = nullptr,
+                                     bool* outArkBackend = nullptr,
+                                     std::string* outSepluginsDir = nullptr) {
+        outPath.clear();
+        std::string cfg;
+        std::string seplugins;
+        bool arkFlag = false;
+
+        if (preferArkBackend) {
+            if (gclFindConfiguredPrxPathForBackend(true, enabledOnly, outPath, &cfg, &seplugins)) {
+                arkFlag = true;
+            } else if (gclFindConfiguredPrxPathForBackend(false, enabledOnly, outPath, &cfg, &seplugins)) {
+                arkFlag = false;
+            } else {
+                return false;
+            }
+        } else {
+            if (gclFindConfiguredPrxPathForBackend(false, enabledOnly, outPath, &cfg, &seplugins)) {
+                arkFlag = false;
+            } else if (gclFindConfiguredPrxPathForBackend(true, enabledOnly, outPath, &cfg, &seplugins)) {
+                arkFlag = true;
+            } else {
+                return false;
+            }
+        }
+
+        if (outConfigPath) *outConfigPath = cfg;
+        if (outArkBackend) *outArkBackend = arkFlag;
+        if (outSepluginsDir) *outSepluginsDir = seplugins;
+        return true;
+    }
+
+    std::string gclPreferredConfiguredPrxPath(bool preferArkBackend) {
+        std::string p;
+        if (gclFindConfiguredPrxPathAny(/*enabledOnly=*/true, preferArkBackend, p)) return p;
+        if (gclFindConfiguredPrxPathAny(/*enabledOnly=*/false, preferArkBackend, p)) return p;
+        return {};
+    }
+
 
     void gclComputeInitial() {
         std::string primaryRoot = gclPickDeviceRoot();
-        {
-            std::string found = gclFindCategoryLitePrxAny(primaryRoot);
-            if (!found.empty()) gclPrxPath = found;
-        }
-        bool havePrx = !gclPrxPath.empty();
 
         // ARK-4: PLUGINS.txt (search both roots)
         bool arkEnabled = false;
@@ -1027,11 +1231,24 @@
             }
         }
 
+        const bool preferArkBackend = arkEnabled || !proEnabled;
+        {
+            std::string configuredPrx = gclPreferredConfiguredPrxPath(preferArkBackend);
+            if (!configuredPrx.empty()) {
+                gclPrxPath = configuredPrx;
+            } else {
+                std::string found = gclFindCategoryLitePrxAny(primaryRoot);
+                if (!found.empty()) gclPrxPath = found;
+                else gclPrxPath.clear();
+            }
+        }
+        const bool havePrx = !gclPrxPath.empty() && pathExists(gclPrxPath);
+
         // Don't gate enablement on PRX discovery; VSH/PLUGINS are the source of truth.
         gclArkOn = arkEnabled;
         gclProOn = proEnabled;
 
-        if (havePrx) {
+        if (!rootPrefix(gclPrxPath).empty()) {
             gclDevice = rootPrefix(gclPrxPath);
         } else if (!proSe.empty()) {
             gclDevice = rootPrefix(proSe);
@@ -2332,12 +2549,21 @@
     // Toggle between legacy and v1.8 plugin modes
     void gclToggleLegacyMode(bool enableLegacy) {
         std::string primaryRoot = gclPickDeviceRoot();
-        std::string targetRoot = rootPrefix(gclDevice);
+        const bool preferArkBackend = gclArkOn || !gclProOn;
+        std::string configuredPrx = gclPreferredConfiguredPrxPath(preferArkBackend);
+        if (configuredPrx.empty()) configuredPrx = gclPrxPath;
+
+        std::string targetRoot = rootPrefix(configuredPrx);
+        if (targetRoot.empty()) targetRoot = rootPrefix(gclDevice);
         if (targetRoot.empty()) targetRoot = primaryRoot;
-        std::string seplugins = gclSepluginsDirForRoot(targetRoot);
+
+        std::string seplugins = parentOf(configuredPrx);
+        if (seplugins.empty()) seplugins = gclSepluginsDirForRoot(targetRoot);
         if (!dirExists(seplugins)) sceIoMkdir(seplugins.c_str(), 0777);
 
-        const std::string prxActive = joinDirFile(seplugins, "category_lite.prx");
+        const std::string prxActive = configuredPrx.empty()
+            ? joinDirFile(seplugins, "category_lite.prx")
+            : configuredPrx;
         const std::string prxOld = joinDirFile(seplugins, "category_lite_old.prx");
         const std::string prxV18 = joinDirFile(seplugins, "category_lite_v1.8.prx");
         const std::string bundledPrx = gclBundledPrxPath();
@@ -2352,9 +2578,17 @@
 
         if (enableLegacy) {
             // Activate legacy PRX if available.
-            std::string legacySrc = gclFindLegacyCategoryLitePrxAny(primaryRoot);
-            if (legacySrc.empty() && pathExists(prxOld)) legacySrc = prxOld;
-            if (legacySrc.empty()) legacySrc = gclFindCategoryLiteOldPrxAny(primaryRoot);
+            std::string legacySrc;
+            if (pathExists(prxOld) && gclVerifyPrxHeader(prxOld)) {
+                legacySrc = prxOld;
+            } else if (pathExists(prxActive) &&
+                       !gclIsBundledPrxCopy(prxActive) &&
+                       gclVerifyPrxHeader(prxActive)) {
+                legacySrc = prxActive;
+            } else {
+                std::string localLegacy = gclFindLegacyCategoryLitePrx(seplugins);
+                if (!localLegacy.empty()) legacySrc = localLegacy;
+            }
             selectedLegacyPrx = legacySrc;
             if (!legacySrc.empty() && strcasecmp(legacySrc.c_str(), prxActive.c_str()) != 0) {
                 gclForceCopyFile(legacySrc, prxActive);
@@ -2400,7 +2634,7 @@
             if (pathExists(prxActive) && !gclIsBundledPrxCopy(prxActive)) {
                 gclForceMoveFile(prxActive, prxOld);
             } else if (!pathExists(prxOld)) {
-                std::string legacySrc = gclFindLegacyCategoryLitePrxAny(primaryRoot);
+                std::string legacySrc = gclFindLegacyCategoryLitePrx(seplugins);
                 if (!legacySrc.empty()) gclForceCopyFile(legacySrc, prxOld);
             }
 
@@ -2474,7 +2708,7 @@
         }
 
         if (pathExists(prxActive)) gclPrxPath = prxActive;
-        gclOldPrxPath = gclFindCategoryLiteOldPrxAny(primaryRoot);
+        gclOldPrxPath = pathExists(prxOld) ? prxOld : std::string();
         gclLegacyMode = enableLegacy;
         gclFiltersLoaded = false; gclLegacyFilterLoaded = false;
     }
@@ -3004,10 +3238,10 @@
             seplugins = gclSepluginsDirForRoot(gclDevice);
         }
 
-        const std::string targetRoot = rootPrefix(seplugins);
+        std::string dst = joinDirFile(seplugins, "category_lite.prx");
+        const std::string targetRoot = rootPrefix(dst);
         if (!gclPrxPath.empty()) {
-            const std::string prxRoot = rootPrefix(gclPrxPath);
-            if (!targetRoot.empty() && !strcasecmp(prxRoot.c_str(), targetRoot.c_str()) &&
+            if (!strcasecmp(gclPrxPath.c_str(), dst.c_str()) &&
                 pathExists(gclPrxPath) && gclVerifyPrxHeader(gclPrxPath)) {
                 return true;
             }
@@ -3016,7 +3250,6 @@
         if (!dirExists(seplugins)) {
             sceIoMkdir(seplugins.c_str(), 0777);
         }
-        std::string dst = joinDirFile(seplugins, "category_lite.prx");
 
         // Where we’re copying from (next to your images)
         std::string baseDir = currentExecBaseDir();
@@ -3075,11 +3308,20 @@
     void gclHealRedundantV18ArtifactsOnLoad() {
         if (gclLegacyMode) return;
 
-        std::string targetRoot = rootPrefix(gclDevice);
+        const bool preferArkBackend = gclArkOn || !gclProOn;
+        std::string preferredPrx = gclPreferredConfiguredPrxPath(preferArkBackend);
+        if (preferredPrx.empty()) preferredPrx = gclPrxPath;
+
+        std::string targetRoot = rootPrefix(preferredPrx);
+        if (targetRoot.empty()) targetRoot = rootPrefix(gclDevice);
         if (targetRoot.empty()) targetRoot = gclPickDeviceRoot();
-        std::string seplugins = gclSepluginsDirForRoot(targetRoot);
+
+        std::string seplugins = parentOf(preferredPrx);
+        if (seplugins.empty()) seplugins = gclSepluginsDirForRoot(targetRoot);
         if (!seplugins.empty()) {
-            std::string prxActive = joinDirFile(seplugins, "category_lite.prx");
+            std::string prxActive = preferredPrx.empty()
+                ? joinDirFile(seplugins, "category_lite.prx")
+                : preferredPrx;
             std::string prxV18 = joinDirFile(seplugins, "category_lite_v1.8.prx");
             if (pathExists(prxActive) && pathExists(prxV18) && gclIsBundledPrxCopy(prxActive)) {
                 sceIoRemove(prxV18.c_str());
@@ -3104,18 +3346,19 @@
         const bool wantArk = gclArkOn;
         const bool wantPro = (!gclArkOn && gclProOn);
 
-        std::string pluginsSe;
-        std::string vshSe;
-        std::string plugins = gclFindArkPluginsFile(pluginsSe);
-        std::string vsh = gclFindProVshFile(vshSe);
-        (void)plugins;
-        (void)vsh;
+        std::string targetPrxPath;
+        if (wantArk) gclFindConfiguredPrxPathForBackend(true, /*enabledOnly=*/false, targetPrxPath);
+        if (targetPrxPath.empty() && wantPro)
+            gclFindConfiguredPrxPathForBackend(false, /*enabledOnly=*/false, targetPrxPath);
+        if (targetPrxPath.empty()) {
+            gclFindConfiguredPrxPathAny(/*enabledOnly=*/false, wantArk, targetPrxPath);
+        }
+        if (targetPrxPath.empty()) targetPrxPath = gclPrxPath;
 
         std::string targetSeplugins;
-        if (wantArk && !pluginsSe.empty()) {
-            targetSeplugins = pluginsSe;
-        } else if (wantPro && !vshSe.empty()) {
-            targetSeplugins = vshSe;
+        if (!targetPrxPath.empty()) {
+            targetSeplugins = parentOf(targetPrxPath);
+            gclPrxPath = targetPrxPath;
         }
 
         if (targetSeplugins.empty()) {
@@ -3138,13 +3381,21 @@
     void gclRunPostUsbIntegrityHeal() {
         gclComputeInitial();
 
-        std::string targetRoot = rootPrefix(gclDevice);
+        const bool preferArkBackend = gclArkOn || !gclProOn;
+        std::string preferredPrx = gclPreferredConfiguredPrxPath(preferArkBackend);
+        if (preferredPrx.empty()) preferredPrx = gclPrxPath;
+
+        std::string targetRoot = rootPrefix(preferredPrx);
+        if (targetRoot.empty()) targetRoot = rootPrefix(gclDevice);
         if (targetRoot.empty()) targetRoot = gclPickDeviceRoot();
-        std::string seplugins = gclSepluginsDirForRoot(targetRoot);
+        std::string seplugins = parentOf(preferredPrx);
+        if (seplugins.empty()) seplugins = gclSepluginsDirForRoot(targetRoot);
         if (seplugins.empty()) return;
         if (!dirExists(seplugins)) sceIoMkdir(seplugins.c_str(), 0777);
 
-        const std::string prxActive = joinDirFile(seplugins, "category_lite.prx");
+        const std::string prxActive = preferredPrx.empty()
+            ? joinDirFile(seplugins, "category_lite.prx")
+            : preferredPrx;
         const std::string prxOld = joinDirFile(seplugins, "category_lite_old.prx");
         const std::string prxV18 = joinDirFile(seplugins, "category_lite_v1.8.prx");
         const std::string bundledPrx = gclBundledPrxPath();
@@ -3156,7 +3407,7 @@
         if (!pathExists(prxActive) || !gclVerifyPrxHeader(prxActive)) {
             std::vector<std::string> sources;
             if (gclLegacyMode) {
-                sources.push_back(gclFindLegacyCategoryLitePrxAny(gclPickDeviceRoot()));
+                sources.push_back(gclFindLegacyCategoryLitePrx(seplugins));
                 sources.push_back(prxOld);
                 sources.push_back(prxV18);
                 sources.push_back(bundledPrx);

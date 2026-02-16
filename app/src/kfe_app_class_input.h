@@ -733,7 +733,7 @@
                     std::string primaryRoot = gclPickDeviceRoot();
                     bool legacyCandidate = gclHasLegacyCandidatePrx(primaryRoot);
                     bool cbDisabled = !legacyCandidate && !gclLegacyMode;
-                    optMenu->setCheckbox("Use existing legacy category_lite.prx plugin",
+                    optMenu->setCheckbox("Use my own existing category_lite.prx plugin",
                                          gclLegacyMode, cbDisabled);
 
                     // Prime & debounce so held X/O won't auto-activate the choice
@@ -1112,27 +1112,44 @@
                             const bool wantPro = (pick == 2);
 
                             std::string targetSeplugins;
+                            std::string targetPrxPath;
                             bool needArkFile = false;
                             bool needProFile = false;
+                            if (wantArk) needArkFile = true;
+                            if (wantPro) needProFile = true;
+
+                            if (wantArk) {
+                                gclFindConfiguredPrxPathForBackend(true, /*enabledOnly=*/false, targetPrxPath);
+                            }
+                            if (targetPrxPath.empty() && wantPro) {
+                                gclFindConfiguredPrxPathForBackend(false, /*enabledOnly=*/false, targetPrxPath);
+                            }
+                            if (targetPrxPath.empty()) {
+                                gclFindConfiguredPrxPathAny(/*enabledOnly=*/false, wantArk, targetPrxPath);
+                            }
+                            if (targetPrxPath.empty()) targetPrxPath = gclPrxPath;
+                            if (!targetPrxPath.empty()) {
+                                gclPrxPath = targetPrxPath;
+                                targetSeplugins = parentOf(targetPrxPath);
+                            }
+
                             if (wantPro) {
-                                targetSeplugins = vshSe;
-                                needProFile = true;
+                                if (targetSeplugins.empty()) targetSeplugins = vshSe;
                             } else if (wantArk) {
-                                targetSeplugins = pluginsSe;
-                                needArkFile = true;
+                                if (targetSeplugins.empty()) targetSeplugins = pluginsSe;
                             }
                             if (targetSeplugins.empty()) {
                                 gclDevice = gclPickDeviceRoot();
                                 targetSeplugins = gclSepluginsDirForRoot(gclDevice);
                                 if (wantPro) {
-                                    needProFile = true;
                                     vsh = joinDirFile(targetSeplugins, "VSH.txt");
                                 } else if (wantArk) {
-                                    needArkFile = true;
                                     plugins = joinDirFile(targetSeplugins, "PLUGINS.txt");
                                 }
                             } else {
                                 gclDevice = rootPrefix(targetSeplugins);
+                                if (wantPro && vsh.empty()) vsh = joinDirFile(targetSeplugins, "VSH.txt");
+                                if (wantArk && plugins.empty()) plugins = joinDirFile(targetSeplugins, "PLUGINS.txt");
                             }
                             if (!dirExists(targetSeplugins)) sceIoMkdir(targetSeplugins.c_str(), 0777);
 
