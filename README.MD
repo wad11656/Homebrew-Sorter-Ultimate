@@ -42,7 +42,6 @@ Successor to [HomeBrew Sorter GUI](https://www.gamebrew.org/wiki/HomeBrew_Sorter
 - On vanilla (non-ARK) Adrenaline and LME CFW, the Game Categories plugin does not merge Category folders that share the same name across `/ISO` and `/PSP/GAME`.
 
 <ins>Additional Info</ins>:
-- You can bulk-select apps by holding square and pressing up or down. (This will select every unchecked app in that direction until it hits the end of the app list <ins>or</ins> another checked app.)
 - You can disable the main screen's animations by removing the `/resources/animations` folder. (If you want different anitmations, you can add your own animation folders with animation `.png` frames named with the same frame-duration syntax as in the existing folders.)
 - You can change the app background by swapping out `/resources/bkg.png`.
 - A [personally-updated build of the Game Categories Lite plugin](https://github.com/wad11656/game-categories-lite) was created and is installed from within the app when you enable the **Game Categories** setting. This upgraded plugin hides Categories (new feature) & Apps on the XMB by defining exact folder paths (including the ef0/ms0 device specification for PSP Go)--not just folder names.
