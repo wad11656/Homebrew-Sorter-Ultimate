@@ -49,8 +49,7 @@ Successor to [HomeBrew Sorter GUI](https://www.gamebrew.org/wiki/HomeBrew_Sorter
   - You can use your existing legacy Game Categories Lite plugin instead if you prefer. Just make sure it's installed on your PSP as `category_lite.prx`, and select the **Use existing legacy category_lite.prx plugin** option in the **Game Categories** menu on the app's main screen.
 
 <div>
-&#8194;<img width="480" height="272" alt="Image" src="https://github.com/user-attachments/assets/239fa11c-f029-481e-8627-2c8324a70c71" />
-</div>
+<img width="536" height="272" alt="Image" src="https://github.com/user-attachments/assets/c8906bf6-5419-41a5-8989-92087f7cd5c6" />
 
 <ins>Acknowledgements</ins>:
 
