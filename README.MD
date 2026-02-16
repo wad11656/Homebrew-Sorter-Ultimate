@@ -46,10 +46,10 @@ Successor to [HomeBrew Sorter GUI](https://www.gamebrew.org/wiki/HomeBrew_Sorter
 - You can disable the main screen's animations by removing all the folders in the `/resources/animations` folder. (Or even add your own animation folders with animation `.png` frames named the same way as in the existing folders.)
 - You can change the app background by swapping out `/resources/bkg.png`.
 - A [personally-updated build of the Game Categories Lite plugin](https://github.com/wad11656/game-categories-lite) was created and is installed from within the app when you enable the **Game Categories** setting. This upgraded plugin hides Apps & Categories (New) on the XMB by exact filepath (including ef0/ms0 device specification for PSP Go)--not just by folder name.
-  - Alternatively, you can still use your existing legacy Game Categories Lite plugin instead if you prefer. Just make sure it's installed on your PSP as `category_lite.prx`, and select the **Use existing legacy category_lite.prx plugin** option in the **Game Categories** menu on the app's main screen.
+  - Alternatively, you can still use a different Game Categories Lite plugin that you already had pre-installed, if you prefer. Just make sure it's installed on your PSP as `category_lite.prx`, and select the **Use my own existing category_lite.prx plugin** option in the **Game Categories** menu on the app's main screen.
 
 <div>
-<img width="536" height="272" alt="Image" src="https://github.com/user-attachments/assets/c8906bf6-5419-41a5-8989-92087f7cd5c6" />
+<img width="536" height="272" alt="Image" src="https://github.com/user-attachments/assets/9a8393b6-50af-4ae5-99d1-27b4aaab8260" />
 
 <ins>Acknowledgements</ins>:
 
