@@ -475,8 +475,8 @@
                 if (view == View_AllFlat || view == View_CategoryContents) {
                     const bool gclOn = (gclArkOn || gclProOn);
                     const bool canCrossDevices = dualDeviceAvailableFromMs0();
-                    const bool canWithinDevice = gclOn && hasCategories;
-                    const bool canMoveCopy     = canCrossDevices || canWithinDevice;
+                    const bool canWithinDevice = hasSameDeviceMoveCopyDestinationForCurrentSelection();
+                    const bool canMoveCopy = canCrossDevices || canWithinDevice;
 
                     std::vector<std::string> hidePaths;
                     if (!checked.empty()) {

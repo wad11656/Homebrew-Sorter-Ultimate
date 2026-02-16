@@ -94,6 +94,53 @@ private:
         if (gclCfg.uncategorized == 2) return strncasecmp(dev.c_str(), "ef0:/", 5) == 0;
         return true;
     }
+    bool hasSameDeviceMoveCopyDestinationForCurrentSelection() const {
+        const bool gclOn = (gclArkOn || gclProOn);
+        if (!gclOn) return false;
+
+        auto vecHasCaseInsensitive = [](const std::vector<std::string>& v, const std::string& s) -> bool {
+            for (const auto& x : v) {
+                if (!strcasecmp(x.c_str(), s.c_str())) return true;
+            }
+            return false;
+        };
+        auto parseCategoryFromFullPath = [](const std::string& full, GameItem::Kind kind) -> std::string {
+            std::string sub = KfeFileOps::subrootFor(full, kind);
+            std::string tail = KfeFileOps::afterSubroot(full, sub);
+            std::string cat, leaf;
+            KfeFileOps::parseCategoryFromPath(tail, cat, leaf);
+            return cat; // "" => Uncategorized
+        };
+
+        std::vector<std::string> srcCats;
+        bool srcHasUncategorized = false;
+        auto addSource = [&](const std::string& path, GameItem::Kind kind) {
+            std::string cat = parseCategoryFromFullPath(path, kind);
+            if (cat.empty()) { srcHasUncategorized = true; return; }
+            if (!vecHasCaseInsensitive(srcCats, cat)) srcCats.push_back(cat);
+        };
+
+        if (!checked.empty()) {
+            for (const auto& gi : workingList) {
+                if (checked.find(gi.path) == checked.end()) continue;
+                addSource(gi.path, gi.kind);
+            }
+        } else if (selectedIndex >= 0 && selectedIndex < (int)workingList.size()) {
+            addSource(workingList[selectedIndex].path, workingList[selectedIndex].kind);
+        } else {
+            return false;
+        }
+
+        bool hasRealCategoryDestination = false;
+        for (const auto& cat : categoryNames) {
+            if (!vecHasCaseInsensitive(srcCats, cat)) {
+                hasRealCategoryDestination = true;
+                break;
+            }
+        }
+        const bool uncDest = isUncategorizedEnabledForDevice(currentDevice) && !srcHasUncategorized;
+        return hasRealCategoryDestination || uncDest;
+    }
 
     // ---- Lightweight cache patch: update in-memory categories without rescanning disk ----
     void patchCategoryCacheFromSettings(bool forceStripNumbers = false, bool preferOnDiskNames = false){
@@ -2076,7 +2123,7 @@ private:
         drawRect(0, 0, SCREEN_WIDTH, bannerH, COLOR_BANNER);
 
         std::string leftLabel = "Homebrew Sorter Ultimate";
-        std::string leftLabelMutedSuffix = " v1.20";
+        std::string leftLabelMutedSuffix = " v1.21";
         Texture* deviceIcon = nullptr;
         bool underlineLabel = false;
         const bool opHeader = (actionMode != AM_None &&

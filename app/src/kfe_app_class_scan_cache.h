@@ -3438,20 +3438,110 @@
         }
 
         const bool gclOn = (gclArkOn || gclProOn);
-        bool preOpHasRealCategoryFolders = false;
-        if (hasPreOpScan) {
-            for (const auto& kv : preOpScan.categories) {
-                if (strcasecmp(kv.first.c_str(), "Uncategorized") != 0) {
-                    preOpHasRealCategoryFolders = true;
-                    break;
+        auto snapshotHasRealCategories = [](const ScanSnapshot& snap) -> bool {
+            if (!snap.categoryNames.empty()) return true;
+            for (const auto& kv : snap.categories) {
+                if (strcasecmp(kv.first.c_str(), "Uncategorized") != 0) return true;
+            }
+            return false;
+        };
+        auto parseOpCategory = [](const std::string& full, GameItem::Kind kind) -> std::string {
+            std::string sub = KfeFileOps::subrootFor(full, kind);
+            std::string tail = KfeFileOps::afterSubroot(full, sub);
+            std::string cat, leaf;
+            KfeFileOps::parseCategoryFromPath(tail, cat, leaf);
+            return cat; // "" => Uncategorized
+        };
+        auto collectSourceCatsForSameDevice = [&](std::vector<std::string>& outCats, bool& outHasUncat) {
+            outCats.clear();
+            outHasUncat = false;
+            if (opSrcPaths.size() != opSrcKinds.size()) return;
+            for (size_t i = 0; i < opSrcPaths.size(); ++i) {
+                std::string cat = parseOpCategory(opSrcPaths[i], opSrcKinds[i]);
+                if (cat.empty()) { outHasUncat = true; continue; }
+                bool dup = false;
+                for (const auto& existing : outCats) {
+                    if (!strcasecmp(existing.c_str(), cat.c_str())) { dup = true; break; }
+                }
+                if (!dup) outCats.push_back(cat);
+            }
+        };
+        auto hasCategoryCi = [](const std::vector<std::string>& list, const std::string& name) -> bool {
+            for (const auto& v : list) {
+                if (!strcasecmp(v.c_str(), name.c_str())) return true;
+            }
+            return false;
+        };
+        auto collectKnownRealCatsForDevice = [&](const std::string& dev, std::vector<std::string>& outCats) -> bool {
+            outCats.clear();
+            auto appendFromSnap = [&](const ScanSnapshot& snap) {
+                auto appendUnique = [&](const std::string& cat) {
+                    if (cat.empty() || !strcasecmp(cat.c_str(), "Uncategorized")) return;
+                    if (!hasCategoryCi(outCats, cat)) outCats.push_back(cat);
+                };
+                for (const auto& cat : snap.categoryNames) appendUnique(cat);
+                for (const auto& kv : snap.categories) appendUnique(kv.first);
+            };
+
+            if (!preOpDevice.empty() && !strcasecmp(dev.c_str(), preOpDevice.c_str()) && hasPreOpScan) {
+                appendFromSnap(preOpScan);
+                return true;
+            }
+
+            const std::string key = rootPrefix(dev);
+            auto it = deviceCache.find(key);
+            if (it != deviceCache.end()) {
+                const ScanSnapshot& snap = it->second.snap;
+                const bool hasSnap =
+                    (!snap.flatAll.empty()) ||
+                    (!snap.uncategorized.empty()) ||
+                    (!snap.categories.empty()) ||
+                    (!snap.categoryNames.empty());
+                if (hasSnap) {
+                    appendFromSnap(snap);
+                    return true;
                 }
             }
+            return false;
+        };
+        bool preOpHasRealCategoryFolders = false;
+        if (hasPreOpScan) {
+            preOpHasRealCategoryFolders = snapshotHasRealCategories(preOpScan);
         }
         const bool disableSourceDeviceForGoOp =
             (opPhase == OP_SelectDevice) &&
             (actionMode == AM_Move || actionMode == AM_Copy) &&
             dualDeviceAvailableFromMs0() &&
             (!gclOn || !preOpHasRealCategoryFolders);
+        auto deviceHasValidOpDestination = [&](const std::string& dev) -> bool {
+            if (opPhase != OP_SelectDevice || (actionMode != AM_Move && actionMode != AM_Copy)) return true;
+            if (!gclOn) return true; // Categories off: destination is always the flat list.
+
+            std::vector<std::string> realCats;
+            const bool haveKnownCats = collectKnownRealCatsForDevice(dev, realCats);
+            bool hasAnyRealCategory = !realCats.empty();
+            if (!haveKnownCats) hasAnyRealCategory = deviceHasAnyCategory(dev);
+
+            bool uncEnabled = isUncategorizedEnabledForDevice(dev);
+            const bool sameDevice = !preOpDevice.empty() && !strcasecmp(dev.c_str(), preOpDevice.c_str());
+            if (!sameDevice) return hasAnyRealCategory || uncEnabled;
+
+            std::vector<std::string> srcCats;
+            bool srcHasUncat = false;
+            collectSourceCatsForSameDevice(srcCats, srcHasUncat);
+
+            bool hasRealDestination = false;
+            if (haveKnownCats) {
+                for (const auto& cat : realCats) {
+                    if (!hasCategoryCi(srcCats, cat)) { hasRealDestination = true; break; }
+                }
+            } else {
+                hasRealDestination = hasAnyRealCategory;
+            }
+            if (srcHasUncat) uncEnabled = false;
+
+            return hasRealDestination || uncEnabled;
+        };
 
         if (opPhase != OP_SelectDevice) {
             gclLoadConfig();
@@ -3498,6 +3588,10 @@
                     if (runningFromEf0 && r == "ms0:/") {
                         flags |= ROW_DISABLED;
                         reason = RD_RUNNING_FROM_EF0;
+                    }
+
+                    if (!deviceHasValidOpDestination(r)) {
+                        flags |= ROW_DISABLED;
                     }
 
                 // NEW: don't probe or show yellow text for same-device MOVE row
@@ -3721,9 +3815,22 @@
             sortCategoryNamesByMtime(catsSorted, currentDevice);
         }
 
-        bool alreadyHasUnc = false;
-        for (auto& n : catsSorted) if (!strcasecmp(n.c_str(),"Uncategorized")) { alreadyHasUnc = true; break; }
-        if (!alreadyHasUnc) catsSorted.push_back("Uncategorized");
+        const std::string targetDev =
+            !opDestDevice.empty() ? opDestDevice : (!currentDevice.empty() ? currentDevice : preOpDevice);
+        const bool allowUncategorized = isUncategorizedEnabledForDevice(targetDev);
+        if (allowUncategorized) {
+            bool alreadyHasUnc = false;
+            for (auto& n : catsSorted) {
+                if (!strcasecmp(n.c_str(), "Uncategorized")) { alreadyHasUnc = true; break; }
+            }
+            if (!alreadyHasUnc) catsSorted.push_back("Uncategorized");
+        } else {
+            catsSorted.erase(
+                std::remove_if(catsSorted.begin(), catsSorted.end(),
+                               [](const std::string& n){ return !strcasecmp(n.c_str(), "Uncategorized"); }),
+                catsSorted.end());
+            opDisabledCategories.erase("Uncategorized");
+        }
 
         for (auto &name : catsSorted){
             SceIoDirent e{}; strncpy(e.d_name, name.c_str(), sizeof(e.d_name)-1);
@@ -3748,7 +3855,7 @@
             opDisabledCategories.find(entries[sel].d_name) != opDisabledCategories.end()) {
             ++sel;
         }
-        if (sel >= (int)entries.size()) sel = 0;
+        if (sel >= (int)entries.size()) sel = -1;
         selectedIndex = sel;
         scrollOffset = 0;
     }

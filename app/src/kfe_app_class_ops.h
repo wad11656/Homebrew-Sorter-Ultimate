@@ -206,10 +206,10 @@
 
 
 
-    // --- helper (NEW): “any device has categories?” quick probe for any CAT_ on a device ---
+    // --- helper: quick probe for any CAT_* folder on a device ---
     bool deviceHasAnyCategory(const std::string& dev) const {
-        const char* isoRoots[]  = {"ISO/"};                // drop ISO/PSP/ as a root
-        const char* gameRoots[] = {"PSP/GAME/","PSP/GAME150/"}; // drop PSX/ and Utility/ as roots
+        const char* isoRoots[]  = {"ISO/"};
+        const char* gameRoots[] = {"PSP/GAME/","PSP/GAME/PSX/","PSP/GAME/Utility/","PSP/GAME150/"};
 
         auto hasCatIn = [](const std::string& base)->bool {
             if (!dirExists(base)) return false;
@@ -306,7 +306,8 @@
                 return;
             }
 
-            if (!gclOn || mode == AM_Copy || goMs0Mode) {
+            // Device picker is only needed when Categories are off (flat mode) or on PSP Go dual-device flow.
+            if (!gclOn || goMs0Mode) {
                 opPhase = OP_SelectDevice;
 
                 // NEW: transient feedback while we do the first free-space probe
@@ -337,7 +338,7 @@
                 // close the transient overlay
                 delete msgBox; msgBox = nullptr;
             } else {
-                if (!hasCategories) {
+                if (!hasSameDeviceMoveCopyDestinationForCurrentSelection()) {
                     msgBox = new MessageBox("Needs categories on this device.", okIconTexture, SCREEN_WIDTH, SCREEN_HEIGHT, 1.0f, 20, "OK", 16, 18, 8, 14);
                     actionMode = AM_None;
                     return;
