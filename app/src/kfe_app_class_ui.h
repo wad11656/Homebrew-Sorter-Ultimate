@@ -2140,7 +2140,7 @@ private:
         drawRect(0, 0, SCREEN_WIDTH, bannerH, COLOR_BANNER);
 
         std::string leftLabel = "Homebrew Sorter Ultimate";
-        std::string leftLabelMutedSuffix = " v1.21";
+        std::string leftLabelMutedSuffix = " v1.22";
         Texture* deviceIcon = nullptr;
         bool underlineLabel = false;
         const bool opHeader = (actionMode != AM_None &&
