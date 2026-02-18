@@ -299,15 +299,17 @@
         const bool gclOn = (gclArkOn || gclProOn);
 
         if (mode == AM_Move || mode == AM_Copy) {
-            if (!gclOn && !goMs0Mode) {
+            // Move on single-device contexts still requires categories for a meaningful destination.
+            if (mode == AM_Move && !gclOn && !goMs0Mode) {
                 msgBox = new MessageBox("Game Categories must be enabled on this device.", okIconTexture,
                                         SCREEN_WIDTH, SCREEN_HEIGHT, 1.0f, 20, "OK", 16, 18, 8, 14);
                 actionMode = AM_None;
                 return;
             }
 
-            // Device picker is only needed when Categories are off (flat mode) or on PSP Go dual-device flow.
-            if (!gclOn || goMs0Mode) {
+            // Copy: always show device picker.
+            // Move: show device picker only in PSP Go dual-device mode.
+            if (mode == AM_Copy || goMs0Mode) {
                 opPhase = OP_SelectDevice;
 
                 // NEW: transient feedback while we do the first free-space probe
