@@ -68,8 +68,8 @@ int RunKernelFileExplorer(const char* execPath) {
     std::string intPath    = baseDir + "resources/internal_40h.png";
     std::string usbPath    = baseDir + "resources/usb_21h.png";
     std::string catPath    = baseDir + "resources/categories_25h.png";
-    std::string ark4Path   = baseDir + "resources/ark4_small_border_18h.png";
-    std::string proPath    = baseDir + "resources/pro_me_18h.png";
+    std::string ark4Path   = baseDir + "resources/ark4_ark5_epi8_23h.png";
+    std::string proPath    = baseDir + "resources/pro_me_epi7_23h.png";
     std::string offPath    = baseDir + "resources/off_bulb_18h.png";
     std::string folderPath = baseDir + "resources/folder.png";
     std::string folderGrayPath = baseDir + "resources/folder_grayscale.png";
@@ -87,6 +87,7 @@ int RunKernelFileExplorer(const char* execPath) {
     std::string homebrewGrayPath = baseDir + "resources/homebrew_grayscale.png";
     std::string isoGrayPath    = baseDir + "resources/iso_grayscale.png";
     std::string updateGrayPath = baseDir + "resources/update_grayscale.png";
+    std::string turbografxGrayPath = baseDir + "resources/turbografx16_grayscale.png";
     std::string warningPath = baseDir + "resources/warning.png";
     std::string updownPath = baseDir + "resources/updown.png";
     std::string animRoot   = baseDir + "resources/animations";
@@ -124,6 +125,7 @@ int RunKernelFileExplorer(const char* execPath) {
     homebrewIconTextureGray = texLoadPNG(homebrewGrayPath.c_str()); logTex("homebrew_gray", homebrewGrayPath, homebrewIconTextureGray);
     isoIconTextureGray    = texLoadPNG(isoGrayPath.c_str()); logTex("iso_gray", isoGrayPath, isoIconTextureGray);
     updateIconTextureGray = texLoadPNG(updateGrayPath.c_str()); logTex("update_gray", updateGrayPath, updateIconTextureGray);
+    turbografxIconTextureGray = texLoadPNG(turbografxGrayPath.c_str()); logTex("turbografx_gray", turbografxGrayPath, turbografxIconTextureGray);
     warningIconTexture = texLoadPNG(warningPath.c_str()); logTex("warning", warningPath, warningIconTexture);
     updownIconTexture = texLoadPNG(updownPath.c_str()); logTex("updown", updownPath, updownIconTexture);
 

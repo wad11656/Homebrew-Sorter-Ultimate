@@ -21,7 +21,7 @@ Successor to [HomeBrew Sorter GUI](https://www.gamebrew.org/wiki/HomeBrew_Sorter
 
 <img width="480" height="272" alt="Image" src="https://github.com/user-attachments/assets/941bd80d-e937-4f65-85ac-3e3cfefe1dc5" />
 
-### 3. PSP Go Support (Memory Stick & Internal Storage)
+### 3. PSP Go and Adrenaline v8 Support (Memory Stick & System Storage)
 
 <img width="480" height="272" alt="Image" src="https://github.com/user-attachments/assets/5526f8af-d245-4325-a0dd-e456fceff37e" />
 
@@ -44,7 +44,7 @@ Successor to [HomeBrew Sorter GUI](https://www.gamebrew.org/wiki/HomeBrew_Sorter
 3. Launch **Homebrew Sorter Ultimate** from your PSP's XMB/home screen.
 4. If you want to file your PSP apps into categories (essentially folders) on your PSP's XMB/home screen, then enable the **Game Categories** plugin by selecting your CFW version under the `Game Categories:` section at the bottom of **Homebrew Sorter Ultimate**'s main screen.
     - PS Vita: If you're running vanilla (non-ARK) Adrenaline, select `PRO/ME` as your CFW. In order for the **Game Categories** plugin to start working, you may need to (temporarily) enable `Category prefix` from the `Game Categories Settings` screen after selecting a Storage Device. (Or you can enable the setting from `System Settings` in the XMB.)
-5. In **Homebrew Sorter Ultimate**, select your Storage Device (`Memory Stick` or `Internal Storage`) to view your PSP apps.
+5. In **Homebrew Sorter Ultimate**, select your Storage Device (`Memory Stick` or `System Storage`) to view your PSP apps.
 6. When **Game Categories** is first enabled, your apps will be located in the `Uncategorized` category folder by default. Enable the `Uncategorized` category by going to `Game Categories Settings`, which appears at the top of the screen after selecting a Storage Device.
 
 *Comprehensive video guide coming soon...*

@@ -2,10 +2,15 @@
     // -----------------------------------------------------------
     void detectRoots() {
         roots.clear();
-        runningFromEf0 = (gExecPath && strncmp(gExecPath, "ef0:", 4) == 0);
+        // True only for a real PSP Go booted from internal storage, where operating on
+        // the physical Memory Stick is restricted. On Epinephrine, ef0: is the Vita
+        // System Storage and ms0: is an always-mounted virtual partition, so launching
+        // from System Storage must NOT disable the Memory Stick or its file operations.
+        // Keep this false there so ms0: and all Move/Copy flows stay enabled.
+        runningFromEf0 = (gExecPath && strncmp(gExecPath, "ef0:", 4) == 0) && !isAdrenaline();
 
         { SceUID d = kfeIoOpenDir("ms0:/"); if (d >= 0) { kfeIoCloseDir(d); roots.push_back("ms0:/"); } }
-        if (isPspGo()) {
+        if (hasSystemStorage()) {
             SceUID d = kfeIoOpenDir("ef0:/"); if (d >= 0) { kfeIoCloseDir(d); roots.push_back("ef0:/"); }
         }
 
@@ -138,7 +143,8 @@
 
             // If the folder itself contains a PBP (EBOOT/PARAM/PBOOT), treat it as a stand-alone game (UNCATEGORIZED).
             std::string folderNoSlashRoot = joinDirFile(base, name.c_str());
-            if (dirExists(folderNoSlashRoot) && !findEbootCaseInsensitive(folderNoSlashRoot).empty()){
+            bool rootIsTurboGrafx = false;
+            if (dirExists(folderNoSlashRoot) && isGameContentFolder(folderNoSlashRoot, &rootIsTurboGrafx)){
                 GameItem gi; gi.kind = GameItem::EBOOT_FOLDER;
                 gi.label = name;
                 gi.path  = folderNoSlashRoot;
@@ -152,6 +158,7 @@
                 sumDirBytes(gi.path, folderBytes);
                 gi.sizeBytes = folderBytes;
                 gi.isUpdateDlc = isUpdateDlcFolder(gi.path);
+                gi.isTurboGrafx = rootIsTurboGrafx;
                 fillEbootIconPaths(gi);
 
                 std::string t; if (getFolderTitle(gi.path, t)) gi.title = t;
@@ -172,7 +179,8 @@
                     std::string title = sub.d_name;
                     std::string folderNoSlash = joinDirFile(catDir, title.c_str());
                     if (dirExists(folderNoSlash)){
-                        if (!findEbootCaseInsensitive(folderNoSlash).empty()){
+                        bool subIsTurboGrafx = false;
+                        if (isGameContentFolder(folderNoSlash, &subIsTurboGrafx)){
                             GameItem gi; gi.kind = GameItem::EBOOT_FOLDER;
                             gi.label = title;
                             gi.path  = folderNoSlash;
@@ -186,6 +194,7 @@
                             sumDirBytes(gi.path, folderBytes);
                             gi.sizeBytes = folderBytes;
                             gi.isUpdateDlc = isUpdateDlcFolder(gi.path);
+                            gi.isTurboGrafx = subIsTurboGrafx;
                             fillEbootIconPaths(gi);
 
                             std::string t; if (getFolderTitle(gi.path, t)) gi.title = t;
@@ -332,7 +341,7 @@
             if (existing.find(base) != existing.end() && baseHasItems[base]) return;
 
             std::string subAbs = joinDirFile(absRoot, sub.c_str());
-            if (!findEbootCaseInsensitive(subAbs).empty()) return; // sub itself is a game folder
+            if (isGameContentFolder(subAbs)) return; // sub itself is a game folder
 
             std::vector<GameItem> items;
             forEachEntry(subAbs, [&](const SceIoDirent &e){
@@ -340,7 +349,8 @@
                     std::string title = e.d_name;
                     std::string folderNoSlash = joinDirFile(subAbs, title.c_str());
                     if (!dirExists(folderNoSlash)) return;
-                    if (!findEbootCaseInsensitive(folderNoSlash).empty()){
+                    bool childIsTurboGrafx = false;
+                    if (isGameContentFolder(folderNoSlash, &childIsTurboGrafx)){
                         GameItem gi; gi.kind = GameItem::EBOOT_FOLDER;
                         gi.label = title;
                         gi.path  = folderNoSlash;
@@ -353,6 +363,7 @@
                         sumDirBytes(gi.path, folderBytes);
                         gi.sizeBytes = folderBytes;
                         gi.isUpdateDlc = isUpdateDlcFolder(gi.path);
+                        gi.isTurboGrafx = childIsTurboGrafx;
                         fillEbootIconPaths(gi);
 
                         std::string t; if (getFolderTitle(gi.path, t)) gi.title = t;
@@ -380,7 +391,7 @@
         }
 
         // Do NOT inject categories from the opposite root; just mark it dirty so it refreshes on visit.
-        if (isPspGo()) {
+        if (hasSystemStorage()) {
             std::string other = oppositeRootOf(dev);
             if (!other.empty()) markDeviceDirty(other);
         }
@@ -463,7 +474,7 @@
                 if (isBlacklistedCategoryFolder(rootLabel, sub, absRoot)) continue;
 
                 std::string subAbs = joinDirFile(absRoot, sub.c_str());
-                if (!findEbootCaseInsensitive(subAbs).empty()) continue; // sub itself is a game folder
+                if (isGameContentFolder(subAbs)) continue; // sub itself is a game folder
 
                 std::vector<GameItem> items;
                 forEachEntry(subAbs, [&](const SceIoDirent &e){
@@ -471,7 +482,8 @@
                         std::string title = e.d_name;
                         std::string folderNoSlash = joinDirFile(subAbs, title.c_str());
                         if (!dirExists(folderNoSlash)) return;
-                    if (!findEbootCaseInsensitive(folderNoSlash).empty()){
+                    bool childIsTurboGrafx = false;
+                    if (isGameContentFolder(folderNoSlash, &childIsTurboGrafx)){
                         GameItem gi; gi.kind = GameItem::EBOOT_FOLDER;
                         gi.label = title;
                         gi.path  = folderNoSlash;
@@ -484,6 +496,7 @@
                             sumDirBytes(gi.path, folderBytes);
                             gi.sizeBytes = folderBytes;
                             gi.isUpdateDlc = isUpdateDlcFolder(gi.path);
+                            gi.isTurboGrafx = childIsTurboGrafx;
                             fillEbootIconPaths(gi);
 
                             std::string t; if (getFolderTitle(gi.path, t)) gi.title = t;
@@ -556,7 +569,10 @@
     // Game Categories Lite - helpers & settings screen (class-scoped)
     // ---------------------------------------------------------------
 
-    // Pick ef0:/ on PSP Go if present; otherwise ms0:/
+    // Pick ef0:/ on PSP Go if present; otherwise ms0:/.
+    // Only a genuine PSP Go treats ef0: as GC Lite storage. Under Adrenaline the
+    // Vita's System Storage is exposed as ef0:, but GC Lite management must stay
+    // on the Memory Stick (ms0:), matching gclConfigRoot().
     std::string gclPickDeviceRoot() {
         if (isPspGo() && DeviceExists("ef0:/")) return "ef0:/";
         return "ms0:/";
@@ -890,6 +906,18 @@
         std::string primaryRoot = gclPickDeviceRoot();
         std::vector<std::string> dirs;
         gclCollectSepluginsDirs(primaryRoot, dirs);
+
+        // Epinephrine (Adrenaline 8+) reads EPIplugins.txt in preference to
+        // plugins.txt when it exists, keeping its plugin list separate from the
+        // ARK-shared plugins.txt. Mirror that precedence so we read/write the file
+        // Epinephrine will actually honor -- but only when it already exists; we
+        // never create EPIplugins.txt from scratch. Irrelevant on real PSP/PSP Go.
+        if (isAdrenaline()) {
+            for (const auto& dir : dirs) {
+                std::string epi = gclFindTxtInSeplugins(dir, "EPIplugins.txt");
+                if (!epi.empty()) { outSeplugins = dir; return epi; }
+            }
+        }
 
         for (const auto& dir : dirs) {
             std::string plugins = gclFindTxtInSeplugins(dir, "PLUGINS.TXT");
@@ -1407,9 +1435,21 @@
 
         if (!found && enable){
             if (gclPrxPath.empty()) return false;
-            if (!lines.empty() && !lines.back().empty()) lines.push_back(std::string());
-            if (arkPluginsTxt) lines.push_back(std::string("vsh, ") + gclPrxPath + ", 1");
-            else               lines.push_back(gclPrxPath + " 1");
+            const std::string newLine = arkPluginsTxt
+                ? (std::string("vsh, ") + gclPrxPath + ", 1")
+                : (gclPrxPath + " 1");
+            // Epinephrine (Adrenaline 8+) is sensitive to category_lite.prx's load
+            // order, so when adding the entry from scratch put it at the top of the
+            // file. An entry already present is edited in place above (the `found`
+            // branch), so its existing position is preserved.
+            // ARK backend only (PLUGINS.txt/EPIplugins.txt): the PRO/ME VSH.txt path
+            // is where Epinephrine <=7 lives, and it keeps the classic append order.
+            if (isAdrenaline() && arkPluginsTxt) {
+                lines.insert(lines.begin(), newLine);
+            } else {
+                if (!lines.empty() && !lines.back().empty()) lines.push_back(std::string());
+                lines.push_back(newLine);
+            }
         }
 
         std::string out;
@@ -1455,7 +1495,9 @@
 
     // NEW: load/save gclite.bin (CategoryConfig)
     static std::string defaultBlacklistRoot() {
-        if (DeviceExists("ef0:/")) return "ef0:/";
+        // ef0: is GC Lite storage only on a real PSP Go; under Adrenaline it is the
+        // Vita System Storage, so keep the blacklist on the Memory Stick (ms0:).
+        if (isPspGo() && DeviceExists("ef0:/")) return "ef0:/";
         return "ms0:/";
     }
 
@@ -1481,6 +1523,8 @@
     }
 
     static std::string gclFiltersRoot() {
+        // Prefer ef0: only on a genuine PSP Go. Under Adrenaline ef0: is the Vita
+        // System Storage; GC Lite filters belong on the Memory Stick (ms0:).
         if (isPspGo() && DeviceExists("ef0:/")) return "ef0:/";
         if (DeviceExists("ms0:/")) return "ms0:/";
         if (DeviceExists("ef0:/")) return "ef0:/";
@@ -2903,7 +2947,29 @@
         return false;
     }
 
-    void setGameHiddenForPaths(const std::vector<std::string>& paths, bool hide) {
+    // TurboGrafx16 folders are never listed on the XMB, so they must never be
+    // written into the categories-plugin filter. Prefer the flag cached at scan
+    // time and only touch the disk for paths we have not seen.
+    bool isTurboGrafxPath(const std::string& path) {
+        for (const auto& gi : flatAll) {
+            if (gi.path == path) return gi.isTurboGrafx;
+        }
+        return isTurboGrafx16Folder(path);
+    }
+
+    // Drops TurboGrafx16 entries from a hide/unhide batch.
+    std::vector<std::string> stripTurboGrafxPaths(const std::vector<std::string>& paths) {
+        std::vector<std::string> out;
+        out.reserve(paths.size());
+        for (const auto& p : paths) {
+            if (!isTurboGrafxPath(p)) out.push_back(p);
+        }
+        return out;
+    }
+
+    void setGameHiddenForPaths(const std::vector<std::string>& pathsIn, bool hide) {
+        // Belt-and-braces: no caller should ever hand us a TurboGrafx16 folder.
+        const std::vector<std::string> paths = stripTurboGrafxPaths(pathsIn);
         if (paths.empty()) return;
         if (gclLegacyMode) { setGameHiddenLegacy(paths, hide); return; }
         gclLoadGameFilterFor(currentDevice);
@@ -2948,7 +3014,7 @@
         }
 
         enforceCategorySchemeForDevice(currentDevice);
-        if (isPspGo()) {
+        if (hasSystemStorage()) {
             std::string other = oppositeRootOf(currentDevice);
             if (!other.empty()) enforceCategorySchemeForDevice(other);
         }
@@ -2957,7 +3023,7 @@
         auto &pending = gclPendingUnblacklistMap[blacklistRootKey(currentDevice)];
         if (blacklistActive() && !pending.empty()) {
             refreshCategoriesForBases(currentDevice, pending);
-            if (isPspGo()) {
+            if (hasSystemStorage()) {
                 std::string other = oppositeRootOf(currentDevice);
                 if (!other.empty()) markDeviceDirty(other); // refresh on next switch
             }
@@ -2992,7 +3058,8 @@
     static bool gclSaveConfig() {
         const std::string path = gclConfigPath();
         // Ensure seplugins directory exists
-        sceIoMkdir((isPspGo()? "ef0:/seplugins" : "ms0:/seplugins"), 0777);
+        const std::string configDir = std::string(gclConfigRoot()) + "seplugins";
+        sceIoMkdir(configDir.c_str(), 0777);
         SceUID fd = sceIoOpen(path.c_str(), PSP_O_WRONLY | PSP_O_CREAT | PSP_O_TRUNC, 0777);
         if (fd < 0) return false;
         int wr = sceIoWrite(fd, &gclCfg, sizeof(gclCfg));
@@ -3010,7 +3077,7 @@
     static const char* gclUncatLabel(uint32_t u, bool go) {
         switch (u) { case 0: return "No";
                     case 1: return "Only Memory Stick\u2122";
-                    case 2: return "Only Internal Storage";
+                    case 2: return "Only System Storage";
                     case 3: return "Both";
                     default: return "?"; }
     }
@@ -3047,7 +3114,7 @@
         }
         add(std::string("Category Mode: ")      + gclModeLabel(gclCfg.mode));
         add(std::string("Category Prefix: ")    + gclPrefixLabel(gclCfg.prefix));
-        add(std::string("Show Uncategorized: ") + gclUncatLabel(gclCfg.uncategorized, isPspGo()));
+        add(std::string("Show Uncategorized: ") + gclUncatLabel(gclCfg.uncategorized, hasSystemStorage()));
         add(std::string("Sort Categories: ")    + gclSortLabel(gclCfg.catsort));
 
         selectedIndex = std::min(prevSel, (int)entries.size()-1);
@@ -3232,7 +3299,7 @@ When "Category prefix" is enabled, use this blacklist to block certain folders f
         }
 
         // No master toggles here anymore - just open the pickers for 0..4
-        const bool go = isPspGo();
+        const bool hasEf0 = hasSystemStorage();
 
         if (idx == 0) {
             gclBlacklistDirty = false;
@@ -3287,8 +3354,8 @@ each Category+App folder name.)");
             std::vector<OptionItem> items = {
                 {"No", false},
                 {"Only Memory Stick", disableMsUncat},
-                {"Only Internal Storage", !go || disableEfUncat},
-                {"Both", !go || disableBothUncat}
+                {"Only System Storage", !hasEf0 || disableEfUncat},
+                {"Both", !hasEf0 || disableBothUncat}
             };
             optMenu = new OptionListMenu("Show Uncategorized", "Enable the \"Uncategorized\" category for games not placed in a category subfolder.", items, SCREEN_WIDTH, SCREEN_HEIGHT);
             gclPending = GCL_SK_Uncat;
@@ -3827,7 +3894,7 @@ each Category+App folder name.)");
             const std::string root = rootPrefix(currentDevice); // e.g. "ms0:/" or "ef0:/"
             if (s_catNamingEnforced.insert(root).second) {
                 enforceCategorySchemeForDevice(root);
-                if (isPspGo()) {
+                if (hasSystemStorage()) {
                     const std::string other = (strncasecmp(root.c_str(), "ms0:/", 5) == 0) ? "ef0:/" : "ms0:/";
                     enforceCategorySchemeForDevice(other);
                     s_catNamingEnforced.insert(other); // mark the sibling as enforced too
@@ -4085,7 +4152,7 @@ each Category+App folder name.)");
                     enforceCategorySchemeForDevice(currentDevice);
 
                     // PSP Go: if we're on one root and the other exists, mirror the scheme once
-                    if (isPspGo()) {
+                    if (hasSystemStorage()) {
                         std::string other = oppositeRootOf(currentDevice);
                         if (!other.empty()) enforceCategorySchemeForDevice(other);
                     }

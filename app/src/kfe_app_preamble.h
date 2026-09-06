@@ -332,6 +332,7 @@ static Texture* ps1IconTextureGray = nullptr;
 static Texture* homebrewIconTextureGray = nullptr;
 static Texture* isoIconTextureGray = nullptr;
 static Texture* updateIconTextureGray = nullptr;
+static Texture* turbografxIconTextureGray = nullptr;
 static Texture* warningIconTexture = nullptr;
 static Texture* updownIconTexture = nullptr;
 static bool gEnablePopAnimations = false; // Toggle Populating animation

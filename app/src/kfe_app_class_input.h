@@ -484,17 +484,26 @@
                     } else if (selectedIndex >= 0 && selectedIndex < (int)workingList.size()) {
                         hidePaths.push_back(workingList[selectedIndex].path);
                     }
+                    // TurboGrafx16 folders never appear on the XMB, so they are dropped
+                    // from the batch entirely. A selection made up only of TG16 entries
+                    // therefore leaves nothing to act on and the option greys out.
+                    const std::vector<std::string> hideablePaths = stripTurboGrafxPaths(hidePaths);
                     int hiddenCount = 0, unhiddenCount = 0;
-                    for (const auto& p : hidePaths) {
+                    for (const auto& p : hideablePaths) {
                         if (isGameFilteredPath(p)) hiddenCount++;
                         else unhiddenCount++;
                     }
-                    const bool hideInXmb = (unhiddenCount >= hiddenCount);
+                    // A selection that is nothing but TurboGrafx16 folders has no
+                    // hideable entries, so the counts above are both zero. Those
+                    // folders are already permanently hidden from the XMB, so the
+                    // greyed-out option should read "Unhide in XMB", not "Hide".
+                    const bool allTurboGrafx = !hidePaths.empty() && hideablePaths.empty();
+                    const bool hideInXmb = allTurboGrafx ? false : (unhiddenCount >= hiddenCount);
                     bool hasIsoLike = false;
-                    for (const auto& p : hidePaths) {
+                    for (const auto& p : hideablePaths) {
                         if (isIsoLike(p)) { hasIsoLike = true; break; }
                     }
-                    const bool hideDisabled = hidePaths.empty() || hasIsoLike || !gclOn;
+                    const bool hideDisabled = hideablePaths.empty() || hasIsoLike || !gclOn;
                     const bool deleteDisabled = selectionIncludesCurrentAppFolder();
                     const char* hideLabel = hideInXmb ? "Hide in XMB" : "Unhide in XMB";
 
@@ -725,20 +734,28 @@ When "Category prefix" is enabled, use this blacklist to block certain folders f
                 std::string dev = entries[selectedIndex].d_name;
                 // Root-level master toggles
                 if (dev == "__GCL_TOGGLE__") {
-                    // Show a 3-option picker: Off / ARK-4 / PRO/ME
+                    // Show a 3-option picker: Off / PRO/ME (VSH.txt) / ARK (plugins.txt).
+                    // '<' / '>' are underlined by the menu to read as '≤' / '≥'.
                     std::vector<OptionItem> items = {
                         { "Off",   false },
-                        { "ARK-4", false },
-                        { "PRO/ME", false, "Vita may require \"CAT_\" prefixes" }
+                        { "PRO/ME/Epinephrine <7", false, nullptr, "(VSH.TXT)", -2 },
+                        { "ARK-4/ARK-5/Epinephrine >8", false, nullptr, "(PLUGINS.TXT)" }
                     };
                     optMenu = new OptionListMenu(
                         "Game Categories",
                         "Pick your installed CFW version to activate category folders to organize your games.",
                         items, SCREEN_WIDTH, SCREEN_HEIGHT
                     );
-                    optMenu->setHeightOverride(175); // +15px for legacy checkbox
+                    optMenu->setUnderlineComparators(true);
+                    optMenu->setFooterNote(
+                        "Epinephrine may also require enabling\n\"Category Prefix\" to initialize the plugin.");
+                    optMenu->setWidthOverride(385);  // wide enough so "(PLUGINS.TXT)" clears the right edge
+                    optMenu->setHeightOverride(220); // room for legacy checkbox + footer note
                     // Preselect current state
-                    int sel = (!gclArkOn && !gclProOn) ? 0 : (gclArkOn ? 1 : 2);
+                    // Same source of truth as the home-screen icon, so the highlighted
+                    // row always matches the image shown behind the menu. Enum values
+                    // are the row indices: 0 = Off, 1 = PRO/ME, 2 = ARK.
+                    int sel = (int)gclDisplayMode();
                     optMenu->setSelected(sel);
 
                     std::string primaryRoot = gclPickDeviceRoot();
@@ -1133,8 +1150,8 @@ When "Category prefix" is enabled, use this blacklist to block certain folders f
                             std::string plugins = gclFindArkPluginsFile(pluginsSe);
                             std::string vsh = gclFindProVshFile(vshSe);
 
-                            const bool wantArk = (pick == 1);
-                            const bool wantPro = (pick == 2);
+                            const bool wantPro = (pick == 1);   // row 1 = PRO/ME/Epinephrine ≤7 (VSH.txt)
+                            const bool wantArk = (pick == 2);   // row 2 = ARK-4/ARK-5/Epinephrine ≥8 (PLUGINS.txt)
 
                             std::string targetSeplugins;
                             std::string targetPrxPath;
@@ -1372,7 +1389,7 @@ When "Category prefix" is enabled, use this blacklist to block certain folders f
 
                                     enforceCategorySchemeForDevice(currentDevice, forceStripNumbers);
                                     const bool onMs0 = (strncasecmp(currentDevice.c_str(), "ms0:/", 5) == 0);
-                                    if (isPspGo()) {
+                                    if (hasSystemStorage()) {
                                         // Also clear & enforce the opposite root once to keep ms0:/ and ef0:/ consistent
                                         std::string other = onMs0 ? std::string("ef0:/") : std::string("ms0:/");
                                         gclSchemeApplied.erase(rootPrefix(other));
@@ -1384,7 +1401,7 @@ When "Category prefix" is enabled, use this blacklist to block certain folders f
                                     if (!blacklistActive()) {
                                         const auto& blNow = gclBlacklistMap[blacklistRootKey(currentDevice)];
                                         refreshCategoriesForBases(currentDevice, blNow);
-                                        if (isPspGo()) {
+                                        if (hasSystemStorage()) {
                                             std::string other = onMs0 ? std::string("ef0:/") : std::string("ms0:/");
                                             markDeviceDirty(other);
                                         }
@@ -1432,6 +1449,10 @@ When "Category prefix" is enabled, use this blacklist to block certain folders f
                             } else if (selectedIndex >= 0 && selectedIndex < (int)workingList.size()) {
                                 hidePaths.push_back(workingList[selectedIndex].path);
                             }
+
+                            // TurboGrafx16 folders are silently skipped -- they are never
+                            // on the XMB, so there is nothing to hide or unhide.
+                            hidePaths = stripTurboGrafxPaths(hidePaths);
 
                             if (hidePaths.empty()) {
                                 msgBox = new MessageBox("Nothing to hide/unhide.", okIconTexture, SCREEN_WIDTH, SCREEN_HEIGHT, 1.0f, 20, "OK", 16, 18, 8, 14);
@@ -1558,7 +1579,7 @@ When "Category prefix" is enabled, use this blacklist to block certain folders f
                                 // Invalidate per-device “scheme applied” so initial-load enforcement can run again
                                 gclSchemeApplied.erase(rootPrefix(currentDevice));
                                 s_catNamingEnforced.erase(rootPrefix(currentDevice));
-                                if (isPspGo()) {
+                                if (hasSystemStorage()) {
                                     // Be safe on Go: clear both roots so next load can re-apply where needed
                                     gclSchemeApplied.erase(std::string("ms0:/"));
                                     gclSchemeApplied.erase(std::string("ef0:/"));

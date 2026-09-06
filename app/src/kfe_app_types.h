@@ -570,7 +570,7 @@ static const char* rootDisplayName(const char* r) {
     if (!strcmp(r, "__GCL_TOGGLE__"))   return "Game Categories:";
     if (!strcmp(r, "__GCL_SETTINGS__")) return kCatSettingsLabel;
     if (!strcmp(r, "ms0:/"))            return "ms0:/ (Memory Stick)";
-    if (!strcmp(r, "ef0:/"))            return "ef0:/ (Internal)";
+    if (!strcmp(r, "ef0:/"))            return "ef0:/ (System Storage)";
     return r;
 }
 
@@ -1489,6 +1489,57 @@ static bool isUpdateDlcFolder(const std::string& folderNoSlash) {
         || folderHasPbpNamed(folderNoSlash, "PARAM.PBP");
 }
 
+// TurboGrafx16 / PC Engine game data folders (PSN downloads) live in PSP/GAME but
+// carry no PBP at all -- just an encrypted CONTENT.DAT and its PSP-KEY.EDAT.
+// Without this check they look like empty category folders to the scanner.
+//
+// There is no marker to key off inside the files: CONTENT.DAT is AES-encrypted
+// end to end (all 12 US NPUF3xxxx and JP NPJJ-3xxxx retail releases share no
+// bytes anywhere in the header, and the footer is only zero padding), so the
+// pair of filenames is what identifies the folder. Every ordinary game, update
+// and DLC folder carries a PBP, which is checked first; across 460 folders of
+// ordinary PSP content this produced no false positives.
+//
+// One directory pass, no file reads.
+static bool isTurboGrafx16Folder(const std::string& folderNoSlash) {
+    std::string dpath = folderNoSlash;
+    if (!dpath.empty() && dpath[dpath.size()-1] == '/') dpath.erase(dpath.size()-1);
+    SceUID d = kfeIoOpenDir(dpath.c_str());
+    if (d < 0) return false;
+
+    bool hasPbp = false, hasContent = false, hasKey = false;
+    SceIoDirent ent; memset(&ent, 0, sizeof(ent));
+    while (kfeIoReadDir(d, &ent) > 0) {
+        trimTrailingSpaces(ent.d_name);
+        if (!FIO_S_ISDIR(ent.d_stat.st_mode)) {
+            if (strcasecmp(ent.d_name, "EBOOT.PBP") == 0 ||
+                strcasecmp(ent.d_name, "PBOOT.PBP") == 0 ||
+                strcasecmp(ent.d_name, "PARAM.PBP") == 0) {
+                hasPbp = true;   // an ordinary game, update or DLC folder
+                break;
+            }
+            if (strcasecmp(ent.d_name, "CONTENT.DAT") == 0)       hasContent = true;
+            else if (strcasecmp(ent.d_name, "PSP-KEY.EDAT") == 0) hasKey = true;
+        }
+        memset(&ent, 0, sizeof(ent));
+    }
+    kfeIoCloseDir(d);
+
+    return !hasPbp && hasContent && hasKey;
+}
+
+// A folder in PSP/GAME that holds actual content rather than being a category.
+// Reports TurboGrafx16 through an out-param so callers do not have to re-scan
+// the directory just to classify what they already identified.
+static bool isGameContentFolder(const std::string& folderNoSlash,
+                                bool* outIsTurboGrafx = nullptr) {
+    if (outIsTurboGrafx) *outIsTurboGrafx = false;
+    if (!findEbootCaseInsensitive(folderNoSlash).empty()) return true;
+    const bool tg = isTurboGrafx16Folder(folderNoSlash);
+    if (outIsTurboGrafx) *outIsTurboGrafx = tg;
+    return tg;
+}
+
 // Read title from folder
 static bool getFolderTitle(const std::string& folderNoSlash, std::string& outTitle) {
     std::string sfoPath = findFileCaseInsensitive(folderNoSlash, "PARAM.SFO");
@@ -1802,6 +1853,7 @@ struct GameItem {
     std::string    sortKey;    // legacy sort string (desc)
     uint64_t       sizeBytes = 0;  // <--- NEW: bytes for size column
     bool           isUpdateDlc = false; // folder has PBOOT/PARAM but no EBOOT
+    bool           isTurboGrafx = false; // TurboGrafx16/PC Engine data folder (CONTENT.DAT + PSP-KEY.EDAT)
     std::string    iconPath;   // cached ICON0.PNG path (if any)
     std::string    pbpPath;    // cached EBOOT/PBOOT/PARAM path (if any)
 };
@@ -2268,8 +2320,10 @@ struct OptionItem {
     const char* label;
     bool disabled;
     const char* warning;
-    OptionItem(const char* l, bool d = false, const char* w = nullptr)
-        : label(l), disabled(d), warning(w) {}
+    const char* suffix;   // gray annotation drawn right of the label; never glows
+    int suffixDX;         // per-item horizontal nudge (px) for the suffix
+    OptionItem(const char* l, bool d = false, const char* w = nullptr, const char* sfx = nullptr, int sdx = 0)
+        : label(l), disabled(d), warning(w), suffix(sfx), suffixDX(sdx) {}
 };
 
 class OptionListMenu {
@@ -2308,6 +2362,11 @@ public:
     }
     bool checkboxToggled() const { return _checkboxToggled; }
     bool checkboxChecked() const { return _checkboxChecked; }
+
+    // Left-aligned note drawn below the checkbox (description-styled, supports '\n').
+    void setFooterNote(const char* note) { _footerNote = note; }
+    // Underline '<' / '>' in option labels so they read as '≤' / '≥'.
+    void setUnderlineComparators(bool on) { _underlineComparators = on; }
 
     // NEW: pre-position the highlight on the currently-selected option
     void setSelected(int idx) {
@@ -2456,6 +2515,17 @@ public:
                 float itemY = (float)(startY + (i - startIdx) * lineH);
                 intraFontPrint(font, (float)(_x + 16), itemY, _items[i].label);
                 if (sel && !disabled) intraFontPrint(font, (float)(_x + 17), itemY, _items[i].label);
+                if (_underlineComparators)
+                    _drawComparatorUnderlines(font, itemScale, _items[i].label, (float)(_x + 16), itemY, col, shadow);
+
+                if (_items[i].suffix && _items[i].suffix[0]) {
+                    // Gray annotation (e.g. "(PLUGINS.TXT)"). Smaller, no glow, so it
+                    // stays visually separate from the selectable option label.
+                    const float labelW = _measureText(font, itemScale, _items[i].label);
+                    const float sfxX = (float)(_x + 16) + labelW + 5.0f + (float)_items[i].suffixDX;
+                    intraFontSetStyle(font, descScale, disabled ? COLOR_GRAY : COLOR_DESC, 0, 0.f, INTRAFONT_ALIGN_LEFT);
+                    intraFontPrint(font, sfxX, itemY, _items[i].suffix);
+                }
 
                 if (_items[i].warning && _items[i].warning[0]) {
                     const char* warnText = _items[i].warning;
@@ -2491,14 +2561,45 @@ public:
                 _rect((int)trackX, (int)thumbY, 2, (int)thumbH, 0xFFBBBBBB);
             }
 
-            // Checkbox (drawn between items and controls)
+            // Footer note (description-styled) rendered below the checkbox, with an
+            // alert icon to the left of the first line and both lines indented past
+            // it. Anchored above the controls row and growing upward. noteBottomGap
+            // is enlarged to pull the checkbox+note up (closing the item->checkbox
+            // gap) while the controls row stays put.
+            std::vector<std::string> noteLines;
+            int noteLineH = 0;
+            float noteFirstBaseline = 0.0f;
+            // Align the note's alert icon left edge with the checkbox box (cbX = _x + 17).
+            const float noteLeftX = (float)(_x + 17);
+            float noteTextX = noteLeftX;
+            float noteIconW = 0.0f;
+            const float noteIconH = 11.0f;
+            if (_footerNote && _footerNote[0]) {
+                if (warningIconTexture && warningIconTexture->data && warningIconTexture->height > 0) {
+                    noteIconW = (float)warningIconTexture->width * (noteIconH / (float)warningIconTexture->height);
+                }
+                const float noteIconGap = 4.0f;
+                noteTextX = noteLeftX + (noteIconW > 0.0f ? noteIconW + noteIconGap : 0.0f);
+                const int noteWrapW = _w - padX - (int)(noteTextX - (float)_x);  // right margin = padX
+                _wrapText(font, descScale, _footerNote, noteWrapW, noteLines);
+                noteLineH = (int)(22.0f * descScale + 0.5f);
+                const float noteBottomGap = 26.0f;   // space above controls (was 14; +12 displaced gap)
+                float lastBaseline = controlsY - noteBottomGap;
+                noteFirstBaseline = lastBaseline - (float)((int)noteLines.size() - 1) * noteLineH;
+            }
+
+            // Checkbox (drawn between items and, when present, the footer note)
             if (_hasCheckbox && _checkboxLabel) {
-                const float cbY = controlsY - 34.0f;
+                float cbY = controlsY - 34.0f;
+                if (!noteLines.empty()) {
+                    // Sit the checkbox just above the note block (tunable gap).
+                    cbY = noteFirstBaseline - (float)noteLineH - 23.0f;
+                }
                 const int cbX = _x + 17;
                 const int cbSize = 11;
                 const bool cbSel = _onCheckbox;
                 const unsigned cbBorderColor = _checkboxDisabled ? 0xFF777777 : COLOR_WHITE;
-                const unsigned cbLabelColor = _checkboxDisabled ? 0xFF777777 : (cbSel ? COLOR_WHITE : COLOR_DESC);
+                const unsigned cbLabelColor = _checkboxDisabled ? 0xFF777777 : COLOR_WHITE;  // white = selectable
                 const unsigned cbGlow = (cbSel && !_checkboxDisabled) ? COLOR_GLOW : 0;
 
                 // 1px border square (shifted up 2px relative to label)
@@ -2518,6 +2619,21 @@ public:
                 intraFontPrint(font, (float)(cbX + cbSize + 4), cbY + 8.0f, _checkboxLabel);
                 if (cbSel && !_checkboxDisabled) {
                     intraFontPrint(font, (float)(cbX + cbSize + 5), cbY + 8.0f, _checkboxLabel);
+                }
+            }
+
+            // Footer note text (below the checkbox), indented past the alert icon.
+            if (!noteLines.empty()) {
+                // Alert icon to the left of the first line (vertically ~centered on it).
+                if (noteIconW > 0.0f) {
+                    _drawTextureScaled(warningIconTexture, noteLeftX,
+                                       noteFirstBaseline - 10.0f, noteIconH, 0xFFFFFFFF);
+                }
+                intraFontSetStyle(font, descScale, COLOR_DESC, 0, 0.f, INTRAFONT_ALIGN_LEFT);
+                float ny = noteFirstBaseline;
+                for (const auto& line : noteLines) {
+                    intraFontPrint(font, noteTextX, ny, line.c_str());
+                    ny += noteLineH;
                 }
             }
 
@@ -2668,6 +2784,28 @@ private:
         for (auto& it : _items) if (!it.disabled) return true;
         return false;
     }
+    // Underline every '<' / '>' in `label` with a 1px rule so it reads as '≤' / '≥'
+    // (the Latin PSP font has no such glyph). `x`/`baselineY` match the label print.
+    // When `glow` is non-zero (row selected) a soft halo is drawn under the rule so it
+    // glows together with its label, matching the text's selected glow.
+    static void _drawComparatorUnderlines(intraFont* font, float size, const char* label,
+                                          float x, float baselineY, unsigned color, unsigned glow) {
+        if (!label) return;
+        std::string s(label);
+        // Sit the rule just under the operator's lower vertex (pixel-tuned).
+        const float underlineDY = 1.0f;
+        for (size_t i = 0; i < s.size(); ++i) {
+            if (s[i] != '<' && s[i] != '>') continue;
+            float x0 = x + _measureText(font, size, s.substr(0, i).c_str());
+            float x1 = x + _measureText(font, size, s.substr(0, i + 1).c_str());
+            int w = (int)(x1 - x0 + 0.5f);
+            if (w < 1) w = 1;
+            const int ux = (int)(x0 + 0.5f);
+            const int uy = (int)(baselineY + underlineDY);
+            if (glow) _rect(ux - 1, uy - 1, w + 2, 3, glow);  // soft halo (behind the rule)
+            _rect(ux, uy, w, 1, color);
+        }
+    }
 
     const char* _title{};
     const char* _desc{};
@@ -2693,5 +2831,12 @@ private:
     bool _checkboxDisabled = false;
     bool _checkboxToggled = false;
     bool _onCheckbox = false;
+
+    // Optional left-aligned note rendered below the checkbox (styled like the
+    // description). Supports '\n'. Used for the Game Categories CFW picker.
+    const char* _footerNote = nullptr;
+    // When true, any '<' / '>' in an option label is underlined with a 1px rule
+    // to read as '≤' / '≥' (ltn0.pgf has no such glyph).
+    bool _underlineComparators = false;
 };
 // --------------------------------------------------------------------------

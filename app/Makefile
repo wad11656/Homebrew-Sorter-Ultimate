@@ -32,6 +32,7 @@ LIBS = -lintrafont \
 EXTRA_TARGETS   = EBOOT.PBP
 PSP_EBOOT_TITLE = Homebrew Sorter Ultimate
 PSP_EBOOT_ICON  = ../ICON0.png
+SFOFLAGS       += -d EFAWARE=1
 
 # Pull in the standard PSP SDK build rules
 include $(PSPSDK)/lib/build.mak

@@ -15,6 +15,7 @@ LIBS         = -lpspsystemctrl_user
 EXTRA_TARGETS   = EBOOT.PBP
 PSP_EBOOT_TITLE = Kernel File Explorer
 PSP_EBOOT_ICON  = ../ICON0.PNG
+SFOFLAGS       += -d EFAWARE=1
 
 # Include SDK build rules
 PSPSDK          = $(shell psp-config --pspsdk-path)

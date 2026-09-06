@@ -63,6 +63,19 @@ private:
     // --- Game Categories Lite toggle state ---
     bool        gclArkOn = false;
     bool        gclProOn = false;
+
+    // Which backend the UI presents when asked to name just one. ARK wins if a
+    // pre-existing setup has category_lite.prx enabled in both PLUGINS.txt and
+    // VSH.txt: choosing either mode in the menu always disables the other, so
+    // both-on only ever comes from a config the app did not write. The values
+    // double as row indices in the "Game Categories" menu, which is what keeps
+    // the home-screen icon and the highlighted row from disagreeing.
+    enum GclDisplayMode { GclDisplay_Off = 0, GclDisplay_Pro = 1, GclDisplay_Ark = 2 };
+    GclDisplayMode gclDisplayMode() const {
+        if (gclArkOn) return GclDisplay_Ark;
+        if (gclProOn) return GclDisplay_Pro;
+        return GclDisplay_Off;
+    }
     bool        gclLegacyMode = false;  // true when using v1.6/v1.7 legacy plugin
     bool        lowMemMode = false;
     bool        gclLegacyFilterLoaded = false;
@@ -136,7 +149,7 @@ private:
         };
         for (const auto& root : roots) append(root);
         append(currentDevice);
-        if (out.empty()) append(isPspGo() ? "ef0:/" : "ms0:/");
+        if (out.empty()) append(hasSystemStorage() ? "ef0:/" : "ms0:/");
     }
     static int folderModeCategoryNameLenForSettings(const std::string& baseName,
                                                     uint32_t prefixSetting,
@@ -664,10 +677,14 @@ private:
 
 
     static bool isPspGo() {
-        int model = kuKernelGetModel();
-        if (model >= 0) return model == 4;
-        SceUID d = kfeIoOpenDir("ef0:/"); if (d >= 0) { kfeIoCloseDir(d); return true; }
-        return false;
+        return kuKernelGetModel() == 4;
+    }
+
+    // Adrenaline v8 can expose a configured Vita System Storage location as
+    // ef0: to EFAWARE homebrew, even though the device is not a PSP Go.
+    static bool hasSystemStorage() {
+        if (isPspGo()) return true;
+        return DeviceExists("ef0:/");
     }
 
     // Find the visible row index of a category name inside the current Categories screen.
@@ -680,7 +697,7 @@ private:
         return 0;
     }
 
-    // ===== Category numbering & naming helpers/enforcement (ADD THIS AFTER isPspGo()) =====
+    // ===== Category numbering & naming helpers/enforcement =====
 
     static inline bool hasTwoDigitsAfter(const char* p){
         return p && p[0] >= '0' && p[0] <= '9' && p[1] >= '0' && p[1] <= '9';
@@ -1026,9 +1043,14 @@ private:
 
 
 
+    static const char* gclConfigRoot() {
+        // Category Lite keeps its central config on ms0: under Adrenaline,
+        // even when the Vita's System Storage is exposed as ef0:.
+        return isPspGo() ? "ef0:/" : "ms0:/";
+    }
+
     static std::string gclConfigPath() {
-        const char* root = isPspGo() ? "ef0:/" : "ms0:/";
-        return std::string(root) + "seplugins/gclite.bin";
+        return std::string(gclConfigRoot()) + "seplugins/gclite.bin";
     }
 
     // Pick/drop state
@@ -1133,7 +1155,7 @@ private:
     const char* currentDeviceHeaderName() const {
         if (!currentDevice.empty()) {
             if (!strncasecmp(currentDevice.c_str(), "ms0:", 4)) return "Memory Stick";
-            if (!strncasecmp(currentDevice.c_str(), "ef0:", 4)) return "Internal Storage";
+            if (!strncasecmp(currentDevice.c_str(), "ef0:", 4)) return "System Storage";
             return rootDisplayName(currentDevice.c_str());
         }
         return "Memory Stick";
@@ -1275,7 +1297,7 @@ private:
         doDevice(currentDevice);
 
         // Mirror to the other root (PSP Go: ms0 <-> ef0), if present.
-        if (isPspGo()) {
+        if (hasSystemStorage()) {
             const std::string cur = rootPrefix(currentDevice);   // "ms0:/" or "ef0:/"
             const std::string other = (!strcasecmp(cur.c_str(), "ms0:/")) ? "ef0:/" : "ms0:/";
 
@@ -1289,7 +1311,7 @@ private:
         }
 
         // PSP Go may have both devices; if both exist, update the other too
-        if (isPspGo()) {
+        if (hasSystemStorage()) {
             const std::string other = (rootPrefix(currentDevice) == "ms0:/") ? std::string("ef0:/")
                                                                             : std::string("ms0:/");
             if (!rootPrefix(other).empty()) {
@@ -2260,6 +2282,7 @@ private:
                 gi.sizeBytes = folderBytes;
             }
             gi.isUpdateDlc = isUpdateDlcFolder(newPath);
+            gi.isTurboGrafx = isTurboGrafx16Folder(newPath);
             fillEbootIconPaths(gi);
         }
         gi.sortKey = buildLegacySortKey(gi.time);
@@ -2838,12 +2861,16 @@ private:
         int x = boxX + (boxW - dw) / 2 + 1;
         int y = boxY + (boxH - dh) / 2;
 
+        // Height must be the padded power-of-two, not the stride: for a portrait
+        // image (height > stride) declaring tbw rows leaves the bottom rows outside
+        // the texture, and GU_CLAMP then repeats the last valid row down the sprite.
+        int th = 1; while (th < h) th <<= 1;
         sceKernelDcacheWritebackRange(categoryIconTex->data, tbw * h * 4);
         sceGuTexFlush();
 
         sceGuTexMode(GU_PSM_8888, 0, 0, GU_FALSE);
         sceGuTexFunc(GU_TFX_REPLACE, GU_TCC_RGBA);
-        sceGuTexImage(0, tbw, tbw, tbw, categoryIconTex->data);
+        sceGuTexImage(0, tbw, th, tbw, categoryIconTex->data);
         sceGuTexFilter(GU_LINEAR, GU_LINEAR);
         sceGuTexWrap(GU_CLAMP, GU_CLAMP);
         sceGuEnable(GU_TEXTURE_2D);
@@ -2863,6 +2890,17 @@ private:
 
     Texture* loadIconForGameItem(const GameItem& gi) {
         if (gi.kind == GameItem::EBOOT_FOLDER) {
+            // TurboGrafx16 folders ship no ICON0.PNG and no PBP to pull one out of,
+            // so stand in the TurboGrafx16 logo. Loaded from disk rather than reusing
+            // the row-icon texture: the caller takes ownership of what we return and
+            // frees it when the selection moves, which would destroy a shared one.
+            if (gi.isTurboGrafx) {
+                const std::string logo = currentExecBaseDir() + "resources/turbografx16_logo.png";
+                if (Texture* t = texLoadPNG(logo.c_str())) return t;
+                // Missing logo falls through; ebootHasIconSource() reports no source
+                // for these folders, so the caller memoizes the miss instead of
+                // retrying the same absent file every 250ms.
+            }
             if (!gi.iconPath.empty()) {
                 if (Texture* t = texLoadPNG(gi.iconPath.c_str())) return t;
             }
@@ -2985,12 +3023,16 @@ private:
         int x = boxX + (boxW - dw) / 2 + 1;
         int y = boxY + (boxH - dh) / 2;
 
+        // Height must be the padded power-of-two, not the stride: for a portrait
+        // image (height > stride) declaring tbw rows leaves the bottom rows outside
+        // the texture, and GU_CLAMP then repeats the last valid row down the sprite.
+        int th = 1; while (th < h) th <<= 1;
         sceKernelDcacheWritebackRange(selectionIconTex->data, tbw * h * 4);
         sceGuTexFlush();
 
         sceGuTexMode(GU_PSM_8888, 0, 0, GU_FALSE);
         sceGuTexFunc(GU_TFX_REPLACE, GU_TCC_RGBA);
-        sceGuTexImage(0, tbw, tbw, tbw, selectionIconTex->data);
+        sceGuTexImage(0, tbw, th, tbw, selectionIconTex->data);
         sceGuTexFilter(GU_LINEAR, GU_LINEAR);
         sceGuTexWrap(GU_CLAMP, GU_CLAMP);
         sceGuEnable(GU_TEXTURE_2D);
@@ -3107,7 +3149,7 @@ private:
                     lines[0] = "Memory"; lines[1] = "Stick"; lineCount = 2;
                     scale = 0.95f; icon = rootMemIcon; iconH = 40.0f;
                 } else if (!strcmp(name, "ef0:/")) {
-                    lines[0] = "Internal"; lines[1] = "Storage"; lineCount = 2;
+                    lines[0] = "System"; lines[1] = "Storage"; lineCount = 2;
                     scale = 0.95f; icon = rootInternalIcon; iconH = 40.0f;
                 } else {
                     lines[0] = rootDisplayName(name);
@@ -3301,8 +3343,9 @@ private:
         }
 
         const int rowCount = (int)entries.size();
-        const float top = panelY + 4.0f;
-        const float bottom = panelY + panelH - 4.0f;
+        const float leftAreaShift = -4.0f;  // nudge the whole device column (rows + rule) up 4px
+        const float top = panelY + 4.0f + leftAreaShift;
+        const float bottom = panelY + panelH - 4.0f + leftAreaShift;
         const float rowH = (rowCount > 0) ? ((bottom - top) / (float)rowCount) : 0.0f;
         const float textCenterX = panelX + (panelW * 0.5f);
         const float iconGap = 10.0f;
@@ -3326,7 +3369,7 @@ private:
                 lines[0] = "Memory"; lines[1] = "Stick"; lineCount = 2;
                 scale = 0.95f; icon = rootMemIcon; iconH = 40.0f;
             } else if (!strcmp(name, "ef0:/")) {
-                lines[0] = "Internal"; lines[1] = "Storage"; lineCount = 2;
+                lines[0] = "System"; lines[1] = "Storage"; lineCount = 2;
                 scale = 0.95f; icon = rootInternalIcon; iconH = 40.0f;
             } else if (!strcmp(name, "__USB_MODE__")) {
                 lines[0] = "USB Mode";
@@ -3350,7 +3393,7 @@ private:
             if (!strcmp(name, "ms0:/")) rowYOffset = 4.0f;
             else if (!strcmp(name, "ef0:/")) rowYOffset = 5.0f;
             else if (!strcmp(name, "__USB_MODE__")) rowYOffset = 7.0f;
-            else if (!strcmp(name, "__GCL_TOGGLE__")) rowYOffset = -8.0f;
+            else if (!strcmp(name, "__GCL_TOGGLE__")) rowYOffset = -9.0f;  // text + icon together
             float textYOffset = (!strcmp(name, "__GCL_TOGGLE__")) ? -2.0f : 0.0f;
             float iconYOffset = iconYOffsetBase;
             if (!strcmp(name, "ms0:/") || !strcmp(name, "ef0:/") || !strcmp(name, "__USB_MODE__")) {
@@ -3386,12 +3429,13 @@ private:
             }
 
             if (!strcmp(name, "__GCL_TOGGLE__")) {
-                Texture* stateIcon = gclArkOn ? rootArk4Icon :
-                                     (gclProOn ? rootProMeIcon : rootOffBulbIcon);
+                const GclDisplayMode gclMode = gclDisplayMode();
+                Texture* stateIcon = (gclMode == GclDisplay_Ark) ? rootArk4Icon :
+                                     (gclMode == GclDisplay_Pro) ? rootProMeIcon : rootOffBulbIcon;
                 const bool isOff = (!gclArkOn && !gclProOn);
-                const float stateH = 18.0f;
+                const float stateH = 23.0f;  // matches the _23h CFW state-icon art
                 const float gap = 3.0f;
-                const float stateYOffset = -2.0f;
+                const float stateYOffset = 2.0f;  // nudge image back down 2px after the -4px column shift
                 const float stateCenterY = firstBaseline + (lineH * lineCount) + gap + (stateH * 0.5f) + stateYOffset;
 
                 float stateIconW = 0.0f;
@@ -4030,7 +4074,11 @@ private:
                                     i >= 0 && i < (int)workingList.size()
                                     ? &workingList[i] : nullptr;
             const bool gclOn = (gclArkOn || gclProOn);
-            const bool isHidden = gclOn && giPtr ? isGameFilteredPath(giPtr->path) : false;
+            // TurboGrafx16 folders never show on the XMB, so they always get the
+            // hidden treatment regardless of whether a categories plugin is active.
+            const bool isHidden = (giPtr && giPtr->isTurboGrafx)
+                                ? true
+                                : (gclOn && giPtr ? isGameFilteredPath(giPtr->path) : false);
 
             unsigned baseCol = isDir ? COLOR_CYAN : COLOR_WHITE;
             unsigned textCol = sel ? COLOR_BLACK : baseCol;
@@ -4048,7 +4096,9 @@ private:
                     !isDir && i >= 0 && i < (int)workingList.size()) {
                     const GameItem& gi = workingList[i];
                     if (gi.kind == GameItem::EBOOT_FOLDER) {
-                        if (gi.isUpdateDlc) {
+                        if (gi.isTurboGrafx) {
+                            labelText = "[TG16]";
+                        } else if (gi.isUpdateDlc) {
                             labelText = "[UPD]";
                         } else {
                         std::string ebootPath = gi.path + "/EBOOT.PBP";
@@ -4089,6 +4139,7 @@ private:
             if (!strcmp(labelText, "[PS1]")) labelIcon = isHidden ? ps1IconTextureGray : ps1IconTexture;
             else if (!strcmp(labelText, "[HB]")) labelIcon = isHidden ? homebrewIconTextureGray : homebrewIconTexture;
             else if (!strcmp(labelText, "[UPD]")) labelIcon = isHidden ? updateIconTextureGray : updateIconTexture;
+            else if (!strcmp(labelText, "[TG16]")) labelIcon = turbografxIconTextureGray;
             else if (!strcmp(labelText, "[FILE]")) labelIcon = isHidden ? isoIconTextureGray : isoIconTexture;
             unsigned iconCol = labelColor;
             if (isHidden) iconCol = (iconCol & 0x00FFFFFF) | 0xB3000000; // 70% opacity
@@ -4101,7 +4152,7 @@ private:
                 iconX = (float)((int)(iconX + 0.5f));
                 iconY = (float)((int)(iconY + 0.5f));
                 drawTextureScaled(labelIcon, iconX, iconY, labelIconH, iconCol);
-            } else if (strcmp(labelText, "[UPD]") != 0) {
+            } else if (strcmp(labelText, "[UPD]") != 0 && strcmp(labelText, "[TG16]") != 0) {
                 const float labelTextW = measureTextWidth(scale, labelText);
                 const float labelTextX = iconSlotX + (iconSlotW - labelTextW) * 0.5f;
                 drawText(labelTextX, baseline, labelText, labelColor);
@@ -4245,7 +4296,9 @@ private:
                     !isDir && i >= 0 && i < (int)workingList.size()) {
                     const GameItem& gi = workingList[i];
                     if (gi.kind == GameItem::EBOOT_FOLDER) {
-                        if (gi.isUpdateDlc) {
+                        if (gi.isTurboGrafx) {
+                            labelText = "[TG16]";
+                        } else if (gi.isUpdateDlc) {
                             labelText = "[UPD]";
                         } else {
                         std::string ebootPath = gi.path + "/EBOOT.PBP";
@@ -4447,11 +4500,15 @@ private:
         int xx = x;
         int yy = y + ((ITEM_HEIGHT - dh) / 2) + CHECKBOX_Y_NUDGE;
 
+        // Height must be the padded power-of-two, not the stride: for a portrait
+        // image (height > stride) declaring tbw rows leaves the bottom rows outside
+        // the texture, and GU_CLAMP then repeats the last valid row down the sprite.
+        int th = 1; while (th < h) th <<= 1;
         sceKernelDcacheWritebackRange(t->data, tbw * h * 4);
         sceGuTexFlush();
         sceGuTexMode(GU_PSM_8888, 0, 0, GU_FALSE);
         sceGuTexFunc(GU_TFX_REPLACE, GU_TCC_RGBA);
-        sceGuTexImage(0, tbw, tbw, tbw, t->data);
+        sceGuTexImage(0, tbw, th, tbw, t->data);
         sceGuTexFilter(GU_LINEAR, GU_LINEAR);
         sceGuTexWrap(GU_CLAMP, GU_CLAMP);
         sceGuEnable(GU_TEXTURE_2D);
