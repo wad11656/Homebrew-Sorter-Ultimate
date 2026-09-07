@@ -331,6 +331,21 @@ void MessageBox::render(intraFont* font) {
                 textY += 5.0f;
             }
             intraFontPrint(font, textX, textY, text);
+            if (_underlineComparators && text) {
+                // Same trick the Game Categories picker uses: print a plain '<' or
+                // '>' and rule a line under it so it reads as the comparator with
+                // the bar. Measuring each prefix keeps it aligned at any scale.
+                const std::string ln(text);
+                for (size_t c = 0; c < ln.size(); ++c) {
+                    if (ln[c] != '<' && ln[c] != '>') continue;
+                    intraFontSetStyle(font, scale, color, 0, 0.0f, INTRAFONT_ALIGN_LEFT);
+                    const float x0 = textX + intraFontMeasureText(font, ln.substr(0, c).c_str());
+                    const float x1 = textX + intraFontMeasureText(font, ln.substr(0, c + 1).c_str());
+                    int uw = (int)(x1 - x0 + 0.5f);
+                    if (uw < 1) uw = 1;
+                    mbDrawRect((int)(x0 + 0.5f), (int)(textY + 1.0f), uw, 1, color);
+                }
+            }
             int lineH = lineHFor(scale);
             if (isTitle && _useSubtitleStyle) {
                 lineH += _subtitleGapAdjust;
@@ -625,6 +640,8 @@ void MessageBox::setInlineIcon(Texture* icon, const char* token) {
     _inlineIcon = icon;
     _inlineToken = token;
 }
+
+void MessageBox::setUnderlineComparators(bool on) { _underlineComparators = on; }
 
 void MessageBox::setCancel(Texture* icon, const char* label, unsigned button) {
     _cancelIcon = icon;

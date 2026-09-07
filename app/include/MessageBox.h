@@ -38,6 +38,9 @@ class MessageBox {
         void setSubtitleStyle(float scale, unsigned color);
         void setSubtitleGapAdjust(int px);
         void setInlineIcon(Texture* icon, const char* token);
+        // Underline any '<' / '>' in the message so they read as the same
+        // frankensteined '≤' / '≥' used in the Game Categories picker.
+        void setUnderlineComparators(bool on);
         void setCancel(Texture* icon, const char* label, unsigned button = PSP_CTRL_CIRCLE);
 
         bool isVisible() const { return _visible; }
@@ -101,6 +104,7 @@ private:
     int _subtitleGapAdjust = 0;
     Texture* _inlineIcon = nullptr;
     const char* _inlineToken = nullptr;
+    bool _underlineComparators = false;
 
     // ---- Animation state ----
     const MBAnimFrame* _animFrames = nullptr;

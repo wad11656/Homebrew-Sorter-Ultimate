@@ -87,6 +87,7 @@ int RunKernelFileExplorer(const char* execPath) {
     std::string homebrewGrayPath = baseDir + "resources/homebrew_grayscale.png";
     std::string isoGrayPath    = baseDir + "resources/iso_grayscale.png";
     std::string updateGrayPath = baseDir + "resources/update_grayscale.png";
+    std::string turbografxPath = baseDir + "resources/turbografx16.png";
     std::string turbografxGrayPath = baseDir + "resources/turbografx16_grayscale.png";
     std::string warningPath = baseDir + "resources/warning.png";
     std::string updownPath = baseDir + "resources/updown.png";
@@ -125,6 +126,7 @@ int RunKernelFileExplorer(const char* execPath) {
     homebrewIconTextureGray = texLoadPNG(homebrewGrayPath.c_str()); logTex("homebrew_gray", homebrewGrayPath, homebrewIconTextureGray);
     isoIconTextureGray    = texLoadPNG(isoGrayPath.c_str()); logTex("iso_gray", isoGrayPath, isoIconTextureGray);
     updateIconTextureGray = texLoadPNG(updateGrayPath.c_str()); logTex("update_gray", updateGrayPath, updateIconTextureGray);
+    turbografxIconTexture     = texLoadPNG(turbografxPath.c_str()); logTex("turbografx", turbografxPath, turbografxIconTexture);
     turbografxIconTextureGray = texLoadPNG(turbografxGrayPath.c_str()); logTex("turbografx_gray", turbografxGrayPath, turbografxIconTextureGray);
     warningIconTexture = texLoadPNG(warningPath.c_str()); logTex("warning", warningPath, warningIconTexture);
     updownIconTexture = texLoadPNG(updownPath.c_str()); logTex("updown", updownPath, updownIconTexture);

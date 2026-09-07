@@ -680,11 +680,63 @@ private:
         return kuKernelGetModel() == 4;
     }
 
+    // Panel geometry measured from the text that has to fit, rather than guessed.
+    struct UsbPanelMetrics { int w; int pxPerChar; int wrapTweak; };
+    UsbPanelMetrics usbPanelMetrics() {
+        const float subScale = 0.7f;          // matches setSubtitleStyle below
+        const char* warnText = "Not compatible with Epinephrine <7.";
+        const int   padX     = 10;
+        const int   rightPad = 8;             // breathing room after the final period
+
+        float iconW = 0.0f;
+        if (warningIconTexture && warningIconTexture->data && warningIconTexture->height > 0)
+            iconW = (float)warningIconTexture->width * (12.0f / (float)warningIconTexture->height);
+
+        const float textW = measureTextWidth(subScale, warnText);
+        const int   len   = (int)strlen(warnText);
+
+        UsbPanelMetrics m;
+        m.w = (int)((float)padX + iconW + 4.0f + textW + (float)rightPad + 0.5f);
+        const int innerW = m.w - padX * 2;
+
+        // Use the real per-character width of this text, so lines that do wrap end
+        // up inside the panel instead of spilling past it.
+        m.pxPerChar = (len > 0) ? (int)((textW / (float)len) + 0.5f) : 9;
+        if (m.pxPerChar < 4) m.pxPerChar = 4;
+
+        // Let exactly the warning line's character count through -- token, space and
+        // text -- so it stays on one line while the longer lines still wrap.
+        const int counted = (int)strlen(KFE_WARN_TOKEN) + 1 + len;
+        const int tweak   = counted * m.pxPerChar - innerW;
+        m.wrapTweak = (tweak > 0) ? tweak : 0;
+        return m;
+    }
+
+    // The "not Vita-compatible" caveat only applies when there is no Adrenaline
+    // USB bridge to fall back on. With one resolved, USB genuinely works on a
+    // Vita, so the warning (and its icon) would be untrue.
+    static const char* usbWaitingMessage() {
+        if (AdrUsbAvailable())
+            return "Connect to PC...\nMounting the Memory Stick on the host. Keep this screen open until you are done.";
+        return "Connect to PC...\nOn PSP Go, Bluetooth must be turned off in the System Settings.\n" KFE_WARN_TOKEN " Not compatible with Epinephrine <7.";
+    }
+
     // Adrenaline v8 can expose a configured Vita System Storage location as
     // ef0: to EFAWARE homebrew, even though the device is not a PSP Go.
+    //
+    // Probing the device alone is not enough: under ARK-4 and ARK-5 on a Vita the
+    // ef0: node still answers while nothing backs it, so System Storage would be
+    // listed and then fail in use. Only Adrenaline 8 / Epinephrine really provides
+    // it, so once ef0: answers on something that is not a PSP Go, the CFW gets the
+    // final say.
     static bool hasSystemStorage() {
-        if (isPspGo()) return true;
-        return DeviceExists("ef0:/");
+        if (isPspGo()) return true;                  // real PSP Go: ef0 is its internal storage
+        if (!DeviceExists("ef0:/")) return false;
+        // Only the Adrenaline CEF backs System Storage. Under ARK the CEF is
+        // replaced, so there is nothing to ask -- and checking here means ARK
+        // never walks a module export table during boot just to answer this.
+        if (!isAdrenaline()) return false;
+        return AdrEfEnabled();
     }
 
     // Find the visible row index of a category name inside the current Categories screen.
@@ -1062,6 +1114,22 @@ private:
     MessageBox* msgBox = nullptr;
     FileOpsMenu* fileMenu = nullptr;
     OptionListMenu* optMenu = nullptr;   // ← NEW: modal option picker
+    GroupedAlphaMenu* groupAlphaMenu = nullptr;  // R-hold "Grouped Alphabetize"
+
+    // --- R-hold -> Grouped Alphabetize ---
+    // Plain alphabetize moves to the *release* of R so that letting go at any
+    // point during the countdown still performs the normal sort. Holding all the
+    // way through opens the grouped modal instead and suppresses that sort.
+    static const unsigned long long kGroupedAlphaPromptUs = 125000ULL;    // 0.125s before the prompt shows
+    static const unsigned long long kGroupedAlphaCountUs  = 3000000ULL;   // then a 3..2..1 countdown
+    bool rHoldActive = false;                 // R currently held in a content view
+    unsigned long long rHoldStartUs = 0;
+    bool rHoldSuppressAlpha = false;          // grouped modal opened; skip sort on release
+    int  rHoldSecondsLeft = 0;                // >0 while the countdown box is up
+
+    // The group ordering persists for the session so a second run starts from
+    // whatever arrangement the user last chose.
+    std::vector<int> groupedAlphaOrder;
     std::vector<std::string> optMenuOwnedLabels; // keep dynamic labels alive for OptionListMenu
     std::vector<std::string> optMenuOwnedWarnings; // keep dynamic warning text alive for OptionListMenu
     std::string msgBoxOwnedText; // keep transient MessageBox text alive
@@ -2516,6 +2584,20 @@ private:
     void drawText(float x,float y,const char* s,unsigned col) {
         drawTextAligned(x, y, s, col, INTRAFONT_ALIGN_LEFT);
     }
+    // drawText() is fixed at 0.5; this one takes the scale, for status-modal-sized text.
+    void drawTextScaled(float x,float y,const char* s,unsigned col,float sc) {
+        if (!s) return;
+        if (font) {
+            intraFont* f = pickFontForText(s);
+            if (f) {
+                intraFontActivate(f);
+                intraFontSetStyle(f, sc, col, 0, 0.0f, INTRAFONT_ALIGN_LEFT);
+                intraFontPrint(f, x, y, s);
+                return;
+            }
+        }
+        drawTextAligned(x, y, s, col, INTRAFONT_ALIGN_LEFT);
+    }
     float measureTextWidth(float size, const char* s) {
         if (!s) return 0.0f;
         if (!font) return (float)(strlen(s) * 8) * size;
@@ -2622,7 +2704,7 @@ private:
         drawRect(0, 0, SCREEN_WIDTH, bannerH, COLOR_BANNER);
 
         std::string leftLabel = "Homebrew Sorter Ultimate";
-        std::string leftLabelMutedSuffix = " v1.26";
+        std::string leftLabelMutedSuffix = " v1.27";
         Texture* deviceIcon = nullptr;
         bool underlineLabel = false;
         const bool opHeader = (actionMode != AM_None &&
@@ -4480,6 +4562,103 @@ private:
         drawTextAligned(SCREEN_WIDTH / 2.0f, textY,
                         "Original by Sakya, Valentin, & Suloku. Reimagined by wad11656. Thanks joel16.",
                         COLOR_WHITE, INTRAFONT_ALIGN_CENTER);
+    }
+
+    void openGroupedAlphaMenu() {
+        // Default order matches the list the user asked for; a previous run in
+        // this session wins so the arrangement sticks.
+        std::vector<GroupedAlphaRow> rows = {
+            { AppGroup_Iso,      "ISO",              &isoIconTexture,      nullptr,                nullptr, 0.0f },
+            { AppGroup_Psx,      "PSX",              &ps1IconTexture,      nullptr,                nullptr, 0.0f },
+            { AppGroup_Homebrew, "Homebrew",         &homebrewIconTexture, nullptr,                nullptr, -1.0f },
+            { AppGroup_UpdDlc,   "Supplemental Data (DLC/Update/TG-16)", &updateIconTexture, &turbografxIconTexture, "/", 0.0f },
+        };
+        if (!groupedAlphaOrder.empty()) {
+            std::vector<GroupedAlphaRow> ordered;
+            ordered.reserve(rows.size());
+            for (int g : groupedAlphaOrder)
+                for (const auto& r : rows)
+                    if (r.group == g) { ordered.push_back(r); break; }
+            // Anything not named in the saved order keeps its default position.
+            for (const auto& r : rows) {
+                bool have = false;
+                for (const auto& o : ordered) if (o.group == r.group) { have = true; break; }
+                if (!have) ordered.push_back(r);
+            }
+            if (ordered.size() == rows.size()) rows.swap(ordered);
+        }
+
+        delete groupAlphaMenu;
+        groupAlphaMenu = new GroupedAlphaMenu(rows, SCREEN_WIDTH, SCREEN_HEIGHT);
+        SceCtrlData now{}; sceCtrlReadBufferPositive(&now, 1);
+        groupAlphaMenu->primeButtons(now.Buttons);
+    }
+
+    // Single-line prompt shown while R is held, counting 3 -> 2 -> 1. Sized and
+    // styled like the "Loading..." status modal (1.0 text, 38px panel), with the
+    // R button drawn inline from R.png in place of the letter. No screen dim: it
+    // is a transient hint over a live list, not a modal that takes input.
+    void drawGroupedAlphaCountdown() {
+        if (rHoldSecondsLeft <= 0) return;
+
+        const float sc     = 1.0f;   // "Loading..." text scale
+        const int   padX   = 10;     // "Loading..." horizontal padding
+        const int   panelH = 38;     // "Loading..." panel height
+        const int   baseDY = 24;     // "Loading..." first-line baseline offset
+
+        const char* pre = "Hold ";
+        char post[96];
+        snprintf(post, sizeof(post), " for %d sec. for Grouped Alphabetize", rHoldSecondsLeft);
+
+        // R.png is drawn at its native size -- deliberately not scaled up to the
+        // 1.0 text, so the button glyph matches the one used elsewhere in the UI.
+        float iconH = 0.0f, iconW = 0.0f;
+        if (rIconTexture && rIconTexture->data && rIconTexture->height > 0) {
+            iconH = (float)rIconTexture->height;
+            iconW = (float)rIconTexture->width;
+        }
+
+        float scText = sc;
+        float wPre  = measureTextWidth(scText, pre);
+        float wPost = measureTextWidth(scText, post);
+
+        // The line is long, so if it would run past the screen shrink the text to
+        // fit rather than clamping the panel and letting the text spill outside it.
+        const float maxW = (float)(SCREEN_WIDTH - 16);
+        if (wPre + iconW + wPost + padX * 2 + 4 > maxW) {
+            const float avail = maxW - iconW - padX * 2 - 4;
+            const float textW = wPre + wPost;
+            if (textW > 0.0f && avail > 0.0f) {
+                scText *= (avail / textW);
+                wPre  = measureTextWidth(scText, pre);
+                wPost = measureTextWidth(scText, post);
+            }
+        }
+
+        int boxW = (int)(wPre + iconW + wPost + padX * 2 + 4 + 0.5f);
+        if (boxW > (int)maxW) boxW = (int)maxW;
+        const int boxX = (SCREEN_WIDTH - boxW) / 2;
+        const int boxY = (SCREEN_HEIGHT - panelH) / 2;
+
+        drawRect(boxX - 1, boxY - 1, boxW + 2, panelH + 2, 0xFFFFFFFF);
+        drawRect(boxX,     boxY,     boxW,     panelH,     0xD0303030);
+
+        const float baseY = (float)(boxY + baseDY);
+        float x = (float)(boxX + padX);
+        drawTextScaled(x, baseY, pre, COLOR_WHITE, scText);
+        x += wPre;
+        if (iconW > 0.0f) {
+            // Vertically centre the icon on the text it sits inline with. Glyphs run
+            // from about the cap height above the baseline down to it, so the visual
+            // middle of the line is half a cap height up. Derived from the scale
+            // rather than a fixed offset, so it stays centred if the text shrinks to
+            // fit above or the icon is swapped for a different size.
+            const float capH  = 24.0f * scText * 0.62f;   // 24*scale is the app-wide line height
+            const float midY  = baseY - capH * 0.5f;
+            drawTextureScaled(rIconTexture, x, midY - iconH * 0.5f + 1.0f, iconH, COLOR_WHITE);
+            x += iconW;
+        }
+        drawTextScaled(x, baseY, post, COLOR_WHITE, scText);
     }
 
     void drawMessage(const char* m,unsigned c) {

@@ -15,7 +15,13 @@
     }
     bool promptTextOSK(const char* titleUtf8, const char* initialUtf8, int maxChars, std::string& out) {
         ClockGuard     cg;  cg.boost333();
-        ThreadPrioGuard tpg(0x10);
+        // Drop this thread BELOW the OSK's own threads (graphics 0x11, the rest
+        // 0x10) rather than above them. Lower number = higher priority on PSP, so
+        // the old 0x10 here outranked the very thread that draws the keyboard: the
+        // loop below spun while the OSK graphics thread never got scheduled, leaving
+        // the backdrop on screen forever. A real PSP happens to yield enough during
+        // the vblank wait for it to squeak through; the Vita's scheduler does not.
+        ThreadPrioGuard tpg(0x20);
         #ifdef HAVE_SCEPOWERLOCK
         PowerLockGuard  plg;
         #endif
@@ -54,10 +60,14 @@
         params.base.size           = sizeof(params);
         params.base.language       = PSP_SYSTEMPARAM_LANGUAGE_ENGLISH;
         params.base.buttonSwap     = PSP_UTILITY_ACCEPT_CROSS;
-        params.base.graphicsThread = 0x11;
-        params.base.accessThread   = 0x10;
-        params.base.fontThread     = 0x10;
-        params.base.soundThread    = 0x10;
+        // Priorities straight from the PSPSDK OSK sample: a descending ladder of
+        // sound 16 < graphics 17 < font 18 < access 19, with the caller well below
+        // all of them. The old values put font and access at 16, above the graphics
+        // thread that actually draws the keyboard.
+        params.base.graphicsThread = 17;
+        params.base.accessThread   = 19;
+        params.base.fontThread     = 18;
+        params.base.soundThread    = 16;
         params.datacount           = 1;
         params.data                = &data;
 
@@ -67,9 +77,23 @@
             return false;
         }
 
+        // If the dialog never manages to show itself, give up rather than sitting on
+        // a blank backdrop with no way out: being stuck there is what leaves the Vita
+        // in a bad state if Adrenaline is then closed from the LiveArea.
+        const unsigned long long oskStartUs = (unsigned long long)sceKernelGetSystemTimeWide();
+        const unsigned long long oskShowTimeoutUs = 10ULL * 1000000ULL;
+        bool sawVisible = false;
+        bool timedOut   = false;
+
         while (true) {
             int st = sceUtilityOskGetStatus();
             if (st == PSP_UTILITY_DIALOG_INIT || st == PSP_UTILITY_DIALOG_VISIBLE) {
+                if (st == PSP_UTILITY_DIALOG_VISIBLE) sawVisible = true;
+                if (!sawVisible && !timedOut &&
+                    ((unsigned long long)sceKernelGetSystemTimeWide() - oskStartUs) > oskShowTimeoutUs) {
+                    timedOut = true;
+                    sceUtilityOskShutdownStart();
+                }
                 drawBackdropOnlyForOSK();
                 sceUtilityOskUpdate(1);
             #if OSK_USE_VBLANK_CB
@@ -98,6 +122,12 @@
 
         restoreGuAfterUtility();
         renderOneFrame();
+
+        if (timedOut) {
+            drawMessage("Keyboard failed to open", COLOR_RED);
+            sceKernelDelayThread(1200*1000);
+            return false;
+        }
 
         if (data.result == PSP_UTILITY_OSK_RESULT_OK) {
             std::string raw = utf16ToUtf8(out16.data());
@@ -604,6 +634,8 @@
         // NEW: draw the option picker modal (on top)
         // NEW: draw the option picker modal (on top)
         if (optMenu) optMenu->render(font);
+        if (groupAlphaMenu) groupAlphaMenu->render(font);
+        drawGroupedAlphaCountdown();
 
         // USB Connected modal (handle input here so Circle disconnects)
         if (gUsbBox) {
@@ -614,8 +646,10 @@
                 gUsbShownConnected = false;
                 delete gUsbBox; gUsbBox = nullptr;
                 inputWaitRelease = true;
-                reloadHomeAnimationsForExec();
-                gclRunPostUsbIntegrityHeal();
+                // Deferred to run(): doing it here would block for seconds with no
+                // modal on screen. This function is itself called from renderOneFrame(),
+                // so a status modal cannot be raised from here without recursing.
+                gUsbPostWorkPending = true;
             }
         }
 

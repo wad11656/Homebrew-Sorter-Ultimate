@@ -1379,6 +1379,21 @@
         }
         if (txt.empty()) lines.clear();
 
+        // Drop blank / whitespace-only lines from the whole file. Two things put
+        // them there: the append path below used to insert one deliberately as a
+        // separator, and the splitter above yields a trailing empty entry for any
+        // file that ends in a newline (which then became a real blank line once a
+        // new entry was appended after it). Comments and real entries are kept
+        // untouched -- only genuinely empty lines go.
+        {
+            std::vector<std::string> compact;
+            compact.reserve(lines.size());
+            for (const auto& ln : lines) {
+                if (!trim(ln).empty()) compact.push_back(ln);
+            }
+            lines.swap(compact);
+        }
+
         bool found=false;
         for (auto& ln : lines){
             std::string low = toLower(ln);
@@ -1438,22 +1453,16 @@
             const std::string newLine = arkPluginsTxt
                 ? (std::string("vsh, ") + gclPrxPath + ", 1")
                 : (gclPrxPath + " 1");
-            // Epinephrine (Adrenaline 8+) is sensitive to category_lite.prx's load
-            // order, so when adding the entry from scratch put it at the top of the
-            // file. An entry already present is edited in place above (the `found`
-            // branch), so its existing position is preserved.
-            // ARK backend only (PLUGINS.txt/EPIplugins.txt): the PRO/ME VSH.txt path
-            // is where Epinephrine <=7 lives, and it keeps the classic append order.
-            if (isAdrenaline() && arkPluginsTxt) {
-                lines.insert(lines.begin(), newLine);
-            } else {
-                if (!lines.empty() && !lines.back().empty()) lines.push_back(std::string());
-                lines.push_back(newLine);
-            }
+            // category_lite.prx goes at the top of whichever list it is added to --
+            // EPIplugins.txt, PLUGINS.txt or VSH.txt alike. Epinephrine (Adrenaline
+            // 8+) is outright sensitive to its load order, and loading first is the
+            // safe default everywhere else. An entry that already exists is edited
+            // in place above (the `found` branch), so its position is preserved.
+            lines.insert(lines.begin(), newLine);
         }
 
         std::string out;
-        for (size_t k=0;k<lines.size();++k){ out += lines[k]; if (k+1<lines.size()) out += "\r\n"; }
+        for (size_t k=0;k<lines.size();++k){ out += lines[k]; out += "\r\n"; }
         return gclWriteWholeText(filePath, out);
     }
 

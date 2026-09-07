@@ -267,25 +267,284 @@ static uint32_t gOskBgColorABGR = 0xFF685020;
 #define REPEAT_ACCEL_AFTER_US    800000ULL
 #define REPEAT_INTERVAL_FAST_US   16000ULL
 
+// ---------------------------------------------------------------
+// Adrenaline / ePSP USB bridge
+// ---------------------------------------------------------------
+// On a Vita the PSP's own USB stack does nothing: there is no emulated USB
+// controller behind sceUsbStart/sceUsbActivate. Every Adrenaline-family CFW
+// instead exposes the host's mass storage through a PSP-callable export, but
+// which module and library hold it differs per CFW:
+//
+//   Adrenaline 7 (TheFloW)  module "SystemControl"    lib "SystemCtrlForUser"
+//   Adrenaline 8 (isage)    module "Pentazemin"       lib "AdrenalineCtrl"
+//   ARK-4 on Vita           module "ARKCompatLayer"   lib "AdrenalineCtrl"
+//   ARK-5 on Vita           no bridge exists -- USB stays unavailable
+//
+// Nothing is imported statically. A stub for a library that is missing would
+// stop the module loading altogether, and none of these exist on a real PSP,
+// so the export tables are walked at runtime through kubridge instead. NIDs are
+// derived from the function name, so they are the same in every fork.
+#define ADR_NID_START_USB     0x80C0ED7B   // sctrlStartUsb
+#define ADR_NID_STOP_USB      0x5FC12767   // sctrlStopUsb
+#define ADR_NID_GET_USB_STATE 0x05D8E209   // sctrlGetUsbState
+
+// M33 SDK module layout: kuKernelFindModuleByName fills in this shape.
+typedef struct KfeSceModule2 {
+    struct KfeSceModule2* next;         // 0x00
+    unsigned short attribute;           // 0x04
+    unsigned char  version[2];          // 0x06
+    char           modname[27];         // 0x08
+    char           terminal;            // 0x23
+    char           mod_state;           // 0x24
+    char           unk1;                // 0x25
+    char           unk2[2];             // 0x26
+    unsigned int   unk3;                // 0x28
+    int            modid;               // 0x2C
+    unsigned int   unk4;                // 0x30
+    int            mem_id;              // 0x34
+    unsigned int   mpid_text;           // 0x38
+    unsigned int   mpid_data;           // 0x3C
+    void*          ent_top;             // 0x40
+    unsigned int   ent_size;            // 0x44
+    void*          stub_top;            // 0x48
+    unsigned int   stub_size;           // 0x4C
+    unsigned int   entry_addr_;         // 0x50
+    unsigned int   unk5[4];             // 0x54
+    unsigned int   entry_addr;          // 0x64
+    unsigned int   gp_value;            // 0x68
+    unsigned int   text_addr;           // 0x6C
+    unsigned int   text_size;           // 0x70
+    unsigned int   data_size;           // 0x74
+    unsigned int   bss_size;            // 0x78
+    unsigned int   nsegment;            // 0x7C
+    unsigned int   segmentaddr[4];      // 0x80
+    unsigned int   segmentsize[4];      // 0x90
+} KfeSceModule2;
+
+typedef struct KfeLibEntry {
+    const char*    libname;
+    unsigned char  version[2];
+    unsigned short attribute;
+    unsigned char  len;                 // entry size in 32-bit words
+    unsigned char  vstubcount;
+    unsigned short stubcount;
+    void*          entrytable;          // NIDs, then matching addresses
+} KfeLibEntry;
+
+// kuKernelMemcpy is a bare memcpy with k1 dropped -- it does no bounds checking
+// whatsoever, so handing it a bad pointer faults in kernel mode and takes the
+// whole system (or the Vita's PSP emulator) down with it. Every address is
+// therefore range-checked against main RAM before it is dereferenced.
+static bool kfeAddrSane(const void* p, unsigned int len) {
+    if (!p || len == 0 || len > 0x10000) return false;
+    const unsigned int a = ((unsigned int)p) & 0x1FFFFFFF;   // drop cache / kernel-segment bits
+    if (a < 0x08000000) return false;                        // below main RAM
+    if (a > 0x0C000000 - len) return false;                  // past 64MB, or the read would run off the end
+    return true;
+}
+
+// Resolve one export by NID. Everything the walk touches lives in kernel memory,
+// so each read is pulled across with kuKernelMemcpy. Returns 0 when the module,
+// the library or the NID is absent -- the normal case on a real PSP -- and bails
+// out rather than dereferencing anything that fails the sanity check.
+static unsigned int kfeResolveExport(const char* modName, const char* libName, unsigned int nid) {
+    if (!modName || !libName) return 0;
+
+    const unsigned int wantLen = (unsigned int)strlen(libName);
+    if (wantLen == 0 || wantLen > 32) return 0;
+
+    KfeSceModule2 mod;
+    memset(&mod, 0, sizeof(mod));
+    if (kuKernelFindModuleByName((char*)modName, (SceModule*)&mod) < 0) return 0;
+    if (mod.ent_size == 0 || mod.ent_size > 8192) return 0;
+    if (!kfeAddrSane(mod.ent_top, mod.ent_size)) return 0;
+
+    std::vector<unsigned char> ents(mod.ent_size);
+    kuKernelMemcpy(ents.data(), mod.ent_top, mod.ent_size);
+
+    for (unsigned int off = 0; off + sizeof(KfeLibEntry) <= mod.ent_size; ) {
+        const KfeLibEntry* e = (const KfeLibEntry*)(ents.data() + off);
+        if (e->len == 0) break;                       // malformed; stop rather than spin
+        const unsigned int stride = (unsigned int)e->len * 4;
+
+        // Read only strlen+1 bytes of the library name. A fixed-size read here can
+        // walk off the end of the last string in a section and fault.
+        char nameBuf[36];
+        if (kfeAddrSane(e->libname, wantLen + 1)) {
+            memset(nameBuf, 0, sizeof(nameBuf));
+            kuKernelMemcpy(nameBuf, (void*)e->libname, wantLen + 1);
+            if (nameBuf[wantLen] == '\0' && memcmp(nameBuf, libName, wantLen) == 0) {
+                const unsigned int total = (unsigned int)e->stubcount + (unsigned int)e->vstubcount;
+                const unsigned int bytes = total * 2 * (unsigned int)sizeof(unsigned int);
+                if (total > 0 && total < 2048 && kfeAddrSane(e->entrytable, bytes)) {
+                    std::vector<unsigned int> tab(total * 2);
+                    kuKernelMemcpy(tab.data(), e->entrytable, bytes);
+                    for (unsigned int j = 0; j < total; ++j) {
+                        if (tab[j] == nid) return tab[total + j];
+                    }
+                }
+            }
+        }
+        off += stride;
+    }
+    return 0;
+}
+
+struct KfeAdrUsb {
+    bool         probed   = false;
+    unsigned int startFn  = 0;
+    unsigned int stopFn   = 0;
+    unsigned int stateFn  = 0;
+};
+static KfeAdrUsb gAdrUsb;
+
+// Probe once. Order matters only in that the first hit wins; a machine only ever
+// has one of these modules loaded.
+static void AdrUsbProbe() {
+    if (gAdrUsb.probed) return;
+    gAdrUsb.probed = true;
+
+    static const struct { const char* mod; const char* lib; } kSources[] = {
+        { "Pentazemin",     "AdrenalineCtrl"    },   // Adrenaline 8 (isage)
+        { "ARKCompatLayer", "AdrenalineCtrl"    },   // ARK-4 on Vita
+        { "SystemControl",  "SystemCtrlForUser" },   // Adrenaline 7 (TheFloW)
+    };
+
+    for (unsigned i = 0; i < sizeof(kSources)/sizeof(kSources[0]); ++i) {
+        const unsigned int start = kfeResolveExport(kSources[i].mod, kSources[i].lib, ADR_NID_START_USB);
+        if (!start) continue;
+        const unsigned int stop = kfeResolveExport(kSources[i].mod, kSources[i].lib, ADR_NID_STOP_USB);
+        if (!stop) continue;                          // half a bridge is no bridge
+        gAdrUsb.startFn = start;
+        gAdrUsb.stopFn  = stop;
+        gAdrUsb.stateFn = kfeResolveExport(kSources[i].mod, kSources[i].lib, ADR_NID_GET_USB_STATE);
+        return;
+    }
+}
+
+static bool AdrUsbAvailable() { AdrUsbProbe(); return gAdrUsb.startFn != 0 && gAdrUsb.stopFn != 0; }
+
+// These are kernel exports, so they go through kuKernelCall -- the same way
+// ARK's own menu invokes them.
+static int AdrKernelCall(unsigned int fn) {
+    if (!fn) return -1;
+    struct KernelCallArg args;
+    memset(&args, 0, sizeof(args));
+    const int rc = kuKernelCall((void*)fn, &args);
+    if (rc < 0) return rc;
+    return (int)args.ret1;
+}
+
+static int  AdrUsbStart() { return AdrKernelCall(gAdrUsb.startFn); }
+static int  AdrUsbStop()  { return AdrKernelCall(gAdrUsb.stopFn);  }
+// sctrlGetUsbState returns 1 when a host is connected, 2 when it is not.
+static bool AdrUsbConnected() {
+    if (!gAdrUsb.stateFn) return false;
+    return AdrKernelCall(gAdrUsb.stateFn) == 1;
+}
+
+#define ADR_NID_IS_EF_ENABLE 0x74919684   // sctrlIsEfEnable
+
+// Vita System Storage. Adrenaline 8 / Epinephrine is the only CFW that actually
+// backs ef0: on a Vita -- under ARK-4 and ARK-5 the node still answers while
+// nothing stands behind it, which is why probing the device is not enough. Ask
+// the CFW instead: sctrlIsEfEnable() reports 0 when System Storage is disabled
+// *or* configured to the same location as the Memory Stick, and 1 only when it
+// is a genuinely separate, usable device.
+static bool AdrEfEnabled() {
+    static bool probed  = false;
+    static bool enabled = false;
+    if (probed) return enabled;          // settled once; changing it needs a relaunch anyway
+    probed = true;
+
+    // Only Pentazemin is consulted. ARK does not export sctrlIsEfEnable, so probing
+    // ARKCompatLayer would buy nothing and would mean walking its export tables on
+    // every boot under ARK.
+    const unsigned int fn = kfeResolveExport("Pentazemin", "AdrenalineCtrl", ADR_NID_IS_EF_ENABLE);
+    if (fn) enabled = (AdrKernelCall(fn) != 0);
+    return enabled;                       // no CFW backing -> not usable
+}
+
+// MessageBox wraps by character count and counts the inline-icon token as literal
+// text. The old "warning.png" token was 12 phantom characters on the warning line,
+// which forced the panel absurdly wide to keep that line unwrapped. A one-character
+// sentinel costs the wrapper almost nothing and still renders as the icon.
+#define KFE_WARN_TOKEN "\x01"
+
+// ---------------------------------------------------------------
+// Pad polling
+// ---------------------------------------------------------------
+// sceCtrlReadBufferPositive blocks until the next 60Hz sampling cycle and hands
+// back the OLDEST buffered sample. A frame that runs long therefore falls behind
+// the ring buffer and starts acting on stale input, and only ever sees one sample
+// per frame no matter how many arrived -- so a quick tap that lands between two
+// frames is never seen at all. That is what makes list navigation feel sluggish
+// and drop rapid presses.
+//
+// Peek gives the current state without blocking or consuming, and the latch
+// reports every press that occurred since it was last read, so nothing is missed
+// even when a frame overruns. Exactly one consumer may read the latch per frame --
+// reading it clears it.
+struct KfePad {
+    unsigned buttons;   // currently held
+    unsigned pressed;   // went down since the previous poll (never misses a tap)
+};
+
+// Edge detection is done here rather than with sceCtrlReadLatch. The latch is the
+// textbook answer, but it silently reported nothing on ARK-5 -- handleInput ran
+// every frame and saw no presses for seconds -- and its behaviour cannot be
+// verified from outside the hardware. Peek plus a state diff is the mechanism the
+// app already used, minus the blocking read that caused the original sluggishness.
+static unsigned gKfePrevButtons = 0;
+
+static KfePad kfePollPad() {
+    SceCtrlData pad; memset(&pad, 0, sizeof(pad));
+    sceCtrlPeekBufferPositive(&pad, 1);
+    KfePad r;
+    r.buttons = pad.Buttons;
+    r.pressed = pad.Buttons & ~gKfePrevButtons;
+    gKfePrevButtons = pad.Buttons;
+    return r;
+}
+
+// Used while waiting for a full release. Keeps the edge baseline in step so the
+// buttons held during the wait cannot fire the moment input resumes.
+static unsigned kfeDrainPad() {
+    SceCtrlData pad; memset(&pad, 0, sizeof(pad));
+    sceCtrlPeekBufferPositive(&pad, 1);
+    gKfePrevButtons = pad.Buttons;
+    return pad.Buttons;
+}
+
 // USB state
 static bool gUsbActive = false;
 static MessageBox* gUsbBox = nullptr;
 
 
 static bool gUsbShownConnected = false;
+// Set when USB Mode is dismissed. The work that follows a disconnect (reloading
+// the home animation, healing the plugin config) is slow and blocking, and it used
+// to run right after the modal was destroyed -- so the screen looked interactive
+// while nothing responded for seconds. It is deferred to the main loop instead,
+// where it can be done behind a status modal.
+static bool gUsbPostWorkPending = false;
 // USB helpers
+// On the Adrenaline bridge a single call does the whole job on the host side, so
+// the PSP driver stack is left alone and Activate/Deactivate become no-ops.
 static int UsbStartStacked() {
+    if (AdrUsbAvailable()) return AdrUsbStart();
     EnsureUsbKernelModules();
     (void)sceUsbStart(PSP_USBBUS_DRIVERNAME, 0, 0);
     (void)sceUsbStart(PSP_USBSTOR_DRIVERNAME, 0, 0);
     return 0;}
 static void UsbStopStacked() {
+    if (AdrUsbAvailable()) { AdrUsbStop(); return; }
     sceUsbDeactivate(0x1c8);
     sceUsbStop(PSP_USBSTOR_DRIVERNAME, 0, 0);
     sceUsbStop(PSP_USBBUS_DRIVERNAME, 0, 0);
 }
-static void UsbActivate()   { sceUsbActivate(0x1c8); }
-static void UsbDeactivate() { sceUsbDeactivate(0x1c8); }
+static void UsbActivate()   { if (AdrUsbAvailable()) return; sceUsbActivate(0x1c8); }
+static void UsbDeactivate() { if (AdrUsbAvailable()) return; sceUsbDeactivate(0x1c8); }
 
 
 // ISO constants
@@ -332,6 +591,7 @@ static Texture* ps1IconTextureGray = nullptr;
 static Texture* homebrewIconTextureGray = nullptr;
 static Texture* isoIconTextureGray = nullptr;
 static Texture* updateIconTextureGray = nullptr;
+static Texture* turbografxIconTexture = nullptr;
 static Texture* turbografxIconTextureGray = nullptr;
 static Texture* warningIconTexture = nullptr;
 static Texture* updownIconTexture = nullptr;

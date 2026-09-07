@@ -1992,6 +1992,105 @@ static void sortLikeLegacy(std::vector<GameItem>& v){
 }
 
 // Case-insensitive A→Z sort of the working list.
+// ---------------------------------------------------------------
+// Grouped alphabetize
+// ---------------------------------------------------------------
+// The groups mirror exactly what the row icon shows, so what the user sees in
+// the list is what they are reordering. Note that anything whose icon falls back
+// to iso.png -- real ISOs and EBOOT folders with an unrecognised CATEGORY -- lands
+// in the ISO group, which keeps grouping consistent with the displayed icon.
+enum AppGroup {
+    AppGroup_Iso      = 0,
+    AppGroup_Psx      = 1,
+    AppGroup_Homebrew = 2,
+    AppGroup_UpdDlc   = 3,   // updates, DLC and TurboGrafx16 data folders
+    AppGroup_Count    = 4
+};
+
+static int appGroupOfItem(const GameItem& gi) {
+    if (gi.kind != GameItem::EBOOT_FOLDER) return AppGroup_Iso;   // ISO/CSO/ZSO/DAX/JSO
+    if (gi.isTurboGrafx) return AppGroup_UpdDlc;
+    if (gi.isUpdateDlc)  return AppGroup_UpdDlc;
+
+    // Same CATEGORY lookup and per-frame cache the row renderer uses.
+    const std::string ebootPath = gi.path + "/EBOOT.PBP";
+    std::string category;
+    auto it = categoryCache.find(ebootPath);
+    if (it != categoryCache.end()) {
+        category = it->second;
+    } else {
+        category = readEbootCategory(ebootPath);
+        categoryCache[ebootPath] = category;
+    }
+    if (category == "ME") return AppGroup_Psx;
+    if (category == "MG") return AppGroup_Homebrew;
+    return AppGroup_Iso;
+}
+
+// Shared so plain and grouped alphabetize order names identically.
+static bool appNameLess(const GameItem& a, const GameItem& b, bool byTitle) {
+    const std::string& sa = (byTitle && !a.title.empty()) ? a.title : a.label;
+    const std::string& sb = (byTitle && !b.title.empty()) ? b.title : b.label;
+
+    int c = strcasecmp(sa.c_str(), sb.c_str());
+    if (c != 0) return c < 0;
+
+    int c2 = strcasecmp(a.label.c_str(), b.label.c_str());
+    if (c2 != 0) return c2 < 0;
+    return a.path < b.path;
+}
+
+// Alphabetize within each group, then lay the groups out in the caller's order.
+// groupOrder lists AppGroup values best-first; any group missing from it keeps a
+// stable position after the ones that are listed.
+void sortWorkingListGroupedAlpha(bool byTitle,
+                                 const std::vector<int>& groupOrder,
+                                 std::vector<GameItem>& workingList,
+                                 int& selectedIndex,
+                                 int& scrollOffset,
+                                 int visibleRows) {
+    if (workingList.empty()) return;
+
+    int rank[AppGroup_Count];
+    for (int i = 0; i < AppGroup_Count; ++i) rank[i] = AppGroup_Count + i;  // unlisted: stable, after listed
+    for (int i = 0; i < (int)groupOrder.size(); ++i) {
+        const int g = groupOrder[i];
+        if (g >= 0 && g < AppGroup_Count) rank[g] = i;
+    }
+
+    std::string keepPath;
+    if (selectedIndex >= 0 && selectedIndex < (int)workingList.size())
+        keepPath = workingList[selectedIndex].path;
+
+    // Classify once up front rather than inside the comparator, which would
+    // otherwise re-hit the CATEGORY cache O(n log n) times.
+    std::vector<std::pair<int, const GameItem*>> keyed;
+    keyed.reserve(workingList.size());
+    for (const auto& gi : workingList) keyed.push_back({ rank[appGroupOfItem(gi)], &gi });
+
+    std::stable_sort(keyed.begin(), keyed.end(),
+        [byTitle](const std::pair<int, const GameItem*>& a,
+                  const std::pair<int, const GameItem*>& b) {
+            if (a.first != b.first) return a.first < b.first;
+            return appNameLess(*a.second, *b.second, byTitle);
+        });
+
+    std::vector<GameItem> out;
+    out.reserve(workingList.size());
+    for (const auto& k : keyed) out.push_back(*k.second);
+    workingList.swap(out);
+
+    if (!keepPath.empty()) {
+        for (int i = 0; i < (int)workingList.size(); ++i) {
+            if (workingList[i].path == keepPath) { selectedIndex = i; break; }
+        }
+        if (selectedIndex < scrollOffset) scrollOffset = selectedIndex;
+        if (selectedIndex >= scrollOffset + visibleRows)
+            scrollOffset = selectedIndex - visibleRows + 1;
+        if (scrollOffset < 0) scrollOffset = 0;
+    }
+}
+
 void sortWorkingListAlpha(bool byTitle,
                           std::vector<GameItem>& workingList,
                           int& selectedIndex,
@@ -2004,17 +2103,7 @@ void sortWorkingListAlpha(bool byTitle,
         keepPath = workingList[selectedIndex].path;
 
     std::stable_sort(workingList.begin(), workingList.end(),
-        [byTitle](const GameItem& a, const GameItem& b) {
-            const std::string& sa = (byTitle && !a.title.empty()) ? a.title : a.label;
-            const std::string& sb = (byTitle && !b.title.empty()) ? b.title : b.label;
-
-            int c = strcasecmp(sa.c_str(), sb.c_str());
-            if (c != 0) return c < 0;
-
-            int c2 = strcasecmp(a.label.c_str(), b.label.c_str());
-            if (c2 != 0) return c2 < 0;
-            return a.path < b.path;
-        });
+        [byTitle](const GameItem& a, const GameItem& b) { return appNameLess(a, b, byTitle); });
 
     if (!keepPath.empty()) {
         for (int i = 0; i < (int)workingList.size(); ++i) {
@@ -2140,9 +2229,9 @@ public:
     
     bool update() {
         if (!_visible) return false;
-        SceCtrlData pad{}; sceCtrlReadBufferPositive(&pad, 1);
-        unsigned pressed = pad.Buttons & ~_lastButtons;
-        _lastButtons = pad.Buttons;
+        const KfePad kp = kfePollPad();
+        unsigned pressed = kp.pressed;
+        _lastButtons = kp.buttons;
 
         if (pressed & PSP_CTRL_UP) {
             do { _sel = (_sel + (int)_items.size() - 1) % (int)_items.size(); } while (_items[_sel].disabled && _hasEnabled());
@@ -2315,6 +2404,366 @@ private:
 };
 // -----------------------------------------------
 
+// -------- Grouped Alphabetize (modal: reorder the app groups, then sort) --------
+// Rows carry one or two icons and are reordered in place with Pick Up/Drop, the
+// same interaction the categories and app sorting screens use, down to the gold
+// pick glow. Geometry for the rows deliberately matches the app list: 0.5 text
+// scale, 15px icons, 4px between icon and label.
+struct GroupedAlphaRow {
+    int         group;      // AppGroup value
+    const char* label;
+    Texture**   icon;       // pointer-to-global: textures load after this is built
+    Texture**   icon2;      // optional second icon, drawn right of the first
+    const char* sep;        // text drawn between the two icons, e.g. "/"
+    float       iconDY;     // per-row nudge for the icon group (negative = up), to
+                            // optically seat an icon against its label. Moving the
+                            // icon rather than the text keeps every label on the
+                            // same baseline across rows.
+};
+
+class GroupedAlphaMenu {
+public:
+    GroupedAlphaMenu(const std::vector<GroupedAlphaRow>& rows, int screenW, int screenH)
+    : _rows(rows), _screenW(screenW), _screenH(screenH) {
+        _w = 364; _h = 178;   // wide enough for the full control row
+        _x = (_screenW - _w)/2; _y = (_screenH - _h)/2;
+    }
+
+    void primeButtons(unsigned buttons) { _lastButtons = buttons; }
+
+    // false once dismissed; accepted() then says whether to sort.
+    bool update() {
+        if (!_visible) return false;
+        const KfePad kp = kfePollPad();
+        unsigned pressed = kp.pressed;
+        _lastButtons = kp.buttons;
+
+        const int n = (int)_rows.size();
+        if (n <= 0) { _visible = false; return false; }
+
+        if (pressed & PSP_CTRL_UP) {
+            const int dst = (_sel + n - 1) % n;
+            if (_picked) std::swap(_rows[_sel], _rows[dst]);
+            _sel = dst;
+        } else if (pressed & PSP_CTRL_DOWN) {
+            const int dst = (_sel + 1) % n;
+            if (_picked) std::swap(_rows[_sel], _rows[dst]);
+            _sel = dst;
+        } else if (pressed & PSP_CTRL_CROSS) {
+            _picked = !_picked;              // Pick Up / Drop
+        } else if (pressed & PSP_CTRL_START) {
+            _accepted = true; _visible = false;
+        } else if (pressed & PSP_CTRL_CIRCLE) {
+            _accepted = false; _visible = false;
+        }
+        return _visible;
+    }
+
+    bool visible()  const { return _visible; }
+    bool accepted() const { return _accepted; }
+
+    // Group values in the order the user arranged them.
+    std::vector<int> order() const {
+        std::vector<int> o;
+        o.reserve(_rows.size());
+        for (const auto& r : _rows) o.push_back(r.group);
+        return o;
+    }
+
+    void render(intraFont* font) {
+        if (!_visible) return;
+
+        const unsigned COLOR_PANEL  = 0xD0303030;
+        const unsigned COLOR_BORDER = 0xFFFFFFFF;
+        const unsigned COLOR_DESC   = 0xFFBBBBBB;
+        const unsigned COLOR_PICKED = 0xFF8CE8FE;   // gold, as on the sorting screens
+
+        const int   textOffsetY = 4;
+        const int   padX        = 10;
+        const float titleScale  = 0.9f;
+        const float descScale   = 0.7f;
+        const float rowScale    = 0.7f;   // app list is 0.5, which reads small in a modal;
+                                          // 0.7 matches the subtitle and clears the 18px row pitch
+        const float rowIconH    = 15.0f;  // same as the app list
+        const float iconTextGap = 6.0f;   // app list uses 4; a touch more room here
+        const float lineH       = 18.0f;
+
+        static const char* kSubtitle =
+            "Re-order the app groupings below to sort the groups of alphabetized apps in the defined order.";
+
+        // Measure before drawing so the panel is sized to the wrapped subtitle
+        // rather than a guess -- otherwise an extra wrapped line pushes the rows
+        // down into the control strip.
+        // Layout is measured once, not every frame. Wrapping the subtitle alone costs
+        // one intraFontMeasureText per word, and re-doing it (plus the slot widths and
+        // the control labels) each frame is what dragged the modal well below the
+        // frame rate of the list behind it -- slow enough that a quick tap could land
+        // entirely between two polls and never register as an edge.
+        const int descLineH = (int)(22.0f * descScale + 0.5f);
+        if (font && !_layoutReady) {
+            _wrapTextG(font, descScale, kSubtitle, _w - (padX * 2), _descLines);
+            _layoutReady = true;
+        }
+        const std::vector<std::string>& descLines = _descLines;
+        const int nDesc = descLines.empty() ? 2 : (int)descLines.size();
+
+        // The rows sit a few px further below the divider. The nudge is part of the
+        // layout maths rather than draw-only, so everything below shifts with it and
+        // the same padding is kept after the last row -- the panel grows by 5px.
+        const int kRowsNudgeY  = 5;
+        const int descTopRel   = 30 + textOffsetY;
+        const int descBotRel   = descTopRel + nDesc * descLineH;
+        const int rowsTopRel   = descBotRel + 12 + kRowsNudgeY;
+        const int rowsBotRel   = rowsTopRel + (int)_rows.size() * (int)lineH;
+        const int controlsRel  = rowsBotRel + 12;
+        _h = controlsRel + 10;
+        _y = (_screenH - _h) / 2;
+
+        sceGuDisable(GU_DEPTH_TEST);
+        sceGuEnable(GU_BLEND);
+        sceGuBlendFunc(GU_ADD, GU_SRC_ALPHA, GU_ONE_MINUS_SRC_ALPHA, 0, 0);
+        _rect(0, 0, _screenW, _screenH, 0x88000000);
+        _rect(_x-1, _y-1, _w+2, _h+2, COLOR_BORDER);
+        _rect(_x,   _y,   _w,   _h,   COLOR_PANEL);
+        if (!font) return;
+
+        // Divider
+        _hFadeLineG(_x + padX, _y + descBotRel - 5, _w - (padX * 2), 1, 0x90, 16, 0x00C0C0C0);
+
+        // Rows. Icons keep their app-list size (15px tall, native aspect, so ps1 is
+        // 18 wide), which makes the groups different widths -- the two-icon row most
+        // of all. Each group is therefore centred on a shared axis and the gap to the
+        // text absorbs the difference, so every label starts at the same x.
+        const float iconX    = (float)(_x + 16);
+        // Carried from the texture pass into the text pass below.
+        unsigned rowCol[8] = {0}, rowShadow[8] = {0};
+        float rowSepX[8], rowIconYs[8] = {0};
+        for (int i = 0; i < 8; ++i) rowSepX[i] = -1.0f;
+        const float kSepPad  = 2.0f;   // around the "/" between the two icons
+        auto sepWidth = [&](const GroupedAlphaRow& r)->float {
+            if (!r.icon2) return 0.0f;
+            const char* sp = r.sep ? r.sep : "/";
+            return kSepPad + _measureTextG(font, rowScale, sp) + kSepPad;
+        };
+        auto groupWidth = [&](const GroupedAlphaRow& r)->float {
+            float w = _iconWidth(r.icon, rowIconH);
+            if (r.icon2) w += sepWidth(r) + _iconWidth(r.icon2, rowIconH);
+            return w;
+        };
+        if (_slotW <= 0.0f) {
+            for (const auto& r : _rows) {
+                const float w = groupWidth(r);
+                if (w > _slotW) _slotW = w;
+            }
+        }
+        const float slotW = _slotW;          // max over rows, so reordering cannot change it
+        const float textX = iconX + slotW + iconTextGap;
+
+        for (int i = 0; i < (int)_rows.size(); ++i) {
+            const bool sel    = (i == _sel);
+            const bool picked = sel && _picked;
+            const float rowY  = (float)(_y + rowsTopRel) + i * lineH;
+
+            // Same treatment as a selected row on the app listing screens -- the glow
+            // carries the colour, white when selected and gold once picked up -- but
+            // the knocked-out label takes the panel's own grey rather than black.
+            // Derived from COLOR_PANEL (forced opaque) so the two stay in step.
+            const unsigned COLOR_PANEL_TEXT = (COLOR_PANEL & 0x00FFFFFF) | 0xFF000000;
+            unsigned col    = sel ? COLOR_PANEL_TEXT : COLOR_WHITE;
+            unsigned shadow = sel ? COLOR_WHITE : 0;
+            if (picked) shadow = COLOR_PICKED;
+
+            const float w1 = _iconWidth(_rows[i].icon, rowIconH);
+            const float w2 = _rows[i].icon2 ? _iconWidth(_rows[i].icon2, rowIconH) : 0.0f;
+            const float gx = iconX + (slotW - groupWidth(_rows[i])) * 0.5f;
+
+            // The icon group -- both icons and the "/" between them -- always draws
+            // at its natural colour with no glow. Tinting it with the row colour
+            // would modulate gold over the artwork when a row is picked up; only
+            // the label should react to selection.
+            const float iconY = rowY + _rows[i].iconDY;
+            _drawRowIcon(_rows[i].icon, gx, iconY, rowIconH, COLOR_WHITE);
+            if (w2 > 0.0f)
+                _drawRowIcon(_rows[i].icon2, gx + w1 + sepWidth(_rows[i]), iconY, rowIconH, COLOR_WHITE);
+
+            if (i < 8) {
+                rowCol[i]    = col;
+                rowShadow[i] = shadow;
+                rowSepX[i]   = (w2 > 0.0f) ? (gx + w1 + kSepPad) : -1.0f;
+                rowIconYs[i] = iconY;
+            }
+        }
+
+        // Controls
+        const float controlsY     = (float)(_y + controlsRel);
+        const float controlsTextY = controlsY + 1.0f;
+        struct KeyText { const char* label; float x; };
+        KeyText keyText[3];
+        {
+            float cx = (float)(_x + padX);
+            auto keyIcon = [&](Texture* tex, const char* label, float texH, float* cachedW, int idx) {
+                _drawTextureScaledG(tex, cx, controlsY - 11.0f, texH, 0xFFFFFFFF);
+                float tw = 0.0f;
+                if (tex && tex->data && tex->height > 0)
+                    tw = (float)tex->width * (texH / (float)tex->height);
+                cx += tw + 6.0f;
+                keyText[idx] = { label, cx - 2.0f };
+                if (*cachedW <= 0.0f) *cachedW = _measureTextG(font, 0.7f, label);
+                cx += *cachedW + 10.0f;
+            };
+            keyIcon(okIconTexture,     "Pick Up/Drop", 15.0f, &_kwPick,  0);
+            keyIcon(startIconTexture,  "Alphabetize",  18.0f, &_kwAlpha, 1);
+            keyIcon(circleIconTexture, "Close",        15.0f, &_kwClose, 2);
+        }
+
+        // ---- text pass -----------------------------------------------------
+        // Every texture is drawn above, so the font atlas is bound exactly once
+        // here. Interleaving them re-activated the font up to eight times a frame,
+        // which is what held the modal at ~14fps against the list's 60 -- slow
+        // enough that a quick tap fell between two polls and was never seen.
+        intraFontActivate(font);
+
+        intraFontSetStyle(font, titleScale, COLOR_WHITE, 0, 0.f, INTRAFONT_ALIGN_LEFT);
+        intraFontPrint(font, (float)(_x + padX), (float)(_y + 12 + textOffsetY + 2),
+                       "Grouped Alphabetize");
+
+        int descY = _y + descTopRel;
+        intraFontSetStyle(font, descScale, COLOR_DESC, 0, 0.f, INTRAFONT_ALIGN_LEFT);
+        for (const auto& line : descLines) {
+            intraFontPrint(font, (float)(_x + padX), (float)descY, line.c_str());
+            descY += descLineH;
+        }
+
+        for (int i = 0; i < (int)_rows.size() && i < 8; ++i) {
+            const float rowY = (float)(_y + rowsTopRel) + i * lineH;
+            if (rowSepX[i] >= 0.0f) {
+                const char* sp = _rows[i].sep ? _rows[i].sep : "/";
+                intraFontSetStyle(font, rowScale, COLOR_WHITE, 0, 0.f, INTRAFONT_ALIGN_LEFT);
+                intraFontPrint(font, rowSepX[i], rowIconYs[i], sp);
+            }
+            intraFontSetStyle(font, rowScale, rowCol[i], rowShadow[i], 0.f, INTRAFONT_ALIGN_LEFT);
+            intraFontPrint(font, textX, rowY, _rows[i].label);
+        }
+
+        intraFontSetStyle(font, 0.7f, 0xFFBBBBBB, 0, 0.f, INTRAFONT_ALIGN_LEFT);
+        for (int k = 0; k < 3; ++k)
+            intraFontPrint(font, keyText[k].x, controlsTextY, keyText[k].label);
+    }
+
+private:
+    static float _iconWidth(Texture** slot, float h) {
+        Texture* t = slot ? *slot : nullptr;
+        if (!t || !t->data || t->height <= 0) return 0.0f;
+        return (float)t->width * (h / (float)t->height);
+    }
+    static void _drawRowIcon(Texture** slot, float x, float baselineY, float h, unsigned col) {
+        Texture* t = slot ? *slot : nullptr;
+        if (!t || !t->data || t->height <= 0) return;
+        // baselineY is a text baseline; lift the icon to sit centred on the row.
+        _drawTextureScaledG(t, x, baselineY - h + 3.0f, h, col);
+    }
+
+    static void _rect(int x, int y, int w, int h, unsigned color) {
+        struct V { unsigned color; short x,y,z; };
+        V* v = (V*)sceGuGetMemory(2*sizeof(V));
+        v[0] = { color, (short)x, (short)y, 0 };
+        v[1] = { color, (short)(x+w), (short)(y+h), 0 };
+        sceGuDisable(GU_TEXTURE_2D);
+        sceGuShadeModel(GU_FLAT);
+        sceGuAmbientColor(0xFFFFFFFF);
+        sceGuDrawArray(GU_SPRITES, GU_COLOR_8888 | GU_VERTEX_16BIT | GU_TRANSFORM_2D, 2, 0, v);
+    }
+
+    static float _measureTextG(intraFont* font, float size, const char* s) {
+        if (!s) return 0.0f;
+        if (!font) return (float)(strlen(s) * 8) * size;
+        intraFontSetStyle(font, size, COLOR_WHITE, 0, 0.f, INTRAFONT_ALIGN_LEFT);
+        return intraFontMeasureText(font, s);
+    }
+
+    static void _wrapTextG(intraFont* font, float scale, const char* text, int maxW,
+                           std::vector<std::string>& out) {
+        out.clear();
+        if (!text || !*text) return;
+        std::string cur;
+        const char* p = text;
+        while (*p) {
+            const char* sp = strchr(p, ' ');
+            std::string word = sp ? std::string(p, sp - p) : std::string(p);
+            std::string test = cur.empty() ? word : cur + " " + word;
+            if (!cur.empty() && _measureTextG(font, scale, test.c_str()) > (float)maxW) {
+                out.push_back(cur);
+                cur = word;
+            } else {
+                cur = test;
+            }
+            if (!sp) break;
+            p = sp + 1;
+        }
+        if (!cur.empty()) out.push_back(cur);
+    }
+
+    static void _drawTextureScaledG(Texture* t, float x, float y, float targetH, unsigned color) {
+        if (!t || !t->data || targetH <= 0.0f) return;
+        const int w = t->width, h = t->height, tbw = t->stride;
+        if (w <= 0 || h <= 0) return;
+        int th = 1; while (th < h) th <<= 1;
+        const float s = targetH / (float)h;
+        const float dw = (float)w * s, dh = targetH;
+
+        sceKernelDcacheWritebackRange(t->data, tbw * h * 4);
+        sceGuTexFlush();
+        sceGuTexMode(GU_PSM_8888, 0, 0, GU_FALSE);
+        sceGuTexFunc(GU_TFX_MODULATE, GU_TCC_RGBA);
+        sceGuTexImage(0, tbw, th, tbw, t->data);
+        sceGuTexFilter(GU_LINEAR, GU_LINEAR);
+        sceGuTexWrap(GU_CLAMP, GU_CLAMP);
+        sceGuEnable(GU_TEXTURE_2D);
+
+        struct V { float u, v; unsigned color; float x, y, z; };
+        V* vtx = (V*)sceGuGetMemory(2 * sizeof(V));
+        vtx[0] = { 0.0f, 0.0f, color, x, y, 0.0f };
+        vtx[1] = { (float)w, (float)h, color, x + dw, y + dh, 0.0f };
+        sceGuDrawArray(GU_SPRITES, GU_TEXTURE_32BITF | GU_COLOR_8888 |
+                                  GU_VERTEX_32BITF  | GU_TRANSFORM_2D, 2, nullptr, vtx);
+        sceGuDisable(GU_TEXTURE_2D);
+    }
+
+    static void _hFadeLineG(int x, int y, int w, int h, uint8_t midAlpha, int fadePx, uint32_t rgb) {
+        if (w <= 0 || h <= 0) return;
+        if (fadePx * 2 > w) fadePx = w / 2;
+        if (fadePx < 1) fadePx = 1;
+        const int steps = 6;
+        auto colWithAlpha = [&](uint8_t a)->unsigned { return (unsigned(a) << 24) | (rgb & 0x00FFFFFF); };
+        for (int i = 0; i < steps; ++i) {
+            int x0 = x + (fadePx * i) / steps, x1 = x + (fadePx * (i + 1)) / steps;
+            if (x1 - x0 > 0) _rect(x0, y, x1 - x0, h, colWithAlpha((uint8_t)((midAlpha * (i + 1)) / steps)));
+        }
+        int midW = w - (fadePx * 2);
+        if (midW > 0) _rect(x + fadePx, y, midW, h, colWithAlpha(midAlpha));
+        for (int i = 0; i < steps; ++i) {
+            int x0 = x + w - fadePx + (fadePx * i) / steps, x1 = x + w - fadePx + (fadePx * (i + 1)) / steps;
+            if (x1 - x0 > 0) _rect(x0, y, x1 - x0, h, colWithAlpha((uint8_t)((midAlpha * (steps - i)) / steps)));
+        }
+    }
+
+    std::vector<GroupedAlphaRow> _rows;
+    // Measured once on the first render and reused; none of it depends on state
+    // that changes while the modal is open.
+    bool _layoutReady = false;
+    std::vector<std::string> _descLines;
+    float _slotW  = 0.0f;
+    float _kwPick = 0.0f, _kwAlpha = 0.0f, _kwClose = 0.0f;
+    int _screenW{}, _screenH{};
+    int _x{}, _y{}, _w{}, _h{};
+    int  _sel      = 0;
+    bool _picked   = false;
+    bool _visible  = true;
+    bool _accepted = false;
+    unsigned _lastButtons = 0;
+};
+// -----------------------------------------------
+
 // -------- Generic Option List Menu (modal with title + description) --------
 struct OptionItem {
     const char* label;
@@ -2378,9 +2827,9 @@ public:
     bool update() {
         if (!_visible) return false;
         _deleteRequested = false;
-        SceCtrlData pad{}; sceCtrlReadBufferPositive(&pad, 1);
-        unsigned pressed = pad.Buttons & ~_lastButtons;
-        _lastButtons = pad.Buttons;
+        const KfePad kp = kfePollPad();
+        unsigned pressed = kp.pressed;
+        _lastButtons = kp.buttons;
 
 
         if (pressed & PSP_CTRL_UP) {

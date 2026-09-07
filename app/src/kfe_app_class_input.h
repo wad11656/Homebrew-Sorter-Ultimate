@@ -1,38 +1,48 @@
     void handleInput(){
         if (inputWaitRelease) {
-            SceCtrlData pad{}; sceCtrlReadBufferPositive(&pad, 1);
-            if (pad.Buttons == 0) inputWaitRelease = false;
+            if (kfeDrainPad() == 0) inputWaitRelease = false;
             return;
         }
 
-        SceCtrlData pad; sceCtrlReadBufferPositive(&pad, 1);
-        unsigned pressed = pad.Buttons & ~lastButtons;
+        const KfePad kp = kfePollPad();
+        SceCtrlData pad{}; pad.Buttons = kp.buttons;
+        unsigned pressed = kp.pressed;
 
         // Drive USB connection + UI while active
         if (gUsbActive) {
-            int s = sceUsbGetState();  // OR’d PSP_USB_* flags
-            // If the cable is in but not activated yet, activate now
-            if ((s & PSP_USB_CABLE_CONNECTED) && !(s & PSP_USB_ACTIVATED)) {
-                sceUsbActivate(0x1c8); // default mass storage PID
+            bool connected;
+            if (AdrUsbAvailable()) {
+                // Host side owns the connection; the PSP USB flags mean nothing here.
+                connected = AdrUsbConnected();
+            } else {
+                int s = sceUsbGetState();  // OR’d PSP_USB_* flags
+                // If the cable is in but not activated yet, activate now
+                if ((s & PSP_USB_CABLE_CONNECTED) && !(s & PSP_USB_ACTIVATED)) {
+                    sceUsbActivate(0x1c8); // default mass storage PID
+                }
+                connected = (s & PSP_USB_CONNECTION_ESTABLISHED) != 0;
             }
-            const bool connected = (s & PSP_USB_CONNECTION_ESTABLISHED);
             if (connected != gUsbShownConnected) {
                 if (gUsbBox) { delete gUsbBox; gUsbBox = nullptr; }
                 const char* usbMsg = connected
                     ? "Connected to PC\nOn PSP Go, sometimes both devices don't mount to the PC immediately. It may take 30sec-1min."
-                    : "Connect to PC...\nOn PSP Go, Bluetooth must be turned off in the System Settings.\nwarning.png Not Vita-compatible.";
+                    : usbWaitingMessage();
                 const int usbPanelH = 110;
+                const UsbPanelMetrics um = usbPanelMetrics();
                 gUsbBox = new MessageBox(
                     usbMsg,
                     circleIconTexture, SCREEN_WIDTH, SCREEN_HEIGHT, 1.0f, 15, "Disconnect",
-                    10, 18, 60, 9, 280, usbPanelH, PSP_CTRL_CIRCLE);
+                    10, 18, um.wrapTweak, um.pxPerChar, um.w, usbPanelH, PSP_CTRL_CIRCLE);
                 gUsbBox->setOkAlignLeft(true);
                 gUsbBox->setOkPosition(10, 7);
                 gUsbBox->setOkStyle(0.7f, 0xFFBBBBBB);
                 gUsbBox->setOkTextOffset(-2, -1);
                 gUsbBox->setSubtitleStyle(0.7f, 0xFFBBBBBB);
                 gUsbBox->setSubtitleGapAdjust(-8);
-                gUsbBox->setInlineIcon(warningIconTexture, "warning.png");
+                if (!AdrUsbAvailable()) {
+                    gUsbBox->setInlineIcon(warningIconTexture, KFE_WARN_TOKEN);
+                    gUsbBox->setUnderlineComparators(true);   // renders the "<7" as "≤7"
+                }
                 gUsbShownConnected = connected;
             }
         }
@@ -42,6 +52,60 @@
         //     showDebugTimes = !showDebugTimes;
         // }
         // analogUpHeld = analogUpNow;
+
+        // --- R-hold -> Grouped Alphabetize -------------------------------------
+        // Runs every frame, before any early return, so the countdown keeps
+        // ticking and a release is always seen. Only content views take part;
+        // R keeps its press-to-act meaning everywhere else.
+        {
+            const bool inContentView =
+                (!showRoots && (view == View_AllFlat || view == View_CategoryContents));
+            const bool rDown = (pad.Buttons & PSP_CTRL_RTRIGGER) != 0;
+
+            if (rDown && inContentView && !msgBox && !fileMenu && !optMenu && !groupAlphaMenu) {
+                if (!rHoldActive) {
+                    rHoldActive = true;
+                    rHoldStartUs = (unsigned long long)sceKernelGetSystemTimeWide();
+                    rHoldSuppressAlpha = false;
+                    rHoldSecondsLeft = 0;
+                } else if (!rHoldSuppressAlpha) {
+                    const unsigned long long held =
+                        (unsigned long long)sceKernelGetSystemTimeWide() - rHoldStartUs;
+                    if (held >= kGroupedAlphaPromptUs + kGroupedAlphaCountUs) {
+                        rHoldSecondsLeft = 0;
+                        rHoldSuppressAlpha = true;      // release must not also sort
+                        openGroupedAlphaMenu();
+                        return;                         // modal owns input from here
+                    } else if (held >= kGroupedAlphaPromptUs) {
+                        const unsigned long long into = held - kGroupedAlphaPromptUs;
+                        int left = 3 - (int)(into / 1000000ULL);
+                        if (left < 1) left = 1;
+                        rHoldSecondsLeft = left;        // 3 -> 2 -> 1
+                    }
+                }
+            } else if (rHoldActive) {
+                // Released (or context changed): drop the prompt, and unless the
+                // grouped modal took over, do the plain alphabetize now.
+                // Once the countdown prompt is on screen the gesture has visibly
+                // committed to Grouped Alphabetize, so letting go there cancels
+                // outright rather than quietly doing a different sort. Only a
+                // release before the prompt appears is treated as a plain tap.
+                const bool promptWasShown = (rHoldSecondsLeft > 0);
+                const bool doPlainAlpha =
+                    !rHoldSuppressAlpha && !promptWasShown && inContentView && !rDown;
+                rHoldActive = false;
+                rHoldStartUs = 0;
+                rHoldSecondsLeft = 0;
+                rHoldSuppressAlpha = false;
+                if (doPlainAlpha) {
+                    moving = false;
+                    sortWorkingListAlpha(showTitles, workingList, selectedIndex,
+                                         scrollOffset, contentVisibleRows());
+                    refillRowsFromWorkingPreserveSel();
+                    return;
+                }
+            }
+        }
 
         bool repeatUp = false, repeatDown = false;
         if (pad.Buttons & PSP_CTRL_UP) {
@@ -377,9 +441,8 @@
                     setCategorySortMode(true);
                 }
             } else if (!showRoots && (view == View_AllFlat || view == View_CategoryContents)) {
-                moving = false;
-                sortWorkingListAlpha(showTitles, workingList, selectedIndex, scrollOffset, contentVisibleRows());
-                refillRowsFromWorkingPreserveSel();
+                // Handled on release by the R-hold block above, so that holding R
+                // can open Grouped Alphabetize instead of sorting immediately.
             } else {
                 beginRenameSelected();
             }
@@ -783,17 +846,21 @@ When "Category prefix" is enabled, use this blacklist to block certain folders f
                         gUsbShownConnected = false;
                         disableHomeAnimationForUsb();
                         markAllDevicesDirty();
+                        const UsbPanelMetrics um = usbPanelMetrics();
                         gUsbBox = new MessageBox(
-                            "Connect to PC...\nOn PSP Go, Bluetooth must be turned off in the System Settings.\nwarning.png Not Vita-compatible.",
+                            usbWaitingMessage(),
                             circleIconTexture, SCREEN_WIDTH, SCREEN_HEIGHT, 1.0f, 15, "Disconnect",
-                            10, 18, 60, 9, 280, 110, PSP_CTRL_CIRCLE);
+                            10, 18, um.wrapTweak, um.pxPerChar, um.w, 110, PSP_CTRL_CIRCLE);
                         gUsbBox->setOkAlignLeft(true);
                         gUsbBox->setOkPosition(10, 7);
                         gUsbBox->setOkStyle(0.7f, 0xFFBBBBBB);
                         gUsbBox->setOkTextOffset(-2, -1);
                         gUsbBox->setSubtitleStyle(0.7f, 0xFFBBBBBB);
                         gUsbBox->setSubtitleGapAdjust(-8);
-                        gUsbBox->setInlineIcon(warningIconTexture, "warning.png");
+                        if (!AdrUsbAvailable()) {
+                            gUsbBox->setInlineIcon(warningIconTexture, KFE_WARN_TOKEN);
+                            gUsbBox->setUnderlineComparators(true);   // renders the "<7" as "≤7"
+                        }
                     }
                     return; // don’t fall through to openDevice()
                 }
@@ -933,6 +1000,25 @@ When "Category prefix" is enabled, use this blacklist to block certain folders f
         while (1) {
             renderOneFrame();
 
+            // Post-USB refresh. Reloading the animation frames and re-checking the
+            // plugin config both block for seconds, so they happen behind a modal
+            // rather than after one disappears -- navigation is live again the
+            // moment this comes down.
+            if (gUsbPostWorkPending) {
+                gUsbPostWorkPending = false;
+                pushSizedStatusModal("Refreshing...", nullptr);
+                reloadHomeAnimationsForExec();
+                // reloadHomeAnimationsForExec() only re-enumerates the animation
+                // folders -- the frames themselves are decoded lazily on the next
+                // render. Force that here so the multi-second PNG decode happens
+                // behind this modal rather than immediately after it disappears.
+                maybeStartHomeAnimation();
+                gclRunPostUsbIntegrityHeal();
+                delete msgBox; msgBox = nullptr;
+                inputWaitRelease = true;
+                continue;
+            }
+
             // One-shot deferred boot migration:
             // show main screen first, then run legacy gclite_filter conversion behind a blocking modal.
             if (gclDeferredLegacyConvertPending &&
@@ -982,8 +1068,7 @@ When "Category prefix" is enabled, use this blacklist to block certain folders f
 
             // Global debounce: wait for full release before any modal eats input
             if (inputWaitRelease) {
-                SceCtrlData pad{}; sceCtrlReadBufferPositive(&pad, 1);
-                if (pad.Buttons != 0) continue;   // keep waiting
+                if (kfeDrainPad() != 0) continue;  // keep waiting
                 inputWaitRelease = false;          // buttons now released
             }
 
@@ -1431,6 +1516,30 @@ When "Category prefix" is enabled, use this blacklist to block certain folders f
             }
 
 
+
+            // Grouped Alphabetize (modal)
+            if (groupAlphaMenu) {
+                if (!groupAlphaMenu->update()) {
+                    const bool accepted = groupAlphaMenu->accepted();
+                    const std::vector<int> order = groupAlphaMenu->order();
+                    delete groupAlphaMenu; groupAlphaMenu = nullptr;
+                    inputWaitRelease = true;
+
+                    if (accepted) {
+                        groupedAlphaOrder = order;   // remember for next time
+                        moving = false;
+                        sortWorkingListGroupedAlpha(showTitles, order, workingList,
+                                                    selectedIndex, scrollOffset,
+                                                    contentVisibleRows());
+                        refillRowsFromWorkingPreserveSel();
+                        // START is the Save button everywhere else in the app, so it
+                        // persists here too. Must follow the refill above, because
+                        // commitOrderTimestamps() re-syncs the model from the screen.
+                        commitOrderTimestamps();
+                    }
+                }
+                continue;   // modal owns input while open
+            }
 
             // File ops menu (modal)
             if (fileMenu) {
