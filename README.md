@@ -52,7 +52,7 @@ Successor to [HomeBrew Sorter GUI](https://www.gamebrew.org/wiki/HomeBrew_Sorter
 #### <ins>Known Limitations</ins>:
 - On PSP Go, you must run the app from Memory Stick to access Memory Stick storage.
 - App file/folder names containing non-ASCII characters (e.g., `™`, `Æ`, `®`) cannot populate in the app. (Even though ISOs with non-ASCII characters in the filename can still successfully boot from the XMB.)
-- On Adrenaline, in-app USB Mode is not supported.
+- ~On Adrenaline, in-app USB Mode is not supported.~ USB Mode supported on Adrenaline 8.
 - On vanilla (non-ARK) Adrenaline, the Game Categories plugin may require enabling the "Category prefix" plugin System Setting for it to start working.
 - On vanilla (non-ARK) Adrenaline and LME CFW, the Game Categories plugin does not merge Category folders that share the same name across `/ISO` and `/PSP/GAME`.
 
