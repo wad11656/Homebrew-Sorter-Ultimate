@@ -21,7 +21,7 @@ Successor to [HomeBrew Sorter GUI](https://www.gamebrew.org/wiki/HomeBrew_Sorter
 
 <img width="480" height="272" alt="Image" src="https://github.com/user-attachments/assets/941bd80d-e937-4f65-85ac-3e3cfefe1dc5" />
 
-### 3. PSP Go and Adrenaline v8 Support (Memory Stick & System Storage)
+### 3. System Storage Support (PSP Go & Epinephrine 8)
 
 <img width="480" height="272" alt="Image" src="https://github.com/user-attachments/assets/5526f8af-d245-4325-a0dd-e456fceff37e" />
 
