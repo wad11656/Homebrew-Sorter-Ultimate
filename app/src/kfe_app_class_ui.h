@@ -1249,6 +1249,8 @@ private:
     unsigned lastButtons = 0;
     unsigned long long upHoldStartUS   = 0, upLastRepeatUS   = 0;
     unsigned long long downHoldStartUS = 0, downLastRepeatUS = 0;
+    unsigned long long leftHoldStartUS  = 0, leftLastRepeatUS  = 0;
+    unsigned long long rightHoldStartUS = 0, rightLastRepeatUS = 0;
 
     // Cache of entries that have no embedded icon; use placeholder and don't retry.
     std::unordered_set<std::string> noIconPaths;

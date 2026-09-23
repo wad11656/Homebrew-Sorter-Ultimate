@@ -267,6 +267,11 @@ static uint32_t gOskBgColorABGR = 0xFF685020;
 #define REPEAT_ACCEL_AFTER_US    800000ULL
 #define REPEAT_INTERVAL_FAST_US   16000ULL
 
+// Left/Right page-jump on the app list: 10 rows a step, repeating at 65% of the
+// Up/Down rate so a held jump does not fly off the end of a long list.
+#define PAGE_JUMP_ROWS                  10
+#define PAGE_JUMP_REPEAT_SPEED_PCT      65
+
 // ---------------------------------------------------------------
 // Adrenaline / ePSP USB bridge
 // ---------------------------------------------------------------

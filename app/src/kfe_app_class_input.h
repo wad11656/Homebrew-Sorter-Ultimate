@@ -120,6 +120,22 @@
             else { downHoldStartUS = nowUS(); downLastRepeatUS = 0; }
         } else { downHoldStartUS = 0; downLastRepeatUS = 0; }
 
+        // Left/Right page-jump repeat runs at a reduced rate (see the constant).
+        bool repeatLeft = false, repeatRight = false;
+        if (pad.Buttons & PSP_CTRL_LEFT) {
+            if ((pressed & PSP_CTRL_LEFT) == 0)
+                repeatLeft = shouldRepeat(PSP_CTRL_LEFT, leftHoldStartUS, leftLastRepeatUS,
+                                          PAGE_JUMP_REPEAT_SPEED_PCT);
+            else { leftHoldStartUS = nowUS(); leftLastRepeatUS = 0; }
+        } else { leftHoldStartUS = 0; leftLastRepeatUS = 0; }
+
+        if (pad.Buttons & PSP_CTRL_RIGHT) {
+            if ((pressed & PSP_CTRL_RIGHT) == 0)
+                repeatRight = shouldRepeat(PSP_CTRL_RIGHT, rightHoldStartUS, rightLastRepeatUS,
+                                           PAGE_JUMP_REPEAT_SPEED_PCT);
+            else { rightHoldStartUS = nowUS(); rightLastRepeatUS = 0; }
+        } else { rightHoldStartUS = 0; rightLastRepeatUS = 0; }
+
         if ((pad.Buttons & PSP_CTRL_SQUARE) == 0) {
             bulkSquareUncheck = false;
         }
@@ -616,6 +632,18 @@
         }
 
 
+
+        // LEFT/RIGHT page-jump: skip PAGE_JUMP_ROWS rows at a time. App listing
+        // screens only -- the category/root/settings views leave Left/Right alone.
+        // Square + Left/Right is bulk select, handled above, so ignore it here.
+        if (!showRoots && (view == View_AllFlat || view == View_CategoryContents) &&
+            (pad.Buttons & PSP_CTRL_SQUARE) == 0)
+        {
+            int jump = 0;
+            if ((pressed & PSP_CTRL_LEFT)  || repeatLeft)  jump -= PAGE_JUMP_ROWS;
+            if ((pressed & PSP_CTRL_RIGHT) || repeatRight) jump += PAGE_JUMP_ROWS;
+            if (jump != 0) { contentJumpRows(jump); return; }
+        }
 
         // UP navigation
         if ((pressed & PSP_CTRL_UP) || repeatUp) {

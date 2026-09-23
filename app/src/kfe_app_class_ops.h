@@ -2,9 +2,13 @@
     static unsigned long long nowUS() {
         return (unsigned long long)sceKernelGetSystemTimeWide();
     }
+    // speedPct scales the repeat RATE: 100 = the normal Up/Down cadence, 65 = 65%
+    // as fast (a proportionally longer interval). The initial hold delay before
+    // repeating starts is deliberately left alone so a jump still feels immediate.
     bool shouldRepeat(unsigned btnMask,
                       unsigned long long& holdStart,
-                      unsigned long long& lastRepeat) {
+                      unsigned long long& lastRepeat,
+                      unsigned speedPct = 100) {
         if ((lastButtons & btnMask) == 0) {
             if (holdStart == 0) holdStart = nowUS();
             lastRepeat = 0;
@@ -15,12 +19,44 @@
         unsigned long long interval = (tnow - holdStart >= REPEAT_ACCEL_AFTER_US)
                                       ? REPEAT_INTERVAL_FAST_US
                                       : REPEAT_INTERVAL_US;
+        if (speedPct > 0 && speedPct != 100) interval = interval * 100ULL / speedPct;
         if (lastRepeat == 0 || (tnow - lastRepeat) >= interval) {
             lastRepeat = tnow;
             return true;
         }
         return false;
     }
+    // Move the app-list cursor by `delta` rows, clamped to the list bounds. While
+    // holding a row (moving), the row itself is carried along so the jump reorders
+    // by the same number of slots instead of abandoning the pick.
+    void contentJumpRows(int delta) {
+        if (delta == 0) return;
+        const int n = moving ? (int)workingList.size() : (int)entries.size();
+        if (n <= 0 || selectedIndex < 0) return;
+
+        int target = selectedIndex + delta;
+        if (target < 0)      target = 0;
+        if (target > n - 1)  target = n - 1;
+        if (target == selectedIndex) return;
+
+        if (moving) {
+            const int step = (target > selectedIndex) ? 1 : -1;
+            while (selectedIndex != target) {
+                std::swap(workingList[selectedIndex], workingList[selectedIndex + step]);
+                selectedIndex += step;
+            }
+            refillRowsFromWorkingPreserveSel();
+        } else {
+            selectedIndex = target;
+        }
+
+        const int visible = contentVisibleRows();
+        if (selectedIndex < scrollOffset)                scrollOffset = selectedIndex;
+        if (visible > 0 && selectedIndex >= scrollOffset + visible)
+            scrollOffset = selectedIndex - visible + 1;
+        if (scrollOffset < 0) scrollOffset = 0;
+    }
+
     // Returns the extracted/cached game title for a given source path,
     // preferring the pre-op snapshot so titles stay stable across the op.
     // Returns "" if no title is known.
