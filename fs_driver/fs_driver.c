@@ -246,6 +246,36 @@ int pspLedSuppressStop(void) {
 	return 0;
 }
 
+// Turns the HOME button off (0) or back on (1). Masks HOME in the controller
+// driver itself, and also switches off the HOME menu. The CFW resolves the NIDs,
+// which are randomized in the 6.xx driver libraries.
+// Returns bit 0 = HOME mask applied, bit 1 = HOME menu call found.
+#define NID_CTRL_SET_BUTTON_MASKS 0x7CA723DC
+#define NID_IMPOSE_SET_HOME_POPUP 0x5595A71A
+#define KFE_CTRL_HOME             0x00010000
+int pspSetHomePopup(int enable) {
+	u32 k1 = pspSdkSetK1(0);
+	int level = sctrlKernelSetUserLevel(8);
+	int ret = 0;
+
+	u32 mask = sctrlHENFindFunction("sceController_Service", "sceCtrl_driver", NID_CTRL_SET_BUTTON_MASKS);
+	if (mask) {
+		((void (*)(unsigned int, unsigned int))mask)(KFE_CTRL_HOME, enable ? 0 : 1);
+		ret |= 1;
+	}
+
+	u32 popup = sctrlHENFindFunction("sceImpose_Driver", "sceImpose_driver", NID_IMPOSE_SET_HOME_POPUP);
+	if (!popup) popup = sctrlHENFindFunction("sceImpose_Driver", "sceImpose", NID_IMPOSE_SET_HOME_POPUP);
+	if (popup) {
+		((int (*)(int))popup)(enable);
+		ret |= 2;
+	}
+
+	pspSdkSetK1(k1);
+	sctrlKernelSetUserLevel(level);
+	return ret;
+}
+
 int module_start(SceSize args, void *argp) {
 	return 0;
 }

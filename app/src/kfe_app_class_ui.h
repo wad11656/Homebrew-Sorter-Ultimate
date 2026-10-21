@@ -37,6 +37,10 @@ private:
     Texture* categoryIconTex = nullptr;
     std::string categoryIconKey;
     bool categoryIconMissing = false;
+    // Where each category's ICON0.PNG lives ("" = none), keyed by device + folder
+    // name. Paths only, like the scan's per-item iconPath; spares a directory
+    // listing of the category on every move. Filled and reset by scanDevice().
+    std::unordered_map<std::string, std::string> categoryIconPathMemo;
 
 
     // Per-row flags (roots view)
@@ -243,7 +247,7 @@ private:
             for (const auto& sub : subs) {
                 if (isBlacklistedCategoryFolderNoRename(rootLabel, sub, absRoot)) continue;
                 std::string subAbs = joinDirFile(absRoot, sub.c_str());
-                if (!findEbootCaseInsensitive(subAbs).empty()) continue;
+                if (isGameContentFolder(subAbs)) continue; // games + TG16 are never categories
                 std::string baseName = stripCategoryPrefixes(sub, gclCfg.catsort != 0);
                 FolderModeCatInfo* info = findCatInfo(baseName);
                 if (!info) {
@@ -510,7 +514,7 @@ private:
                 listSubdirs(abs, subs);
                 for (auto &sub : subs) {
                     std::string subAbs = joinDirFile(abs, sub.c_str());
-                    if (!findEbootCaseInsensitive(subAbs).empty()) continue; // skip real games
+                    if (isGameContentFolder(subAbs)) continue; // skip real games + TG16
                     std::string base = stripCategoryPrefixes(sub, stripNumbers);
                     if (base.empty()) continue;
                     chooseDiskName(base, sub);
@@ -547,7 +551,7 @@ private:
                 // Category display name changed -> update each GameItem.path
                 std::vector<GameItem> moved = std::move(kv.second);
                 for (auto &gi : moved) {
-                    replaceCatSegmentInPath(oldCat, want, gi.path);
+                    replaceCatSegmentInItem(oldCat, want, gi);
                 }
                 oldToNew.emplace_back(oldCat, want);
                 newCats.emplace(want, std::move(moved));
@@ -638,7 +642,7 @@ private:
                 if (strcasecmp(disp.c_str(), want.c_str()) != 0) {
                     std::vector<GameItem> moved = kv.second; // copy; snapshot not moved-from elsewhere
                     for (auto &gi : moved) {
-                        replaceCatSegmentInPath(disp, want, gi.path);
+                        replaceCatSegmentInItem(disp, want, gi);
                     }
                     snapNewCats.emplace(want, std::move(moved));
                 } else {
@@ -803,7 +807,7 @@ private:
             for (auto& sub : subs) {
                 // Skip real game folders; only consider category folders
                 std::string subAbs = joinDirFile(absRoot, sub.c_str());
-                if (!findEbootCaseInsensitive(subAbs).empty()) continue; // global helper is already visible
+                if (isGameContentFolder(subAbs)) continue; // skip real games + TG16
                 if (!strcasecmp(stripCategoryPrefixes(sub).c_str(), base.c_str())) {
                     return sub; // enforced on-disk name we want
                 }
@@ -911,6 +915,8 @@ private:
         std::string src = joinDirFile(absRoot, from.c_str());
         std::string dst = joinDirFile(absRoot, to.c_str());
         if (!dirExists(src) || !dirExists(dst)) return false;
+        // Never fold a TurboGrafx16 folder into anything, or anything into one.
+        if (isTurboGrafx16Folder(src) || isTurboGrafx16Folder(dst)) return false;
 
         logInit();
         logf("cat merge: %s -> %s", src.c_str(), dst.c_str());
@@ -933,7 +939,7 @@ private:
         for (const auto &sub : subs) {
             if (strcasecmp(stripCategoryPrefixes(sub, stripNumbers).c_str(), base.c_str()) != 0) continue;
             std::string subAbs = joinDirFile(absRoot, sub.c_str());
-            if (!findEbootCaseInsensitive(subAbs).empty()) continue; // skip real games
+            if (isGameContentFolder(subAbs)) continue; // skip real games + TG16 (never renamed)
             matches.push_back(sub);
         }
         if (matches.empty()) return;
@@ -969,21 +975,29 @@ private:
         }
     }
 
-    // Rename “from”→“to” if it exists and differs (ignores case-only changes)
-    static void renameIfExists(const std::string& root, const std::string& from, const std::string& to){
-        if (!strcasecmp(from.c_str(), to.c_str())) return;
+    // Rename “from”→“to” if it exists and differs (ignores case-only changes).
+    // TurboGrafx16 folders are never renamed, whatever the caller thinks they are.
+    // Returns true only when the folder was actually renamed.
+    static bool renameIfExists(const std::string& root, const std::string& from, const std::string& to){
+        if (!strcasecmp(from.c_str(), to.c_str())) return false;
         std::string a = joinDirFile(root, from.c_str());
         std::string b = joinDirFile(root, to.c_str());
-        if (dirExists(a)) {
-            int rc = sceIoRename(a.c_str(), b.c_str());
-            if (rc >= 0) {
-                updateHiddenAppPathsForFolderRename(root, from, to);
-            } else {
-                logInit();
-                logf("renameIfExists FAIL: %s -> %s rc=%d", a.c_str(), b.c_str(), rc);
-                logClose();
-            }
+        if (!dirExists(a)) return false;
+        if (isTurboGrafx16Folder(a)) {
+            logInit();
+            logf("renameIfExists SKIP (TG16): %s -> %s", a.c_str(), b.c_str());
+            logClose();
+            return false;
         }
+        int rc = sceIoRename(a.c_str(), b.c_str());
+        if (rc >= 0) {
+            updateHiddenAppPathsForFolderRename(root, from, to);
+            return true;
+        }
+        logInit();
+        logf("renameIfExists FAIL: %s -> %s rc=%d", a.c_str(), b.c_str(), rc);
+        logClose();
+        return false;
     }
 
     // Enforce naming/numbering for category folders on a device, obeying rules:
@@ -1016,10 +1030,10 @@ private:
             std::vector<std::string> subs;
             listSubdirs(absRoot, subs);
             for (auto &sub : subs){
-                if (isBlacklistedCategoryFolder(rootLabel, sub, absRoot, forceStripNumbers)) continue;
-                // Skip real game folders
+                // Skip real game folders and TG16 folders first, so nothing below can rename them
                 std::string subAbs = joinDirFile(absRoot, sub.c_str());
-                if (!findEbootCaseInsensitive(subAbs).empty()) continue;
+                if (isGameContentFolder(subAbs)) continue;
+                if (isBlacklistedCategoryFolder(rootLabel, sub, absRoot, forceStripNumbers)) continue;
 
                 std::string base = stripCategoryPrefixes(sub, stripNumbers);
                 baseSet.insert(base);
@@ -1413,7 +1427,7 @@ private:
                 std::string newCat = formatCategoryNameFromBase(base, assigned[base]);
                 if (strcasecmp(oldCat.c_str(), newCat.c_str()) != 0) {
                     std::vector<GameItem> moved = std::move(kv.second);
-                    for (auto &gi : moved) replaceCatSegmentInPath(oldCat, newCat, gi.path);
+                    for (auto &gi : moved) replaceCatSegmentInItem(oldCat, newCat, gi);
                     oldToNew.emplace_back(oldCat, newCat);
                     newCats.emplace(newCat, std::move(moved));
                 } else {
@@ -1678,7 +1692,7 @@ private:
                 if (isBlacklistedCategoryFolderNoRename(rootLabel, categoryName, absRoot)) continue;
 
                 const std::string categoryPath = joinDirFile(absRoot, categoryName.c_str());
-                if (!findEbootCaseInsensitive(categoryPath).empty()) continue;
+                if (isGameContentFolder(categoryPath)) continue;
 
                 const int allowedLeafLen = GCL_FOLDERS_MAX_PATH_NAME_SUM - (int)categoryName.size();
                 if (allowedLeafLen < 1) return false;
@@ -2171,6 +2185,17 @@ private:
     }
 
 
+    // Category rename for a cached item: the scan-time icon paths live under the
+    // same category folder, so they must follow gi.path or every icon load misses
+    // and falls back to listing the folder on disk.
+    static void replaceCatSegmentInItem(const std::string& oldCat,
+                                        const std::string& newCat,
+                                        GameItem& gi) {
+        replaceCatSegmentInPath(oldCat, newCat, gi.path);
+        if (!gi.iconPath.empty()) replaceCatSegmentInPath(oldCat, newCat, gi.iconPath);
+        if (!gi.pbpPath.empty())  replaceCatSegmentInPath(oldCat, newCat, gi.pbpPath);
+    }
+
     static void replaceCatSegmentInPath(const std::string& oldCat,
                                         const std::string& newCat,
                                         std::string& pathInOut) {
@@ -2229,7 +2254,7 @@ private:
 
             std::vector<GameItem> moved = std::move(it->second);
             cats.erase(it);
-            for (auto &gi : moved) replaceCatSegmentInPath(oldCat, newCat, gi.path);
+            for (auto &gi : moved) replaceCatSegmentInItem(oldCat, newCat, gi);
             auto& dst = cats[newCat];
             dst.clear();
             for (auto &gi : moved) snapInsertSorted(dst, gi);
@@ -2706,7 +2731,7 @@ private:
         drawRect(0, 0, SCREEN_WIDTH, bannerH, COLOR_BANNER);
 
         std::string leftLabel = "Homebrew Sorter Ultimate";
-        std::string leftLabelMutedSuffix = " v1.28";
+        std::string leftLabelMutedSuffix = " v1.29";
         Texture* deviceIcon = nullptr;
         bool underlineLabel = false;
         const bool opHeader = (actionMode != AM_None &&
@@ -2883,7 +2908,8 @@ private:
         if (!strcasecmp(cat.c_str(), "Uncategorized")) return {};
         if (currentDevice.empty()) return {};
 
-        const char* roots[] = {"ISO/","PSP/GAME/","PSP/GAME150/","PSP/GAME/PSX/","PSP/GAME/Utility/"};
+        // Same order as scanDevice(), so the first ICON0 found matches what the scan recorded.
+        const char* roots[] = {"ISO/","PSP/GAME/","PSP/GAME/PSX/","PSP/GAME/Utility/","PSP/GAME150/"};
         for (const char* r : roots) {
             std::string dir = currentDevice + std::string(r) + cat;
             if (!dirExists(dir)) continue;
@@ -2904,7 +2930,15 @@ private:
         if (key == categoryIconKey && (categoryIconTex || categoryIconMissing)) return;
 
         freeCategoryIcon();
-        std::string iconPath = findCategoryIconPath(key);
+        const std::string memoKey = rootPrefix(currentDevice) + key;
+        auto memo = categoryIconPathMemo.find(memoKey);
+        std::string iconPath;
+        if (memo != categoryIconPathMemo.end()) {
+            iconPath = memo->second;
+        } else {
+            iconPath = findCategoryIconPath(key);
+            categoryIconPathMemo[memoKey] = iconPath;
+        }
         if (iconPath.empty()) {
             categoryIconKey = key;
             categoryIconMissing = true;

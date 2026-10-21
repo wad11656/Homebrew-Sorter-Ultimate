@@ -51,6 +51,14 @@
         }
     }
 
+    // The scan already lists every category folder, so record its ICON0.PNG
+    // there instead of listing the folder again when the category is selected.
+    void noteCategoryIcon(const std::string& base, const std::string& cat, const std::string& fileName) {
+        if (strcasecmp(fileName.c_str(), "ICON0.PNG") != 0) return;
+        std::string& slot = categoryIconPathMemo[rootPrefix(base) + cat];
+        if (slot.empty()) slot = joinDirFile(base + cat, fileName.c_str());
+    }
+
     void scanIsoRootDir(const std::string& base){
         if (!dirExists(base)) return;
         forEachEntry(base, [&](const SceIoDirent &e){
@@ -68,6 +76,7 @@
                     maybeRenderPopulating();
                     if (!FIO_S_ISDIR(ee.d_stat.st_mode)){
                         std::string fn = ee.d_name;
+                        noteCategoryIcon(base, name, fn);
                         if (isIsoLike(fn)){
                             GameItem gi; gi.kind = GameItem::ISO_FILE;
                             gi.label = fn;
@@ -137,8 +146,8 @@
             std::string baseName = stripCategoryPrefixes(name);
             bool isBlacklisted = isBlacklistedBaseNameFor(base, baseName);
             if (isBlacklisted && strcasecmp(name.c_str(), baseName.c_str()) != 0) {
-                renameIfExists(base, name, baseName);
-                name = baseName;
+                // renameIfExists refuses TurboGrafx16 folders; keep the on-disk name then.
+                if (renameIfExists(base, name, baseName)) name = baseName;
             }
 
             // If the folder itself contains a PBP (EBOOT/PARAM/PBOOT), treat it as a stand-alone game (UNCATEGORIZED).
@@ -175,6 +184,7 @@
             std::string catDir = base + name;
             forEachEntry(catDir, [&](const SceIoDirent &sub){
                 maybeRenderPopulating();
+                if (!FIO_S_ISDIR(sub.d_stat.st_mode)) noteCategoryIcon(base, name, sub.d_name);
                 if (FIO_S_ISDIR(sub.d_stat.st_mode)){
                     std::string title = sub.d_name;
                     std::string folderNoSlash = joinDirFile(catDir, title.c_str());
@@ -214,6 +224,7 @@
 
     void scanDevice(const std::string& dev){
             resetLists();
+            categoryIconPathMemo.clear();
             gclLoadBlacklistFor(dev);
 
         const char* isoRoots[]  = {"ISO/"};
@@ -222,6 +233,9 @@
             for (size_t i=0;i<sizeof(isoRoots)/sizeof(isoRoots[0]);++i)  scanIsoRootDir(dev + std::string(isoRoots[i]));
             for (size_t i=0;i<sizeof(gameRoots)/sizeof(gameRoots[0]);++i) scanGameRootDir(dev + std::string(gameRoots[i]));
 
+
+            // Every category folder was just listed; any without an ICON0 has none.
+            for (auto &kv : categories) categoryIconPathMemo.emplace(rootPrefix(dev) + kv.first, std::string());
 
             // Show categories view when Game Categories is enabled OR when category folders exist
             if (!categories.empty() || gclArkOn || gclProOn) hasCategories = true;
@@ -3228,7 +3242,7 @@
             iconCarryTex = nullptr;
             iconCarryForPath.clear();
         }
-        noIconPaths.clear();
+        noIconPaths.clear();   // scanDevice() above already reset categoryIconPathMemo
 
         delete msgBox; msgBox = nullptr;
     }
@@ -4046,6 +4060,36 @@ each Category+App folder name.)");
         if (sel >= (int)entries.size()) sel = -1;
         selectedIndex = sel;
         scrollOffset = 0;
+    }
+
+    // Complete repopulate, as if the device were being opened for the first time.
+    // The CAT_/XX scheme is applied on disk *before* the scan, so the scan reads
+    // the final folder names; otherwise the cache gets renumbered in memory only
+    // (e.g. CAT_03 -> CAT_01 after deleting CAT_01) and its paths point nowhere.
+    void repopulateDeviceFromScratch(const std::string& dev) {
+        std::vector<std::string> devs{ rootPrefix(dev) };
+        if (hasSystemStorage()) {
+            const std::string other = oppositeRootOf(dev);
+            if (!other.empty()) devs.push_back(rootPrefix(other));
+        }
+        for (const auto& d : devs) {
+            if (gclArkOn || gclProOn) enforceCategorySchemeForDevice(d);
+            gclSchemeApplied.erase(d);
+            s_catNamingEnforced.erase(d);
+            markDeviceDirty(d);
+        }
+
+        freeSelectionIcon();
+        freeCategoryIcon();
+        if (iconCarryTex) {
+            texFree(iconCarryTex);
+            iconCarryTex = nullptr;
+            iconCarryForPath.clear();
+        }
+        noIconPaths.clear();
+        selectionIconRetryAtUs = 0;
+
+        openDevice(dev);
     }
 
     void openDevice(const std::string& dev){

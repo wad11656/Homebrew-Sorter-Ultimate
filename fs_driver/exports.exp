@@ -29,6 +29,7 @@ PSP_EXPORT_FUNC(pspIoDevctl)
 PSP_EXPORT_FUNC(pspSysconCtrlLED)
 PSP_EXPORT_FUNC(pspLedSuppressStart)
 PSP_EXPORT_FUNC(pspLedSuppressStop)
+PSP_EXPORT_FUNC(pspSetHomePopup)
 PSP_EXPORT_END
 
 PSP_END_EXPORTS

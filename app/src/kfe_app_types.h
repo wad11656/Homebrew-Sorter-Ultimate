@@ -1460,6 +1460,35 @@ bool sfoExtractTitle(const uint8_t* data, size_t size, std::string& outTitle) {
     return false;
 }
 
+// PARAM.SFO CATEGORY ("ME" = PS1, "MG" = homebrew, ...), parsed from memory.
+static bool sfoExtractCategory(const uint8_t* data, size_t size, std::string& outCategory) {
+    if (!data || size < sizeof(SFOHeader)) return false;
+    const SFOHeader* h = (const SFOHeader*)data;
+    if (h->magic != 0x46535000) return false; // 'PSF\0'
+    if (sizeof(SFOHeader) + h->indexCount * sizeof(SFOIndex) > size) return false;
+    if (h->keyTableOffset >= size || h->dataTableOffset >= size) return false;
+
+    const SFOIndex* idx = (const SFOIndex*)(data + sizeof(SFOHeader));
+    for (uint32_t i = 0; i < h->indexCount; i++) {
+        const size_t keyAt = (size_t)h->keyTableOffset + idx[i].keyOffset;
+        if (keyAt + sizeof("CATEGORY") > size) continue;
+        if (memcmp(data + keyAt, "CATEGORY", sizeof("CATEGORY")) != 0) continue;
+        const size_t valAt = (size_t)h->dataTableOffset + idx[i].dataOffset;
+        size_t len = idx[i].dataLen;
+        if (len > 15) len = 15;
+        if (valAt + len > size) return false;
+        outCategory.assign((const char*)data + valAt, len);
+        while (!outCategory.empty() && outCategory.back() == '\0') outCategory.pop_back();
+        return true;
+    }
+    return false;
+}
+
+// CATEGORY per "<folder>/EBOOT.PBP", for the [PS1]/[HB] row labels. Seeded by the
+// scan from the PARAM.SFO it already reads for the title, so scrolling a list
+// never has to open an EBOOT.
+static std::map<std::string, std::string> categoryCache;
+
 static std::string findFileCaseInsensitive(const std::string& dirNoSlash, const char* wantName) {
     std::string dpath = dirNoSlash;
     if (!dpath.empty() && dpath.back() == '/') dpath.pop_back();
@@ -1542,6 +1571,11 @@ static bool isGameContentFolder(const std::string& folderNoSlash,
 
 // Read title from folder
 static bool getFolderTitle(const std::string& folderNoSlash, std::string& outTitle) {
+    // Record CATEGORY from the same SFO bytes, so the row labels need no disk access.
+    auto noteCategory = [&](const uint8_t* data, size_t size) {
+        std::string cat;
+        if (sfoExtractCategory(data, size, cat)) categoryCache[folderNoSlash + "/EBOOT.PBP"] = cat;
+    };
     std::string sfoPath = findFileCaseInsensitive(folderNoSlash, "PARAM.SFO");
     if (!sfoPath.empty()) {
         SceUID fd = sceIoOpen(sfoPath.c_str(), PSP_O_RDONLY, 0);
@@ -1550,6 +1584,7 @@ static bool getFolderTitle(const std::string& folderNoSlash, std::string& outTit
                 std::vector<uint8_t> buf((size_t)st.st_size);
                 if (readAll(fd, buf.data(), buf.size())) {
                     sceIoClose(fd);
+                    noteCategory(buf.data(), buf.size());
                     if (sfoExtractTitle(buf.data(), buf.size(), outTitle)) return true;
                 } else sceIoClose(fd);
             } else sceIoClose(fd);
@@ -1587,11 +1622,13 @@ static bool getFolderTitle(const std::string& folderNoSlash, std::string& outTit
                     if (!readAt(fd, start, buf.data(), buf.size())) { sceIoClose(fd); return false; }
                     sceIoClose(fd);
 
+                    noteCategory(buf.data(), buf.size());
                     if (sfoExtractTitle(buf.data(), buf.size(), outTitle)) return true;
 
                     static const uint8_t PSF_MAGIC[4] = { 'P','S','F','\0' };
                     for (size_t i = 0; i + 4 <= buf.size(); i += 4) {
                         if (memcmp(&buf[i], PSF_MAGIC, 4) == 0) {
+                            noteCategory(buf.data() + i, buf.size() - i);
                             if (sfoExtractTitle(buf.data() + i, buf.size() - i, outTitle)) return true;
                         }
                     }
@@ -1766,80 +1803,28 @@ static void deleteCategoryDirs(const std::string& device, const std::string& cat
 // ---------------------------------------------------------------
 // EBOOT.PBP Category Reader (for PS1 vs Homebrew detection)
 // ---------------------------------------------------------------
+// Fallback for EBOOTs the scan did not see (the scan normally seeds categoryCache).
+// Two reads -- PBP header, then the whole PARAM.SFO -- instead of seeking around
+// the file a few bytes at a time.
 static std::string readEbootCategory(const std::string& ebootPath) {
-    SceUID fd = sceIoOpen(ebootPath.c_str(), PSP_O_RDONLY, 0777);
+    SceUID fd = sceIoOpen(ebootPath.c_str(), PSP_O_RDONLY, 0);
     if (fd < 0) return "";
-
-    // Read PBP header magic
-    char magic[4];
-    if (sceIoRead(fd, magic, 4) != 4 || memcmp(magic, "\x00PBP", 4) != 0) {
-        sceIoClose(fd);
-        return "";
-    }
-
-    // Read SFO offset at offset 8
-    sceIoLseek(fd, 8, PSP_SEEK_SET);
-    uint32_t sfoOffset;
-    if (sceIoRead(fd, &sfoOffset, 4) != 4) {
-        sceIoClose(fd);
-        return "";
-    }
-
-    // Go to SFO and check magic
-    sceIoLseek(fd, sfoOffset, PSP_SEEK_SET);
-    char sfoMagic[4];
-    if (sceIoRead(fd, sfoMagic, 4) != 4 || memcmp(sfoMagic, "\x00PSF", 4) != 0) {
-        sceIoClose(fd);
-        return "";
-    }
-
-    // Read SFO header
-    sceIoLseek(fd, sfoOffset + 8, PSP_SEEK_SET);
-    uint32_t keyTableOffset, dataTableOffset, numEntries;
-    sceIoRead(fd, &keyTableOffset, 4);
-    sceIoRead(fd, &dataTableOffset, 4);
-    sceIoRead(fd, &numEntries, 4);
-
-    // Read entries to find CATEGORY
-    for (uint32_t i = 0; i < numEntries; i++) {
-        sceIoLseek(fd, sfoOffset + 20 + i * 16, PSP_SEEK_SET);
-        uint16_t keyOffset;
-        uint16_t dataFmt;
-        uint32_t dataLen;
-        uint32_t dataMax;
-        uint32_t dataOffset;
-
-        sceIoRead(fd, &keyOffset, 2);
-        sceIoRead(fd, &dataFmt, 2);
-        sceIoRead(fd, &dataLen, 4);
-        sceIoRead(fd, &dataMax, 4);
-        sceIoRead(fd, &dataOffset, 4);
-
-        // Read key name
-        sceIoLseek(fd, sfoOffset + keyTableOffset + keyOffset, PSP_SEEK_SET);
-        char keyName[32] = {0};
-        for (int j = 0; j < 31; j++) {
-            char c;
-            if (sceIoRead(fd, &c, 1) != 1 || c == 0) break;
-            keyName[j] = c;
-        }
-
-        if (strcmp(keyName, "CATEGORY") == 0) {
-            // Read CATEGORY value
-            sceIoLseek(fd, sfoOffset + dataTableOffset + dataOffset, PSP_SEEK_SET);
-            char category[16] = {0};
-            sceIoRead(fd, category, std::min(dataLen, (uint32_t)15));
-            sceIoClose(fd);
-            return std::string(category);
-        }
-    }
-
+    uint8_t hdr[4 + 4 + 8*4];
+    if (!readAll(fd, hdr, sizeof(hdr)) || memcmp(hdr, "\0PBP", 4) != 0) { sceIoClose(fd); return ""; }
+    auto r32 = [](const uint8_t* p)->uint32_t {
+        return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+    };
+    const uint32_t start = r32(hdr + 8);    // PARAM.SFO
+    const uint32_t next  = r32(hdr + 12);   // ICON0.PNG follows it
+    if (start < sizeof(hdr) || next <= start || next - start > 64 * 1024) { sceIoClose(fd); return ""; }
+    std::vector<uint8_t> sfo(next - start);
+    const bool ok = readAt(fd, start, sfo.data(), sfo.size());
     sceIoClose(fd);
-    return "";
+    std::string cat;
+    if (ok) sfoExtractCategory(sfo.data(), sfo.size(), cat);
+    return cat;
 }
 
-// Per-frame cache to avoid reading same EBOOT multiple times in one frame
-static std::map<std::string, std::string> categoryCache;
 
 // ---------------------------------------------------------------
 // Model types + label mode
@@ -1925,6 +1910,7 @@ uint64_t bytesNeededForMove(const std::vector<std::string>& srcPaths,
 class KernelFileExplorer;
 
 struct KfeFileOps {
+    static void renderProgress(KernelFileExplorer* self) ;
     static void resetCriticalGuardFailure() ;
     static bool hasCriticalGuardFailure() ;
     static bool sameDevice(const std::string& a, const std::string& b) ;
@@ -1961,6 +1947,25 @@ struct ClockGuard {
     }
     void boost333() { scePowerSetClockFrequency(333, 333, 166); }
     ~ClockGuard()   { scePowerSetClockFrequency(cpu, cpu, bus); }
+};
+
+// Held for the length of a move/copy/delete: HOME and the power switch do nothing
+// until it ends, so an operation can't be cut off halfway. scePowerLock only queues
+// a power-switch press, so the queued sleep is cancelled before the lock is released.
+extern "C" int scePowerCancelRequest(void);
+struct FileOpGuard {
+    bool powerLocked = false;
+    FileOpGuard() {
+        pspSetHomePopup(0);
+        powerLocked = (scePowerLock(0) >= 0);
+    }
+    ~FileOpGuard() {
+        if (powerLocked) {
+            scePowerCancelRequest();
+            scePowerUnlock(0);
+        }
+        pspSetHomePopup(1);
+    }
 };
 
 // Slightly higher priority while OSK is active (lower number = higher prio)

@@ -276,7 +276,8 @@
                 std::string base = currentDevice + std::string(r);
                 std::string from = base + oldDisplay;
                 std::string to   = base + renameTo;
-                if (dirExists(from)) {
+                // A same-named TurboGrafx16 folder in another root is not this category.
+                if (dirExists(from) && !isTurboGrafx16Folder(from)) {
                     int rc = renamePathCaseAware(from, to);
                     if (rc < 0) {
                         logInit();

@@ -132,6 +132,17 @@ static void kfeRemoveCaseCollisionsInDir(const std::string& dir, const std::stri
 }
 }
 
+// Every redraw ends in a vblank wait, so redrawing after each 64KB chunk (or each
+// file) held copies to roughly one chunk per frame. Per-chunk/per-file progress
+// goes through here and is drawn at most every 100ms; the bar still moves smoothly.
+void KfeFileOps::renderProgress(KernelFileExplorer* self) {
+    static unsigned long long lastDrawUs = 0;
+    if (!self) return;
+    const unsigned long long now = (unsigned long long)sceKernelGetSystemTimeWide();
+    if (lastDrawUs != 0 && now - lastDrawUs < 100000ULL) return;
+    lastDrawUs = now;
+    self->renderOneFrame();
+}
 void KfeFileOps::resetCriticalGuardFailure() { sKfeCriticalGuardFailure = false; }
 bool KfeFileOps::hasCriticalGuardFailure() { return sKfeCriticalGuardFailure; }
 
@@ -188,17 +199,19 @@ bool KfeFileOps::copyFile(const std::string& src, const std::string& dst, Kernel
         uint64_t fileSize = 0;
         { SceIoStat st{}; if (sceIoGetstat(src.c_str(), &st) >= 0) fileSize = (uint64_t)st.st_size; if (!fileSize) fileSize = 1; }
 
-        if (self && self->msgBox) { self->msgBox->showProgress(basenameOf(src).c_str(), 0, fileSize); self->renderOneFrame(); }
+        if (self && self->msgBox) { self->msgBox->showProgress(basenameOf(src).c_str(), 0, fileSize); renderProgress(self); }
 
+        // 64-byte aligned so the I/O driver can DMA straight from it rather than
+        // bouncing every block through an internal buffer.
         size_t readBuf = 512 * 1024;
-        uint8_t* buf = (uint8_t*)malloc(readBuf);
+        uint8_t* buf = (uint8_t*)memalign(64, readBuf);
         if (!buf) {
             readBuf = 128 * 1024;
-            buf = (uint8_t*)malloc(readBuf);
+            buf = (uint8_t*)memalign(64, readBuf);
         }
         if (!buf) {
             readBuf = 32 * 1024;
-            buf = (uint8_t*)malloc(readBuf);
+            buf = (uint8_t*)memalign(64, readBuf);
         }
         if (!buf) {
             logf("  alloc read buffer failed");
@@ -208,7 +221,7 @@ bool KfeFileOps::copyFile(const std::string& src, const std::string& dst, Kernel
         }
         logf("  read buffer = %u bytes (pass %d)", (unsigned)readBuf, pass);
 
-        int maxWriteChunk  = 64  * 1024;   // start at 64 KiB, we may shrink on trouble
+        int maxWriteChunk  = (int)readBuf; // whole buffer per write; shrinks on trouble
         const int MIN_WRITE_CHUNK = 4 * 1024;
 
         bool ok = true; uint64_t total = 0; int lastErr = 0;
@@ -228,7 +241,7 @@ bool KfeFileOps::copyFile(const std::string& src, const std::string& dst, Kernel
                 if (w <= 0) {
                     // If 0 or negative, try shrinking the chunk a few times before giving up
                     int attemptChunk = chunk;
-                    for (int tries = 0; tries < 4 && w <= 0 && attemptChunk > MIN_WRITE_CHUNK; ++tries) {
+                    for (int tries = 0; tries < 8 && w <= 0 && attemptChunk > MIN_WRITE_CHUNK; ++tries) {
                         attemptChunk >>= 1; // half it
                         sceKernelDelayThread(500);
                         w = sceIoWrite(out, buf + off, attemptChunk);
@@ -255,7 +268,7 @@ bool KfeFileOps::copyFile(const std::string& src, const std::string& dst, Kernel
                 off   += w;
                 total += (uint64_t)w;
 
-                if (self && self->msgBox) { self->msgBox->updateProgress(total, fileSize); self->renderOneFrame(); }
+                if (self && self->msgBox) { self->msgBox->updateProgress(total, fileSize); renderProgress(self); }
             }
 
             if (!ok) break;
@@ -270,11 +283,11 @@ bool KfeFileOps::copyFile(const std::string& src, const std::string& dst, Kernel
             logf("copyFile: FAIL after %llu/%llu bytes (err=%d)",
                 (unsigned long long)total, (unsigned long long)fileSize, lastErr);
             sceIoRemove(dst.c_str()); // remove partial
-            if (self && self->msgBox) { self->msgBox->updateProgress(total, fileSize); self->renderOneFrame(); }
+            if (self && self->msgBox) { self->msgBox->updateProgress(total, fileSize); renderProgress(self); }
             return false;
         }
 
-        if (self && self->msgBox) { self->msgBox->updateProgress(fileSize, fileSize); self->renderOneFrame(); }
+        if (self && self->msgBox) { self->msgBox->updateProgress(fileSize, fileSize); renderProgress(self); }
         logf("copyFile: OK %llu bytes", (unsigned long long)total);
         return true;
     };
@@ -530,12 +543,12 @@ bool KfeFileOps::moveOne(const std::string& src, const std::string& dst, GameIte
 bool KfeFileOps::removeFileWithProgress(const std::string& path, KernelFileExplorer* self) {
     if (self && self->msgBox) {
         self->msgBox->showProgress(basenameOf(path).c_str(), 0, 1);
-        self->renderOneFrame();
+        renderProgress(self);
     }
     int rc = sceIoRemove(path.c_str());
     if (self && self->msgBox) {
         self->msgBox->updateProgress(1, 1);
-        self->renderOneFrame();
+        renderProgress(self);
     }
     return rc >= 0;
 }
@@ -547,12 +560,12 @@ bool KfeFileOps::removeDirRecursiveProgress(const std::string& dir, KernelFileEx
         // If open fails, try removing the directory itself (may already be empty/inaccessible)
         if (self && self->msgBox) {
             self->msgBox->showProgress(basenameOf(dir).c_str(), 0, 1);
-            self->renderOneFrame();
+            renderProgress(self);
         }
         bool ok = (sceIoRmdir(dir.c_str()) >= 0);
         if (self && self->msgBox) {
             self->msgBox->updateProgress(1, 1);
-            self->renderOneFrame();
+            renderProgress(self);
         }
         return ok;
     }
@@ -569,7 +582,7 @@ bool KfeFileOps::removeDirRecursiveProgress(const std::string& dir, KernelFileEx
         // Update label to current child before removing
         if (self && self->msgBox) {
             self->msgBox->showProgress(ent.d_name, 0, 1);
-            self->renderOneFrame();
+            renderProgress(self);
         }
 
         if (FIO_S_ISDIR(ent.d_stat.st_mode)) {
@@ -583,7 +596,7 @@ bool KfeFileOps::removeDirRecursiveProgress(const std::string& dir, KernelFileEx
         // Mark this item finished
         if (self && self->msgBox) {
             self->msgBox->updateProgress(1, 1);
-            self->renderOneFrame();
+            renderProgress(self);
         }
 
         memset(&ent, 0, sizeof(ent));
@@ -595,12 +608,12 @@ bool KfeFileOps::removeDirRecursiveProgress(const std::string& dir, KernelFileEx
     if (ok) {
         if (self && self->msgBox) {
             self->msgBox->showProgress(basenameOf(dir).c_str(), 0, 1);
-            self->renderOneFrame();
+            renderProgress(self);
         }
         ok = (sceIoRmdir(dir.c_str()) >= 0);
         if (self && self->msgBox) {
             self->msgBox->updateProgress(1, 1);
-            self->renderOneFrame();
+            renderProgress(self);
         }
     }
 
@@ -620,6 +633,7 @@ bool KfeFileOps::deleteOne(const std::string& path, GameItem::Kind kind, KernelF
 // Full delete executor: mirrors performMove()/performCopy() style and refresh rules
 void KfeFileOps::performDelete(KernelFileExplorer* self) {
     if (!self) return;
+    FileOpGuard fog;   // HOME and sleep blocked until this returns
     ClockGuard cg; cg.boost333();
 
     // Open progress box (no icon, centered bar + two text lines)

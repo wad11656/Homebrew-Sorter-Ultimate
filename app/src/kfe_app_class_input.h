@@ -1167,13 +1167,15 @@ When "Category prefix" is enabled, use this blacklist to block certain folders f
                             renderOneFrame();
 
                             std::string delCat = opDestCategory;
-                            deleteCategoryDirs(currentDevice, delCat);
+                            {
+                                FileOpGuard fog;   // HOME and sleep blocked until this returns
+                                deleteCategoryDirs(currentDevice, delCat);
+                            }
                             removeHiddenFiltersForDeletedCategory(delCat);
 
-                            // Force a true repopulate pass (with Populating... modal) after category delete.
+                            // Complete repopulate after category delete, as on first entry to the device.
                             delete msgBox; msgBox = nullptr;
-                            markDeviceDirty(currentDevice);
-                            openDevice(currentDevice);
+                            repopulateDeviceFromScratch(currentDevice);
 
                             drawMessage("Category deleted", COLOR_GREEN);
                             sceKernelDelayThread(700*1000);

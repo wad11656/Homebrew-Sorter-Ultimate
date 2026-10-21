@@ -95,6 +95,7 @@
 
 
     void performCopy() {
+        FileOpGuard fog;   // HOME and sleep blocked until this returns
         ClockGuard cg; cg.boost333();
         logInit();
         logf("=== performCopy: n=%d destDev=%s destCat=%s ===",
@@ -276,7 +277,9 @@
 
             bool hit = false;
             forEachEntry(base, [&](const SceIoDirent &e){
-                if (FIO_S_ISDIR(e.d_stat.st_mode) && startsWithCAT(e.d_name)) hit = true;
+                if (hit || !FIO_S_ISDIR(e.d_stat.st_mode) || !startsWithCAT(e.d_name)) return;
+                // A TG16 folder is never a category, even one that picked up a CAT_ name.
+                if (!isTurboGrafx16Folder(joinDirFile(base, e.d_name))) hit = true;
             });
             return hit;
         };
@@ -467,6 +470,7 @@
     }
 
     void performMove() {
+        FileOpGuard fog;   // HOME and sleep blocked until this returns
         ClockGuard cg; cg.boost333();
         logInit();
         logf("=== performMove: n=%d destDev=%s destCat=%s ===",
@@ -595,6 +599,7 @@
             markAllDevicesDirty();
             freeSelectionIcon();
             noIconPaths.clear();
+            categoryIconPathMemo.clear();
             selectionIconRetryAtUs = 0;
             if (iconCarryTex) {
                 texFree(iconCarryTex);

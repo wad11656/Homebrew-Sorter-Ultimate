@@ -197,6 +197,7 @@ extern "C" {
     int pspSysconCtrlLED(int led, int state);
     int pspLedSuppressStart(void);
     int pspLedSuppressStop(void);
+    int pspSetHomePopup(int enable);
 }
 
 static SceUID kfeIoOpenDir(const char* path);
