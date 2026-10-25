@@ -228,7 +228,7 @@
             gclLoadBlacklistFor(dev);
 
         const char* isoRoots[]  = {"ISO/"};
-            const char* gameRoots[] = {"PSP/GAME/","PSP/GAME/PSX/","PSP/GAME/Utility/","PSP/GAME150/"};
+            const char* gameRoots[] = {"PSP/GAME/","PSP/GAME150/"};
 
             for (size_t i=0;i<sizeof(isoRoots)/sizeof(isoRoots[0]);++i)  scanIsoRootDir(dev + std::string(isoRoots[i]));
             for (size_t i=0;i<sizeof(gameRoots)/sizeof(gameRoots[0]);++i) scanGameRootDir(dev + std::string(gameRoots[i]));
@@ -347,7 +347,7 @@
         };
 
         const char* isoRoots[]  = {"ISO/"};                // drop ISO/PSP/ as a root
-        const char* gameRoots[] = {"PSP/GAME/","PSP/GAME/PSX/","PSP/GAME/Utility/","PSP/GAME150/"};
+        const char* gameRoots[] = {"PSP/GAME/","PSP/GAME150/"};
 
         auto addGameCategory = [&](const std::string& rootLabel, const std::string& absRoot, const std::string& sub){
             if (isBlacklistedCategoryFolder(rootLabel, sub, absRoot)) return;
@@ -525,7 +525,7 @@
         };
 
         const char* isoRoots[]  = {"ISO/"};                // drop ISO/PSP/ as a root
-        const char* gameRoots[] = {"PSP/GAME/","PSP/GAME/PSX/","PSP/GAME/Utility/","PSP/GAME150/"};
+        const char* gameRoots[] = {"PSP/GAME/","PSP/GAME150/"};
         for (auto r : isoRoots)  refreshIso(r,   dev + std::string(r));
         for (auto r : gameRoots) refreshGame(r, dev + std::string(r));
 
@@ -1835,7 +1835,7 @@
 
         changed |= removeListEntryCaseInsensitive(gclCategoryFilterMap[root], base);
 
-        const char* roots[] = {"ISO/","PSP/GAME/","PSP/GAME/PSX/","PSP/GAME/Utility/","PSP/GAME150/"};
+        const char* roots[] = {"ISO/","PSP/GAME/","PSP/GAME150/"};
         for (auto r : roots) {
             std::string abs = currentDevice + std::string(r);
             std::string prefix = normalizeGameFilterPath(joinDirFile(abs, displayName.c_str()));
@@ -3266,6 +3266,23 @@
                 scrollOffset = 0;
             }
         }
+
+    // New / renamed category named "Uncategorized" or "VIDEO": an OK box explaining why it was refused.
+    void showReservedCategoryNameModal(bool video) {
+        msgBox = new MessageBox(
+            video ? "Reserved name\n\"VIDEO\" is the folder CFW uses for UMD Video ISOs, so it can't be a category. "
+                    "Please choose another name."
+                  : "Reserved name\n\"Uncategorized\" is the built-in entry for apps not placed in a category folder. "
+                    "Please choose another name.",
+            okIconTexture, SCREEN_WIDTH, SCREEN_HEIGHT, 1.0f, 15, "OK",
+            10, 18, 106, 10, 294, 120, PSP_CTRL_CROSS);  // 10px per char: wraps before the right border
+        msgBox->setOkAlignLeft(true);
+        msgBox->setOkPosition(10, 7);
+        msgBox->setOkStyle(0.7f, 0xFFBBBBBB);
+        msgBox->setOkTextOffset(-2, -1);
+        msgBox->setSubtitleStyle(0.7f, 0xFFBBBBBB);
+        msgBox->setSubtitleGapAdjust(-8);
+    }
 
     void showBlacklistPrefixDisabledModal() {
         msgBox = new MessageBox(

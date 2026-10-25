@@ -1673,6 +1673,12 @@ When "Category prefix" is enabled, use this blacklist to block certain folders f
                             } else {
                                 // Treat as BASE name (strip any CAT_/XX they typed)
                                 typed = sanitizeFilename(stripCategoryPrefixes(typed));
+                                // "Uncategorized" is the app's built-in entry, and ISO/VIDEO is the UMD Video folder
+                                // (never a category); a category by either name collides with them.
+                                if (!strcasecmp(typed.c_str(), "Uncategorized") || !strcasecmp(typed.c_str(), "VIDEO")) {
+                                    showReservedCategoryNameModal(!strcasecmp(typed.c_str(), "VIDEO"));
+                                    continue;
+                                }
                                 if (isBlacklistedBaseNameFor(currentDevice, typed)) {
                                     drawMessage("Blacklisted name", COLOR_RED);
                                     sceKernelDelayThread(600*1000);

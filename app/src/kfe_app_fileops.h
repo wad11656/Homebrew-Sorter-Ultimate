@@ -371,7 +371,7 @@ bool KfeFileOps::copyDirRecursive(const std::string& src, const std::string& dst
 // Determine subroot for a given item path (preserve source tree)
 std::string KfeFileOps::subrootFor(const std::string& path, GameItem::Kind kind) {
     // EBOOT trees to check
-    const char* gameSubs[] = {"PSP/GAME/PSX/","PSP/GAME/Utility/","PSP/GAME150/","PSP/GAME/"};
+    const char* gameSubs[] = {"PSP/GAME150/","PSP/GAME/"};
     // ISO trees to check
     const char* isoSubs[]  = {"ISO/"};
     size_t pos = 0;
@@ -724,6 +724,11 @@ void KfeFileOps::performDelete(KernelFileExplorer* self) {
 
 bool KfeFileOps::copyOne(const std::string& src, const std::string& dst, GameItem::Kind kind, KernelFileExplorer* self) {
     logf("copyOne: %s -> %s (%s)", src.c_str(), dst.c_str(), (kind==GameItem::ISO_FILE)?"ISO":"EBOOT");
+    // Copying onto itself: the replace step below would delete the source.
+    if (!strcasecmp(src.c_str(), dst.c_str())) {
+        logf("  src == dst; refusing");
+        return false;
+    }
     std::string dstParent = parentOf(dst);
     if (!ensureDirRecursive(dstParent)) return false;
 

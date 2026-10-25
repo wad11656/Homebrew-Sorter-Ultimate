@@ -215,6 +215,12 @@
             }
             // If base didn’t change, nothing to do
             if (stripCategoryPrefixes(oldDisplay) == typed) return;
+            // "Uncategorized" is the app's built-in entry, and ISO/VIDEO is the UMD Video folder (never a
+            // category); a category by either name collides with them.
+            if (!strcasecmp(typed.c_str(), "Uncategorized") || !strcasecmp(typed.c_str(), "VIDEO")) {
+                showReservedCategoryNameModal(!strcasecmp(typed.c_str(), "VIDEO"));
+                return;
+            }
             if (isBlacklistedBaseNameFor(currentDevice, typed)) {
                 drawMessage("Blacklisted name", COLOR_RED);
                 sceKernelDelayThread(700*1000);
@@ -243,7 +249,7 @@
             renderOneFrame();
 
         const char* isoRoots[]  = {"ISO/"};
-            const char* gameRoots[] = {"PSP/GAME/","PSP/GAME/PSX/","PSP/GAME/Utility/","PSP/GAME150/"};
+            const char* gameRoots[] = {"PSP/GAME/","PSP/GAME150/"};
             bool anyOk=false, anyFail=false;
 
             // First, rename the existing folder (whatever its current prefix) to the BASE on each root.
@@ -304,7 +310,7 @@
             {
                 if (oldDisplay != newDisplay) {
                     const char* isoRoots[]  = {"ISO/"};
-                    const char* gameRoots[] = {"PSP/GAME/","PSP/GAME/PSX/","PSP/GAME/Utility/","PSP/GAME150/"};
+                    const char* gameRoots[] = {"PSP/GAME/","PSP/GAME150/"};
                     auto maybeUpdateExecBase = [&](const char* r){
                         if (updatedExecBaseFromCategoryRename || oldExecDir.empty()) return;
                         std::string base = currentDevice + std::string(r);

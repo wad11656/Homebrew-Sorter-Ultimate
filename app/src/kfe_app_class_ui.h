@@ -222,7 +222,7 @@ private:
         state.uncEnabled = isUncategorizedEnabledForSetting(uncSetting, state.device);
 
         const char* isoRoots[]  = {"ISO/"};
-        const char* gameRoots[] = {"PSP/GAME/","PSP/GAME/PSX/","PSP/GAME/Utility/","PSP/GAME150/"};
+        const char* gameRoots[] = {"PSP/GAME/","PSP/GAME150/"};
         std::vector<std::pair<std::string, std::string>> scanRoots;
         for (auto r : isoRoots)  scanRoots.emplace_back(state.device + std::string(r), std::string(r));
         for (auto r : gameRoots) scanRoots.emplace_back(state.device + std::string(r), std::string(r));
@@ -335,7 +335,7 @@ private:
         const std::string root = rootPrefix(dev);
         if (root.empty() || categoryDisplayName.empty()) return GCL_FOLDERS_MAX_PATH_NAME_SUM - 1;
 
-        const char* gameRoots[] = {"PSP/GAME/","PSP/GAME/PSX/","PSP/GAME/Utility/","PSP/GAME150/"};
+        const char* gameRoots[] = {"PSP/GAME/","PSP/GAME150/"};
         int longestChildLen = 0;
         for (auto gameRoot : gameRoots) {
             const std::string catPath = root + std::string(gameRoot) + categoryDisplayName;
@@ -522,8 +522,6 @@ private:
             };
             scanRoot("ISO/");
             scanRoot("PSP/GAME/");
-            scanRoot("PSP/GAME/PSX/");
-            scanRoot("PSP/GAME/Utility/");
             scanRoot("PSP/GAME150/");
         }
 
@@ -799,7 +797,7 @@ private:
 
     // Find the enforced on-disk folder name for a base (e.g., base "ARPG" -> "CAT_03ARPG" or "03ARPG")
     static std::string findDisplayNameForCategoryBase(const std::string& dev, const std::string& base) {
-        const char* roots[] = { "ISO/","PSP/GAME/","PSP/GAME/PSX/","PSP/GAME/Utility/","PSP/GAME150/" };
+        const char* roots[] = { "ISO/","PSP/GAME/","PSP/GAME150/" };
         for (auto r : roots) {
             std::string absRoot = dev + std::string(r);
             std::vector<std::string> subs;
@@ -1009,7 +1007,7 @@ private:
     // • Skip game folders (subdirs that contain an EBOOT.PBP) and ISO/VIDEO.
     static void enforceCategorySchemeForDevice(const std::string& dev, bool forceStripNumbers = false){
         const char* isoRoots[]  = {"ISO/"};                // drop ISO/PSP/ as a root
-        const char* gameRoots[] = {"PSP/GAME/","PSP/GAME/PSX/","PSP/GAME/Utility/","PSP/GAME150/"};
+        const char* gameRoots[] = {"PSP/GAME/","PSP/GAME150/"};
 
         // (absRoot, rootLabel)
         std::vector<std::pair<std::string,std::string>> roots;
@@ -1359,7 +1357,7 @@ private:
         // 4) Rename on disk (for devices that exist) to match the new wanted names
         //    Only touch category folders inside ISO/ and PSP/GAME*/ roots. Never touch root-level PSP/.
         const char* isoRoots[]  = {"ISO/"};
-        const char* gameRoots[] = {"PSP/GAME/","PSP/GAME150/","PSP/GAME/PSX/","PSP/GAME/Utility/"};
+        const char* gameRoots[] = {"PSP/GAME/","PSP/GAME150/"};
         auto doDevice = [&](const std::string& dev){
             if (dev.empty() || dev[3] != ':') return;
             for (auto& kv : baseToWant) {
@@ -1666,7 +1664,7 @@ private:
         const std::string root = rootPrefix(dev);
         if (root.empty()) return true;
 
-        const char* gameRoots[] = {"PSP/GAME/","PSP/GAME/PSX/","PSP/GAME/Utility/","PSP/GAME150/"};
+        const char* gameRoots[] = {"PSP/GAME/","PSP/GAME150/"};
         const bool patchCurrentCache = !strcasecmp(root.c_str(), rootPrefix(currentDevice).c_str());
 
         auto makeTempPath = [&](const std::string& dir, const std::vector<std::string>& reservedNames) -> std::string {
@@ -2228,11 +2226,9 @@ private:
         // EBOOT folder categories: ms0:/PSP/GAME/<cat>/..., ms0:/PSP/GAME150/<cat>/...
         const char* gameRoots[] = {
             "PSP/GAME/",
-            "PSP/GAME/PSX/",
-            "PSP/GAME/Utility/",
             "PSP/GAME150/"
         };
-        for (int i = 0; i < 4; ++i) {
+        for (size_t i = 0; i < sizeof(gameRoots)/sizeof(gameRoots[0]); ++i) {
             if (replaceAfterRoot(gameRoots[i])) return;
         }
 
@@ -2909,7 +2905,7 @@ private:
         if (currentDevice.empty()) return {};
 
         // Same order as scanDevice(), so the first ICON0 found matches what the scan recorded.
-        const char* roots[] = {"ISO/","PSP/GAME/","PSP/GAME/PSX/","PSP/GAME/Utility/","PSP/GAME150/"};
+        const char* roots[] = {"ISO/","PSP/GAME/","PSP/GAME150/"};
         for (const char* r : roots) {
             std::string dir = currentDevice + std::string(r) + cat;
             if (!dirExists(dir)) continue;

@@ -701,7 +701,7 @@ static void fmtDT(const ScePspDateTime& dt, char* out, size_t n){
 // Match Game Categories Lite ordering when sorting is OFF (mtime desc).
 static u64 categoryFolderMtime(const std::string& dev, const std::string& catName) {
     if (dev.empty() || catName.empty()) return 0;
-    const char* roots[] = {"PSP/GAME/","PSP/GAME150/","PSP/GAME/PSX/","PSP/GAME/Utility/","ISO/"};
+    const char* roots[] = {"PSP/GAME/","PSP/GAME150/","ISO/"};
     SceIoStat st{}; 
     for (auto r : roots) {
         std::string p = dev + std::string(r) + catName;
@@ -1950,7 +1950,7 @@ struct ClockGuard {
 };
 
 // Held for the length of a move/copy/delete: HOME and the power switch do nothing
-// until it ends, so an operation can't be cut off halfway. scePowerLock only queues
+// until it ends (and the card is flushed), so an operation can't be cut off halfway. scePowerLock only queues
 // a power-switch press, so the queued sleep is cancelled before the lock is released.
 extern "C" int scePowerCancelRequest(void);
 struct FileOpGuard {
@@ -1960,6 +1960,10 @@ struct FileOpGuard {
         powerLocked = (scePowerLock(0) >= 0);
     }
     ~FileOpGuard() {
+        // Commit the FAT's cached directory/table writes before power can be cut;
+        // otherwise a hard power-off right after "done" can lose the new entries.
+        sceIoSync("ms0:", 0);
+        sceIoSync("ef0:", 0);
         if (powerLocked) {
             scePowerCancelRequest();
             scePowerUnlock(0);

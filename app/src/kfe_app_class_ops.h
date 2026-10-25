@@ -270,7 +270,7 @@
     // --- helper: quick probe for any CAT_* folder on a device ---
     bool deviceHasAnyCategory(const std::string& dev) const {
         const char* isoRoots[]  = {"ISO/"};
-        const char* gameRoots[] = {"PSP/GAME/","PSP/GAME/PSX/","PSP/GAME/Utility/","PSP/GAME150/"};
+        const char* gameRoots[] = {"PSP/GAME/","PSP/GAME150/"};
 
         auto hasCatIn = [](const std::string& base)->bool {
             if (!dirExists(base)) return false;
