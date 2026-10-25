@@ -266,6 +266,7 @@
 
             for (auto r : isoRoots) {
                 std::string base = currentDevice + std::string(r);
+                if (isIsoVideoFolder(base, oldDisplay)) continue;  // the UMD Video folder isn't this category's
                 std::string from = base + oldDisplay;
                 std::string to   = base + renameTo;
                 if (dirExists(from)) {

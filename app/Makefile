@@ -36,13 +36,24 @@ PSP_EBOOT_PIC1  = ../PIC1.png
 PSP_EBOOT_SND0  = ../SND0.AT3
 SFOFLAGS       += -d EFAWARE=1
 
+# The same EBOOT without the XMB music (SND0.AT3), built alongside the standard one every time
+NOSOUND_EBOOT   = ../build-nosound/EBOOT.PBP
+EXTRA_TARGETS  += $(NOSOUND_EBOOT)
+
 # Pull in the standard PSP SDK build rules
 include $(PSPSDK)/lib/build.mak
+
+# Standard EBOOT's pieces, SND0 left out
+$(NOSOUND_EBOOT): $(TARGET).prx $(PSP_EBOOT_SFO)
+	mkdir -p $(dir $@)
+	$(PACK_PBP) $@ $(PSP_EBOOT_SFO) $(PSP_EBOOT_ICON) $(PSP_EBOOT_ICON1) $(PSP_EBOOT_UNKPNG) \
+		$(PSP_EBOOT_PIC1) NULL $(TARGET).prx $(PSP_EBOOT_PSAR)
 
 # Regenerate your exports stub
 fs_driver.S: ../fs_driver/exports.exp
 	psp-build-exports -s ../fs_driver/exports.exp
 
 # Ensure the stub exists before compiling the core + stub objects
-src/kfe_app.o: fs_driver.S
+# kfe_app.cpp is the class headers in src/: rebuild it when any of them (or our include/) changes
+src/kfe_app.o: fs_driver.S $(wildcard src/*.h include/*.h)
 fs_driver.o: fs_driver.S

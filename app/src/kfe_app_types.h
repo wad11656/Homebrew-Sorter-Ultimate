@@ -1774,6 +1774,13 @@ static int countGamesInCategory(const std::string& device, const std::string& ca
 }
 
 
+// ISO/VIDEO is the CFW's UMD Video folder, never a category: nothing creates, renames, merges or deletes it as one
+// (a PSP/GAME/VIDEO category may still exist from before the name was reserved).
+static bool isIsoVideoFolder(const std::string& absRoot, const std::string& name) {
+    return !strcasecmp(name.c_str(), "VIDEO") && absRoot.size() >= 4 &&
+           !strcasecmp(absRoot.c_str() + absRoot.size() - 4, "ISO/");
+}
+
 // Create the CAT_ folder across standard ISO/GAME roots (silently skips parents that don't exist)
 // Create the CAT_ folder tree across ISO/GAME roots (skips parents that don't exist)
 static void createCategoryDirs(const std::string& device, const std::string& cat) {
@@ -1793,7 +1800,10 @@ static void createCategoryDirs(const std::string& device, const std::string& cat
 static void deleteCategoryDirs(const std::string& device, const std::string& cat) {
     const char* isoRoots[]  = {"ISO/"};                // drop ISO/PSP/ as a root
     const char* gameRoots[] = {"PSP/GAME/","PSP/GAME150/"}; // drop PSX/ and Utility/ as roots
-    for (auto r : isoRoots)  { std::string p = device + std::string(r) + cat; if (dirExists(p)) removeDirRecursive(p); }
+    for (auto r : isoRoots) {
+        std::string root = device + std::string(r), p = root + cat;
+        if (!isIsoVideoFolder(root, cat) && dirExists(p)) removeDirRecursive(p);
+    }
     for (auto r : gameRoots) { std::string p = device + std::string(r) + cat; if (dirExists(p)) removeDirRecursive(p); }
 }
 

@@ -915,6 +915,7 @@ private:
         if (!dirExists(src) || !dirExists(dst)) return false;
         // Never fold a TurboGrafx16 folder into anything, or anything into one.
         if (isTurboGrafx16Folder(src) || isTurboGrafx16Folder(dst)) return false;
+        if (isIsoVideoFolder(absRoot, from) || isIsoVideoFolder(absRoot, to)) return false;
 
         logInit();
         logf("cat merge: %s -> %s", src.c_str(), dst.c_str());
@@ -938,6 +939,7 @@ private:
             if (strcasecmp(stripCategoryPrefixes(sub, stripNumbers).c_str(), base.c_str()) != 0) continue;
             std::string subAbs = joinDirFile(absRoot, sub.c_str());
             if (isGameContentFolder(subAbs)) continue; // skip real games + TG16 (never renamed)
+            if (isIsoVideoFolder(absRoot, sub)) continue;
             matches.push_back(sub);
         }
         if (matches.empty()) return;
@@ -980,7 +982,7 @@ private:
         if (!strcasecmp(from.c_str(), to.c_str())) return false;
         std::string a = joinDirFile(root, from.c_str());
         std::string b = joinDirFile(root, to.c_str());
-        if (!dirExists(a)) return false;
+        if (!dirExists(a) || isIsoVideoFolder(root, from)) return false;
         if (isTurboGrafx16Folder(a)) {
             logInit();
             logf("renameIfExists SKIP (TG16): %s -> %s", a.c_str(), b.c_str());
