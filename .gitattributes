@@ -1,2 +1,2 @@
 # Auto detect text files and upload LF line endings
-* text=auto
+* text=auto eol=lf

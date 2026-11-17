@@ -1728,6 +1728,9 @@
         const std::string devRoot = rootPrefix(absRoot);
         if (devRoot.empty()) return false;
 
+        remapExecResourcesForFolderRename(joinDirFile(absRoot, fromName.c_str()),
+                                         joinDirFile(absRoot, toName.c_str()));
+
         gclLoadUnifiedFilters();
         const std::string filterRoot = gclFilterRootKeyFor(devRoot);
         auto& fl = gclGameFilterMap[filterRoot];
@@ -3977,6 +3980,7 @@ each Category+App folder name.)");
             const int visible = categoryVisibleRows();
             scrollOffset = (selectedIndex >= visible) ? (selectedIndex - visible + 1) : 0;
         }
+        rememberListOrder();
     }
 
 
@@ -4192,6 +4196,12 @@ each Category+App folder name.)");
             scanAnimActive = false;
             scanAnimNextUs = 0;
             delete msgBox; msgBox = nullptr;
+            // The popup no longer borrows these frames. Release its preload so
+            // returning home has enough memory to decode the home animation.
+            freeAnimationFrames(gPopAnimFrames);
+            gPopAnimLoadedDir.clear();
+            gPopAnimMinDelayUs = 0;
+            gPopAnimTotalCycleUs = 0;
         } else {
             // Instant reuse of cached snapshot (no message box)
             pendingLowMemHardResetBeforeScan = false;
@@ -4251,6 +4261,7 @@ each Category+App folder name.)");
                 entryKinds.push_back(gi.kind);
             }
             showRoots = false;
+            rememberListOrder();
         }
 
     }
@@ -4276,6 +4287,7 @@ each Category+App folder name.)");
             entryKinds.push_back(gi.kind);
         }
         showRoots = false;
+        rememberListOrder();
     }
 
     // Quick overlay used when backing out of screens to avoid abrupt jumps.
@@ -4361,13 +4373,13 @@ each Category+App folder name.)");
         }
         sortLikeLegacy(v); // uses sortKey DESC
     }
-    void commitOrderTimestamps(){
-        if (!(view == View_AllFlat || view == View_CategoryContents)) return;
+    bool commitOrderTimestamps(){
+        if (!(view == View_AllFlat || view == View_CategoryContents)) return false;
 
         // Make sure model matches the screen order (critical for new copies/moves)
         syncWorkingListFromScreen();
 
-        if (workingList.empty()) return;
+        if (workingList.empty()) return true;
         std::string keepPath = (selectedIndex >= 0 && selectedIndex < (int)workingList.size())
                             ? workingList[selectedIndex].path : std::string();
 
@@ -4397,6 +4409,7 @@ each Category+App folder name.)");
 
         // Bottom row gets baseTick, then +10s per step up
         int n = (int)workingList.size();
+        bool allSaved = true;
         for (int i = n - 1; i >= 0; --i) {
             unsigned long long tick = baseTick + (unsigned long long)((n-1) - i) * STEP;
             ScePspDateTime dt{}; sceRtcSetTick(&dt, &tick);
@@ -4406,6 +4419,7 @@ each Category+App folder name.)");
             int rc = sceIoChstat(workingList[i].path.c_str(), &st, 0x08 | 0x10 | 0x20);
 
             if (rc < 0) {
+                allSaved = false;
                 logInit();
                 logf("START/mtime FAIL: %s rc=%d", workingList[i].path.c_str(), rc);
                 logClose();
@@ -4417,6 +4431,14 @@ each Category+App folder name.)");
         }
 
         delete msgBox; msgBox = nullptr;
+
+        if (!allSaved) {
+            markDeviceDirty(currentDevice);
+            msgBox = new MessageBox("Could not save every app's order.\nPlease retry before leaving this list.",
+                                    okIconTexture, SCREEN_WIDTH, SCREEN_HEIGHT,
+                                    0.9f, 15, "OK");
+            return false;
+        }
 
         sortLikeLegacy(workingList);
         refillRowsFromWorkingPreserveSel();
@@ -4455,5 +4477,7 @@ each Category+App folder name.)");
         }
 
         drawMessage("Order saved", COLOR_GREEN);
+        rememberListOrder();
         sceKernelDelayThread(700 * 1000);
+        return true;
     }

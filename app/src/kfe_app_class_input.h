@@ -514,7 +514,7 @@
                     msgBox->setSubtitleStyle(0.7f, 0xFFBBBBBB);
                     msgBox->setSubtitleGapAdjust(-8);
                 } else {
-                    setCategorySortMode(false);
+                    requestOrderExit(OE_SortMode);
                 }
             } else {
                 showTitles = !showTitles;
@@ -551,6 +551,10 @@
         // △: open modal menu (content views → Move/Copy/Delete; categories → New/Delete)
         if (pressed & PSP_CTRL_TRIANGLE) {
             if (!showRoots && !fileMenu) {
+                MessageBox* loadingBox = nullptr;
+                if (view == View_AllFlat || view == View_CategoryContents || view == View_Categories) {
+                    loadingBox = pushSizedStatusModal("Loading...", nullptr);
+                }
                 if (view == View_AllFlat || view == View_CategoryContents) {
                     const bool gclOn = (gclArkOn || gclProOn);
                     const bool canCrossDevices = dualDeviceAvailableFromMs0();
@@ -627,6 +631,7 @@
                     fileMenu->primeButtons(now.Buttons);
                     inputWaitRelease = true;
                 }
+                popModal(loadingBox);
             }
             return;
         }
@@ -905,7 +910,7 @@ When "Category prefix" is enabled, use this blacklist to block certain folders f
 
                 // Block "Category Settings" row
                 if (nm == kCatSettingsLabel || nm == "__GCL_SETTINGS__") {
-                    openGclSettingsScreen();
+                    requestOrderExit(OE_Settings);
                     return;
                 }
 
@@ -979,42 +984,18 @@ When "Category prefix" is enabled, use this blacklist to block certain folders f
                 if (moving) {
                     moving = false;
                 } else {
-                    checked.clear();
-                    buildCategoryRows();
-
-                    // Re-highlight the category we just left
-                    // (match the *displayed* name exactly)
-                    int idx = -1;
-                    for (int i = 0; i < (int)entries.size(); ++i) {
-                        if (!strcmp(entries[i].d_name, currentCategory.c_str())) { idx = i; break; }
-                    }
-                    if (idx < 0) idx = 0;
-                    if (idx >= (int)entries.size()) idx = (int)entries.size() - 1;
-                    selectedIndex = idx;
-
-                    // Ensure visible
-                    if (selectedIndex < scrollOffset) scrollOffset = selectedIndex;
-                    const int visible = categoryVisibleRows();
-                    const int lastVisible = scrollOffset + visible - 1;
-                    if (selectedIndex > lastVisible) scrollOffset = selectedIndex - (visible - 1);
+                    requestOrderExit(OE_Content);
                 }
             } else if (view == View_AllFlat) {
                 if (moving) {
                     moving = false;
                 } else {
-                    if (roots.size() > 1) checked.clear();
-                    buildRootRows();
+                    requestOrderExit(OE_Content);
                 }
             } else if (view == View_Categories) {
                 if (moving) moving = false;
                 else {
-                    catSortMode = false;
-                    catPickActive = false;
-                    catPickIndex = -1;
-                    MessageBox* retBox = pushReturningModal();
-                    buildRootRows();
-                    popModal(retBox);
-                    inputWaitRelease = true;
+                    requestOrderExit(OE_Categories);
                 }
             }
         }
@@ -1577,10 +1558,21 @@ When "Category prefix" is enabled, use this blacklist to block certain folders f
                     int choice = fileMenu->choice();
                     delete fileMenu; fileMenu = nullptr; inputWaitRelease = true;
 
-                    if (menuContext == MC_ContentOps) {
+                    if (menuContext == MC_SaveOrder) {
+                        const OrderExit target = pendingOrderExit;
+                        pendingOrderExit = OE_None;
+                        if (choice == 0) {
+                            const bool saved = (view == View_Categories)
+                                ? applyCategoryOrderAndPersist() : commitOrderTimestamps();
+                            if (saved) finishOrderExit(target);
+                        } else if (choice == 1) {
+                            finishOrderExit(target);
+                        }
+                        // Cancel (including Circle) leaves the order and selection intact.
+                    } else if (menuContext == MC_ContentOps) {
                         // 0=Move,1=Copy,2=Hide/Unhide,3=Delete
-                        if (choice == 0)      startAction(AM_Move);
-                        else if (choice == 1) startAction(AM_Copy);
+                        if (choice == 0)      requestOrderExit(OE_Move);
+                        else if (choice == 1) requestOrderExit(OE_Copy);
                         else if (choice == 2) {
                             std::vector<std::string> hidePaths;
                             if (!checked.empty()) {

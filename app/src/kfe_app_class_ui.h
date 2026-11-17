@@ -22,6 +22,81 @@ private:
     // Active list for content view (this is what we reorder & save)
     std::vector<GameItem> workingList;
 
+    // Compare the visible order with the last loaded/saved order, including
+    // undoing a move back to its starting position (which needs no prompt).
+    std::vector<std::string> savedListOrder;
+    std::vector<std::string> visibleListOrder() const {
+        std::vector<std::string> order;
+        if (view == View_Categories) {
+            for (const auto& row : entries) {
+                if (!strcasecmp(row.d_name, kCatSettingsLabel) ||
+                    !strcasecmp(row.d_name, "Uncategorized")) continue;
+                order.push_back(stripCategoryPrefixes(row.d_name));
+            }
+        } else {
+            order = entryPaths;
+        }
+        return order;
+    }
+    void rememberListOrder() { savedListOrder = visibleListOrder(); }
+    void remapSavedListItem(const std::string& oldPath, const std::string& newPath) {
+        for (auto& path : savedListOrder) if (path == oldPath) path = newPath;
+    }
+
+    enum OrderExit { OE_None, OE_SortMode, OE_Categories, OE_Content, OE_Settings, OE_Move, OE_Copy };
+    OrderExit pendingOrderExit = OE_None;
+
+    void finishOrderExit(OrderExit target) {
+        if (target == OE_SortMode) {
+            setCategorySortMode(false);
+        } else if (target == OE_Move || target == OE_Copy) {
+            startAction(target == OE_Move ? AM_Move : AM_Copy);
+        } else if (target == OE_Settings) {
+            catSortMode = false;
+            catPickActive = false;
+            catPickIndex = -1;
+            openGclSettingsScreen();
+        } else if (target == OE_Content && view == View_CategoryContents) {
+            checked.clear();
+            buildCategoryRows();
+            int idx = 0;
+            for (int i = 0; i < (int)entries.size(); ++i) {
+                if (!strcmp(entries[i].d_name, currentCategory.c_str())) { idx = i; break; }
+            }
+            selectedIndex = idx;
+            const int visible = categoryVisibleRows();
+            scrollOffset = std::max(0, selectedIndex - visible + 1);
+        } else {
+            checked.clear();
+            catSortMode = false;
+            catPickActive = false;
+            catPickIndex = -1;
+            MessageBox* retBox = pushReturningModal();
+            buildRootRows();
+            popModal(retBox);
+        }
+        inputWaitRelease = true;
+    }
+
+    void requestOrderExit(OrderExit target) {
+        if (savedListOrder == visibleListOrder()) {
+            finishOrderExit(target);
+            return;
+        }
+        pendingOrderExit = target;
+        menuContext = MC_SaveOrder;
+        std::vector<FileOpsItem> choices = {
+            { "Save Order Changes", false },
+            { "Discard Order Changes", false },
+            { "Cancel", false }
+        };
+        fileMenu = new FileOpsMenu("Save list order?", choices,
+                                   SCREEN_WIDTH, SCREEN_HEIGHT, 270, 137, 4);
+        SceCtrlData now{}; sceCtrlReadBufferPositive(&now, 1);
+        fileMenu->primeButtons(now.Buttons);
+        inputWaitRelease = true;
+    }
+
     // UI cache
     std::vector<SceIoDirent> entries;
     std::vector<std::string> entryPaths;
@@ -928,7 +1003,7 @@ private:
         return ok;
     }
 
-    static void normalizeCategoryFolderForBase(const std::string& absRoot,
+    static bool normalizeCategoryFolderForBase(const std::string& absRoot,
                                                const std::vector<std::string>& subs,
                                                const std::string& base,
                                                const std::string& want,
@@ -942,7 +1017,7 @@ private:
             if (isIsoVideoFolder(absRoot, sub)) continue;
             matches.push_back(sub);
         }
-        if (matches.empty()) return;
+        if (matches.empty()) return true;
 
         auto isWant = [&](const std::string& s){ return !strcasecmp(s.c_str(), want.c_str()); };
         bool haveWant = false;
@@ -967,12 +1042,16 @@ private:
             }
         }
 
+        bool ok = haveWant;
         if (haveWant) {
             for (const auto& m : matches) {
                 if (isWant(m)) continue;
-                mergeCategoryFolders(absRoot, m, want);
+                // The primary match may already have been renamed above.
+                if (!dirExists(joinDirFile(absRoot, m.c_str()))) continue;
+                if (!mergeCategoryFolders(absRoot, m, want)) ok = false;
             }
         }
+        return ok;
     }
 
     // Rename “from”→“to” if it exists and differs (ignores case-only changes).
@@ -1164,7 +1243,7 @@ private:
     bool runningAppWarningBypass = false;
 
     // Track which kind of menu is open (content vs categories)
-    enum MenuContext { MC_ContentOps, MC_CategoryOps };
+    enum MenuContext { MC_ContentOps, MC_CategoryOps, MC_SaveOrder };
     MenuContext menuContext = MC_ContentOps;
 
     // Debug overlay
@@ -1307,7 +1386,7 @@ private:
     // - Skips "Uncategorized" entirely.
     // - If catsort==ON: assigns 01..N in the exact visible order; renames CAT folders across roots.
     // - If catsort==OFF: just patches the cache order (no XX, no renames).
-    void applyCategoryOrderAndPersist() {
+    bool applyCategoryOrderAndPersist() {
         // 1) Build an ordered list of BASE names from the visible entries
         std::vector<std::string> orderedBases;
         orderedBases.reserve(entries.size());
@@ -1317,7 +1396,7 @@ private:
             if (!strcasecmp(nm, "Uncategorized"))     continue;
             orderedBases.push_back(stripCategoryPrefixes(nm));
         }
-        if (orderedBases.empty()) return;
+        if (orderedBases.empty()) return true;
 
         if (msgBox) { delete msgBox; msgBox = nullptr; }
         const char* savingText = "Saving...";
@@ -1360,6 +1439,7 @@ private:
         //    Only touch category folders inside ISO/ and PSP/GAME*/ roots. Never touch root-level PSP/.
         const char* isoRoots[]  = {"ISO/"};
         const char* gameRoots[] = {"PSP/GAME/","PSP/GAME150/"};
+        bool allSaved = true;
         auto doDevice = [&](const std::string& dev){
             if (dev.empty() || dev[3] != ':') return;
             for (auto& kv : baseToWant) {
@@ -1370,7 +1450,9 @@ private:
                 auto renameIn = [&](const char* r){
                     std::string abs = dev + std::string(r);
                     std::vector<std::string> subs; listSubdirs(abs, subs);
-                    normalizeCategoryFolderForBase(abs, subs, base, want, gclCfg.catsort);
+                    if (!normalizeCategoryFolderForBase(abs, subs, base, want, gclCfg.catsort)) {
+                        allSaved = false;
+                    }
                 };
                 for (const char* r : isoRoots)  renameIn(r);
                 for (const char* r : gameRoots) renameIn(r);
@@ -1394,14 +1476,13 @@ private:
             }
         }
 
-        // PSP Go may have both devices; if both exist, update the other too
-        if (hasSystemStorage()) {
-            const std::string other = (rootPrefix(currentDevice) == "ms0:/") ? std::string("ef0:/")
-                                                                            : std::string("ms0:/");
-            if (!rootPrefix(other).empty()) {
-                doDevice(other);
-                markDeviceDirty(other); // force a rescan if you switch devices later
-            }
+        if (!allSaved) {
+            markAllDevicesDirty();
+            delete msgBox;
+            msgBox = new MessageBox("Could not save every category's order.\nPlease retry before leaving this list.",
+                                    okIconTexture, SCREEN_WIDTH, SCREEN_HEIGHT,
+                                    0.9f, 15, "OK");
+            return false;
         }
 
 
@@ -1554,6 +1635,8 @@ private:
         refreshGclFilterFile();
 
         delete msgBox; msgBox = nullptr;
+        rememberListOrder();
+        return true;
     }
 
 
@@ -1799,6 +1882,7 @@ private:
         if (enable == catSortMode) return;
 
         if (enable) {
+            rememberListOrder();
             catSortMode   = true;
             catPickActive = false;
             catPickIndex  = -1;
@@ -2298,6 +2382,7 @@ private:
 
 
         void cachePatchRenameItem(const std::string& oldPath, const std::string& newPath, GameItem::Kind k) {
+            remapSavedListItem(oldPath, newPath);
             auto apply = [&](ScanSnapshot& s){
                 snapErasePath(s, oldPath);
                 const std::string dstCat = parseCategoryFromFullPath(newPath, k);
@@ -2434,6 +2519,7 @@ private:
             entryKinds.push_back(gi.kind);
         }
         showRoots = false;
+        rememberListOrder();
     }
 
 
@@ -2729,7 +2815,7 @@ private:
         drawRect(0, 0, SCREEN_WIDTH, bannerH, COLOR_BANNER);
 
         std::string leftLabel = "Homebrew Sorter Ultimate";
-        std::string leftLabelMutedSuffix = " v1.29";
+        std::string leftLabelMutedSuffix = " v1.30";
         Texture* deviceIcon = nullptr;
         bool underlineLabel = false;
         const bool opHeader = (actionMode != AM_None &&

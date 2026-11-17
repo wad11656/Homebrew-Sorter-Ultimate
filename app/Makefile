@@ -31,7 +31,7 @@ LIBS = -lintrafont \
 # PSP EBOOT metadata
 EXTRA_TARGETS   = EBOOT.PBP
 PSP_EBOOT_TITLE = Homebrew Sorter Ultimate
-PSP_EBOOT_ICON  = ../ICON0.png
+PSP_EBOOT_ICON  = ../ICON0.PNG
 PSP_EBOOT_PIC1  = ../PIC1.png
 PSP_EBOOT_SND0  = ../SND0.AT3
 SFOFLAGS       += -d EFAWARE=1

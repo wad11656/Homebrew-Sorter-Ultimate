@@ -21,6 +21,7 @@ static int gHomeAnimChunkNextPos = -1;
 
 // Legacy variables (kept for compatibility with unused helper functions)
 static int gHomeAnimDeferFrames = 0;
+static unsigned long long gHomeAnimRetryAtUs = 0;
 static bool gHomeAnimPaused = false;
 static int gHomeAnimLastGoodIndex = -1;
 
@@ -1183,9 +1184,14 @@ static void maybeStartHomeAnimation() {
     if (gHomeAnimIndex >= 0 || gHomeAnimEntries.empty()) return;
     if (gHomeAnimDeferFrames > 0) { --gHomeAnimDeferFrames; return; }
     if (gHomeAnimDeferFrames < 0) return;
+    const unsigned long long now = (unsigned long long)sceKernelGetSystemTimeWide();
+    if (now < gHomeAnimRetryAtUs) return;
     int start = (int)(popAnimRand() % gHomeAnimEntries.size());
     pickHomeAnimation(start);
-    if (gHomeAnimIndex < 0) gHomeAnimDeferFrames = -1;
+    // A transient allocation/read failure must not disable the animation forever.
+    // Back off between attempts so missing files do not stall every UI frame.
+    gHomeAnimRetryAtUs = gHomeAnimIndex < 0
+        ? (unsigned long long)sceKernelGetSystemTimeWide() + 2000000ULL : 0;
 }
 
 static void resetHomeAnimationState(bool armForRoot) {
@@ -1202,6 +1208,7 @@ static void resetHomeAnimationState(bool armForRoot) {
     clearHomeAnimChunks();
     updateMsLedForHomeAnim();
     gHomeAnimDeferFrames = (armForRoot && !gHomeAnimEntries.empty()) ? 2 : 0;
+    gHomeAnimRetryAtUs = 0;
 }
 
 static void armHomeAnimationForRoot() {
@@ -1209,17 +1216,9 @@ static void armHomeAnimationForRoot() {
 }
 
 static void suspendHomeAnimation() {
-    freeAnimationFrames(gHomeAnimFrames);
-    freeHomeAnimStreaming();
-    gHomeAnimNextUs = 0;
-    gHomeAnimMinDelayUs = 0;
-    gHomeAnimFrameIndex = 0;
-    gHomeAnimPaused = false;
-    gHomeAnimLastGoodIndex = -1;
-    gHomeAnimStreaming = false;
-    gHomeAnimChunked = false;
-    clearHomeAnimChunks();
-    updateMsLedForHomeAnim();
+    // Clearing textures must also invalidate the index, otherwise lazy startup
+    // mistakes this for an already loaded animation and never reloads it.
+    resetHomeAnimationState(false);
 }
 
 
@@ -1270,6 +1269,8 @@ static void advanceHomeAnimationFrame() {
             if (gHomeAnimStreamTex) texFree(gHomeAnimStreamTex);
             gHomeAnimStreamTex = nextTex;
             gHomeAnimFrameIndex = nextIndex;
+        } else if (nextTex) {
+            texFree(nextTex);
         }
         // If load failed, keep showing current frame
 
@@ -2168,6 +2169,30 @@ static void setExecBaseOverrideFromAnimRoot(const std::string& animRoot) {
     setExecBaseOverrideFromAppDir(appDir);
 }
 
+static bool remapResourcePathUnderFolder(std::string& path, std::string from, std::string to) {
+    while (!from.empty() && from.back() == '/') from.pop_back();
+    while (!to.empty() && to.back() == '/') to.pop_back();
+    if (from.empty() || to.empty() || path.size() < from.size()) return false;
+    if (strncasecmp(path.c_str(), from.c_str(), from.size()) != 0) return false;
+    if (path.size() > from.size() && path[from.size()] != '/') return false;
+    path.replace(0, from.size(), to);
+    return true;
+}
+
+// Category sorting/prefix changes rename ancestor folders of the running app.
+// Keep resource paths current at the point of rename; a later home load must
+// not depend on USB's directory search to rediscover where the app moved.
+static void remapExecResourcesForFolderRename(const std::string& from, const std::string& to) {
+    std::string base = currentExecBaseDir();
+    if (!remapResourcePathUnderFolder(base, from, to)) return;
+    setExecBaseOverrideFromAppDir(base);
+    for (auto& entry : gHomeAnimEntries) remapResourcePathUnderFolder(entry.dir, from, to);
+    for (auto& frame : gHomeAnimStreamInfo) remapResourcePathUnderFolder(frame.path, from, to);
+    for (auto& dir : gPopAnimDirs) remapResourcePathUnderFolder(dir, from, to);
+    remapResourcePathUnderFolder(gPopAnimLoadedDir, from, to);
+    gHomeAnimRetryAtUs = 0;
+}
+
 static void disableHomeAnimationForUsb() {
     suspendHomeAnimation();
     // Keep entries but prevent auto-start so UI shows "Loading..."
@@ -2235,9 +2260,10 @@ struct FileOpsItem { const char* label; bool disabled; };
 class FileOpsMenu {
 public:
     FileOpsMenu(const char* title, const std::vector<FileOpsItem>& items,
-                int screenW, int screenH, int w, int h)
+                int screenW, int screenH, int w, int h, int spacingReduction = 0)
     : _title(title ? title : ""), _items(items), _screenW(screenW), _screenH(screenH) {
         _w = w; _h = h; _x = (_screenW - _w)/2; _y = (_screenH - _h)/2;
+        _spacingReduction = spacingReduction;
         if (!_items.empty() && _items[_sel].disabled) {
             for (int i = 0; i < (int)_items.size(); ++i) {
                 if (!_items[i].disabled) { _sel = i; break; }
@@ -2292,10 +2318,10 @@ public:
             intraFontPrint(font, (float)(_x + padX), (float)titleY, _title.c_str());
 
             // Divider directly under the title (no subtitle block).
-            const int hrY = titleY + 12;
+            const int hrY = titleY + 12 - _spacingReduction;
             _hFadeLine(_x + padX, hrY, _w - (padX * 2), 1, 0x90, 16, 0x00C0C0C0);
 
-            const int startY = hrY + 23;
+            const int startY = hrY + 23 - _spacingReduction;
             const int lineH  = 18;
             for (int i = 0; i < (int)_items.size(); ++i) {
                 bool sel = (i == _sel);
@@ -2415,6 +2441,7 @@ private:
     std::string _title;
     std::vector<FileOpsItem> _items;
     int _screenW{}, _screenH{};
+    int _spacingReduction = 0;
     int _x{}, _y{}, _w{}, _h{};
     int _sel = 0;
     bool _visible = true;
