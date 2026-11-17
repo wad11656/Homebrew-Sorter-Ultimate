@@ -35,31 +35,6 @@ Successor to [HomeBrew Sorter GUI](https://www.gamebrew.org/wiki/HomeBrew_Sorter
 
 ---
 
-#### Building on Windows (WSL Ubuntu)
-
-From PowerShell in this repository:
-
-```powershell
-wsl -d Ubuntu -- bash ./tools/build-psp.sh
-```
-
-The script defaults to `/home/wade/pspdev-machybrid` (under your WSL home):
-PSPDEV v20250101 / GCC 14.1.0 host tools with the target libraries restored
-from `pspdev-backup.tgz`, shared with the Spybotics-PSP build. It uses the
-existing installation; it does not download or upgrade the SDK. To use another
-installation, set `PSPDEV` in WSL before running the script. Pass `clean` to
-the script to remove build outputs.
-
-Build outputs are `app/EBOOT.PBP`, `build-nosound/EBOOT.PBP`,
-`fs_driver/fs_driver.prx`, and `launcher/EBOOT.PBP`. The main app can be
-packaged with `app/EBOOT.PBP` as `EBOOT.PBP`, `fs_driver/fs_driver.prx`
-beside it, and the `resources/` directory. The optional launcher expects the
-main app to be named `APP.PBP` beside its own `EBOOT.PBP`.
-
-Keep source files and scripts with LF line endings. The two reference images
-with angle brackets in their original names are named `Epinephrine_gt8.png`
-and `epinephrine_lt7.png` so they can be checked out on Windows.
-
 #### <ins>Installation</ins>:
 
 0. Make sure you have a CFW installed on your PSP to run Homebrew apps like this one. [ARK-5](https://github.com/PSP-Arkfive/ARK-5) is the most modern PSP CFW.
